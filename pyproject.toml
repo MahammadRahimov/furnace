@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "furnace"
+version = "0.1.0"
+description = "Standalone blocklist server that publishes EDL files for a Palo Alto firewall"
+requires-python = ">=3.10"
+dependencies = ["Flask>=2.2,<4", "gunicorn>=20.1,<24"]
+
+[project.scripts]
+furnace-admin = "furnace.admin:main"
+
+[tool.setuptools]
+packages = ["furnace"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

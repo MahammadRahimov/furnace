@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Secrets and real configuration - never commit
+config.env
+deploy/config.env
+*.env
+!config.env.example
+tokens.env
+*.token
+*.key
+*.pem
+*.crt
+*.csr
+*.p12
+*.pfx
+id_ed25519*
+id_rsa*
+
+# Data - never commit
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backups/
+*.bak
+archive*.csv
+data/
+*.report.txt
+*-report.txt
+
+# Local
+.idea/
+.vscode/
+*.log
