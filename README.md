@@ -145,6 +145,9 @@ tokens or the certificate. The log is in `/var/log/furnace-install.log`. It neve
 The program settings live in `/etc/furnace/furnace.env` (written by the install). They all start with `FURNACE_`:
 `FURNACE_ARCHIVE_AFTER_DAYS`, `FURNACE_MAX_IPS`, `FURNACE_MAX_DOMAINS`, `FURNACE_BACKUP_KEEP` (14),
 `FURNACE_CLEANUP_MAX_PERCENT` (20), `FURNACE_CLEANUP_MIN_SIZE` (100), `FURNACE_ALLOW_TEST_RANGES` (false).
+During the install self-test, test ranges are allowed for a few minutes by a file only root can create,
+`/run/furnace-state/selftest`. This avoids restarting the API. A restart could make keepalived move the shared IP.
+The file is removed after the test and is ignored when it is older than 10 minutes.
 The tokens `FURNACE_BLOCK_TOKEN` and `FURNACE_WHITELIST_TOKEN` are in `/etc/furnace/tokens.env`.
 If `FURNACE_WHITELIST_TOKEN` is empty, the block token is used for the whitelist too.
 Tokens must be at least 20 characters. The API does not start without a block token.
@@ -621,6 +624,9 @@ Logs: `journalctl -u furnace-api`, `/var/log/nginx/furnace-access.log`.
 
 **Upgrade:** copy the new `furnace` folder to the server (keep your `config.env`) and run `sudo ./install.sh`
 again. Do the follower first, then the leader. Data, tokens and the certificate are kept.
+The API is reloaded without downtime, and keepalived is restarted only if its settings changed, so an upgrade
+does not move the shared IP. If you change `config.env` values that affect keepalived (for example the
+priority or the password), the restart can move the shared IP to the other server. That is safe.
 
 **Uninstall:**
 
@@ -653,7 +659,26 @@ tests/integration/run.sh 22.04
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
+The integration test passed 37 of 37 checks on Ubuntu 22.04 and on Ubuntu 24.04 (v0.1.0). It covers:
+`install.sh --check`, refusing bad settings, leader and follower install, tokens and certificate copied through
+the bundle, the self-test, API and EDL access through the shared IP, nginx access rules (firewall only for EDLs,
+XSOAR only for the API, archive not served), replication both ways, the follower refusing changes, a second
+install that keeps data and tokens without moving the shared IP, both failover modes, the cleanup timer moving
+with the shared IP, and uninstall.
+
 ## 14. What was not tested
 
-See the end of the project hand-over notes. In short: a real Palo Alto firewall, a real XSOAR server, keepalived
-on real hardware or VMs (it was tested in Docker containers only), and long-running behaviour.
+Be aware of these limits before you go live:
+
+- **A real Palo Alto firewall.** The EDL download was tested with curl from a container. The PAN-OS menus in
+  this README come from documentation and may differ in your version.
+- **A real XSOAR server.** The API calls were tested with curl. XSOAR's own way to trust a certificate was not
+  tested.
+- **keepalived on real servers or VMs.** It was tested only in Docker containers on one host. Real switches,
+  VMware/Hyper-V port security, ARP behaviour and a real network outage (split brain) were not tested.
+- **A real power cut.** SQLite `synchronous=FULL` and atomic renames are designed for this, but it was not tested.
+- **Long running time.** No test ran for days. Audit log growth and backup rotation over months were not tested.
+- **Large real lists with the firewall.** 30,000-line imports were timed (about 2 seconds), but not loaded by a
+  firewall.
+- **Offline install with a `wheels` folder.** The code path exists but was not tested.
+- **`USE_HTTPS=no`** (HTTP test mode) and `HOST_FIREWALL=none` were not run in the integration test.
