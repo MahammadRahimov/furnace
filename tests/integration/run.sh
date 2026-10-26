@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Furnace integration test with Docker: two servers, a fake firewall and a fake XSOAR.
+# It builds the .deb, installs it like a user would, and answers the setup questions.
 # Only documentation addresses are used (192.0.2.0/24). Nothing real is touched.
 #
 #   tests/integration/run.sh [22.04|24.04]     run the test (default 24.04)
 #   KEEP=1 tests/integration/run.sh            leave the containers running afterwards
 #
 # Needs: docker, privileged containers (systemd, keepalived and ufw need them),
-# and internet access from the containers (apt and pip).
+# and internet access from the containers (apt).
 set -Eeuo pipefail
 export MSYS_NO_PATHCONV=1   # Git Bash on Windows: do not rewrite /paths
 
@@ -24,6 +25,7 @@ SHARED_IP=192.0.2.10
 FW_IP=192.0.2.50
 XSOAR_IP=192.0.2.60
 TEST_IP=198.51.100.77
+DEB="$ROOT/dist/furnace-test.deb"
 PASSED=0
 FAILED=0
 
@@ -32,6 +34,8 @@ pass() { printf '  PASS  %s\n' "$*"; PASSED=$((PASSED + 1)); }
 fail() { printf '  FAIL  %s\n' "$*"; FAILED=$((FAILED + 1)); }
 check() { local name="$1"; shift; if "$@"; then pass "$name"; else fail "$name"; fi; }
 on() { local box="$1"; shift; docker exec "$box" bash -c "$*"; }
+put() { docker exec -i "$1" bash -c "cat > '$2'"; }   # put BOX PATH < local data
+copy_between() { docker exec "$1" cat "$2" | put "$3" "$4"; }
 
 remove_lab() {
     docker rm -f "$LEADER" "$FOLLOWER" "$FW" "$XSOAR" >/dev/null 2>&1 || true
@@ -46,9 +50,14 @@ teardown() {
 }
 trap teardown EXIT
 
-step "Build the test image (Ubuntu $UBUNTU with systemd)"
+step "Build the test image (Ubuntu $UBUNTU with systemd) and the .deb package"
 BUILD_DIR="$(cd "$ROOT/tests/integration" && (pwd -W 2>/dev/null || pwd))"  # pwd -W: Windows path in Git Bash
-docker build -q --build-arg "UBUNTU=$UBUNTU" -t "$IMAGE" "$BUILD_DIR" >/dev/null
+docker build -q --load --build-arg "UBUNTU=$UBUNTU" -t "$IMAGE" "$BUILD_DIR" >/dev/null
+mkdir -p "$ROOT/dist"
+tar -C "$ROOT" --exclude=.git --exclude=__pycache__ --exclude=.pytest_cache --exclude=dist -cf - . \
+    | docker run -i --rm "ubuntu:$UBUNTU" bash -c \
+        'mkdir /src && tar -xf - -C /src && /src/packaging/build-deb.sh /out >/dev/null && cat /out/*.deb' > "$DEB"
+check "the package was built" test -s "$DEB"
 remove_lab
 docker network create --subnet 192.0.2.0/24 --gateway 192.0.2.1 "$NET" >/dev/null
 
@@ -68,75 +77,92 @@ for box in "$LEADER" "$FOLLOWER" "$FW" "$XSOAR"; do
     done
 done
 
-copy_project() {
-    docker exec "$1" mkdir -p /root/furnace
-    tar -C "$ROOT" --exclude=.git --exclude=__pycache__ --exclude=.pytest_cache -cf - . \
-        | docker exec -i "$1" tar -xf - -C /root/furnace
-}
+step "Install the package on both servers (apt install ./furnace.deb)"
+for box in "$LEADER" "$FOLLOWER"; do
+    put "$box" /root/furnace.deb < "$DEB"
+    put "$box" /root/answer.py < "$ROOT/tests/integration/answer.py"
+    out="$(on "$box" "apt-get update -qq >/dev/null && apt-get install -y -qq /root/furnace.deb 2>&1")"
+    check "$box: apt installed the package and its dependencies" on "$box" "dpkg -s furnace | grep -q '^Status: install ok installed'"
+    check "$box: the install tells the user to run setup" grep -q "sudo furnace setup" <<< "$out"
+done
+check "the furnace command works" on "$LEADER" "furnace version | grep -qx '[0-9.]*'"
+check "the install starts nothing before setup" on "$LEADER" "! systemctl is-active --quiet furnace-api && ! test -e /etc/furnace/setup.conf"
+out="$(on "$LEADER" "furnace status 2>&1" || true)"
+check "status says that setup is still needed" grep -q "not set up yet" <<< "$out"
 
-write_config() {
-    local box="$1" role="$2" this="$3" peer="$4"
-    docker exec -i "$box" bash -c 'cat > /root/furnace/config.env' <<EOF
-ROLE=$role
-THIS_IP=$this
-PEER_IP=$peer
+step "setup --check and bad settings"
+put "$LEADER" /root/leader.env <<EOF
+ROLE=leader
+PEER_IP=$FOLLOWER_IP
 SHARED_IP=$SHARED_IP
-SHARED_IP_PREFIX=24
-INTERFACE=eth0
 XSOAR_IP=$XSOAR_IP
 FIREWALL_IP=$FW_IP
-ARCHIVE_AFTER_DAYS=30
-KEEPALIVED_PASSWORD=Tst1pass
-VRRP_ROUTER_ID=51
-USE_HTTPS=yes
-MAX_IPS=50000
-MAX_DOMAINS=50000
-SSH_ALLOW_FROM=any
-HOST_FIREWALL=ufw
 EOF
-}
-
-copy_project "$LEADER"
-copy_project "$FOLLOWER"
-write_config "$LEADER" leader "$LEADER_IP" "$FOLLOWER_IP"
-write_config "$FOLLOWER" follower "$FOLLOWER_IP" "$LEADER_IP"
-
-step "install.sh --check on the leader (must change nothing)"
-on "$LEADER" "cd /root/furnace && ./install.sh --check"
-check "--check created no folders" on "$LEADER" "! test -e /etc/furnace && ! test -e /opt/furnace"
-
-step "Bad settings are refused with a clear message"
-on "$LEADER" "cd /root/furnace && sed 's/^ROLE=.*/ROLE=boss/' config.env > bad.env"
-out="$(on "$LEADER" "cd /root/furnace && ./install.sh --config bad.env 2>&1" || true)"
+on "$LEADER" "furnace setup --check --config /root/leader.env"
+check "--check created no secrets and no settings" on "$LEADER" "! test -e /etc/furnace/tokens.env && ! test -e /etc/furnace/setup.conf"
+on "$LEADER" "sed 's/^ROLE=.*/ROLE=boss/' /root/leader.env > /root/bad.env"
+out="$(on "$LEADER" "furnace setup --config /root/bad.env 2>&1" || true)"
 check "wrong ROLE refused" grep -q "ROLE must be 'leader' or 'follower'" <<< "$out"
-on "$LEADER" "cd /root/furnace && rm -f bad.env"
+on "$FOLLOWER" "printf 'ROLE=follower\n' > /root/follower.env"
+out="$(on "$FOLLOWER" "furnace setup --config /root/follower.env 2>&1" || true)"
+check "a follower without the leader bundle is refused" grep -q "needs furnace-peer-bundle.tar.gz" <<< "$out"
 
-step "Install the leader"
-on "$LEADER" "cd /root/furnace && ./install.sh" </dev/null
+step "Set up the leader by answering the questions"
+TAB=$'\t'
+put "$LEADER" /root/answers.txt <<EOF
+leader or the follower?${TAB}
+Network card [${TAB}
+This server's IP [${TAB}
+The other Furnace server's IP:${TAB}999.1.1.1
+The other Furnace server's IP:${TAB}$FOLLOWER_IP
+Shared IP:${TAB}$SHARED_IP
+Network prefix${TAB}
+XSOAR IP that may call the API:${TAB}$XSOAR_IP
+Firewall IP that downloads${TAB}$FW_IP
+Most entries per list${TAB}
+Days an IP stays${TAB}
+VRRP router ID (1-255)${TAB}
+SSH allowed from${TAB}
+own firewall (ufw)?${TAB}
+Set up Furnace with these settings?${TAB}y
+EOF
+out="$(on "$LEADER" "python3 /root/answer.py /root/answers.txt -- furnace setup" 2>&1)" && rc=0 || rc=$?
+printf '%s\n' "$out"
+check "leader setup finished with the self-test passed" [ "$rc" = 0 ]
+check "a wrong answer is explained and asked again" grep -q "PEER_IP '999.1.1.1' is not a valid IPv4 address" <<< "$out"
+check "the API tokens were shown once" grep -q "API TOKENS (shown only once)" <<< "$out"
+check "the network card and IP were found automatically" on "$LEADER" "grep -qx 'INTERFACE=eth0' /etc/furnace/setup.conf && grep -qx 'THIS_IP=$LEADER_IP' /etc/furnace/setup.conf"
+check "a keepalived password was created" on "$LEADER" "grep -Eqx 'KEEPALIVED_PASSWORD=[A-Za-z0-9]{8}' /etc/furnace/setup.conf"
+check "the saved settings are readable by root only" on "$LEADER" "[ \"\$(stat -c '%U %a' /etc/furnace/setup.conf)\" = 'root 600' ]"
 check "leader owns the shared IP" on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 check "tokens file readable only by furnace" on "$LEADER" "[ \"\$(stat -c '%U %a' /etc/furnace/tokens.env)\" = 'furnace 400' ]"
-check "no token in the install log" on "$LEADER" "! grep -q -f <(cut -d= -f2 /etc/furnace/tokens.env) /var/log/furnace-install.log"
+check "no token in the setup log" on "$LEADER" "! grep -q -f <(cut -d= -f2 /etc/furnace/tokens.env) /var/log/furnace-setup.log"
 check "cleanup timer runs on the leader" on "$LEADER" "systemctl is-active --quiet furnace-cleanup.timer"
 
-step "Install the follower (bundle copied from the leader)"
-docker cp "$LEADER:/root/furnace-peer-bundle.tar.gz" ./furnace-peer-bundle.tar.gz
-docker cp ./furnace-peer-bundle.tar.gz "$FOLLOWER:/root/furnace/furnace-peer-bundle.tar.gz"
-rm -f ./furnace-peer-bundle.tar.gz
-on "$FOLLOWER" "cd /root/furnace && ./install.sh" </dev/null
+step "Set up the follower (bundle copied from the leader, only two questions)"
+copy_between "$LEADER" /root/furnace-peer-bundle.tar.gz "$FOLLOWER" /root/furnace-peer-bundle.tar.gz
+put "$FOLLOWER" /root/answers.txt <<EOF
+leader or the follower?${TAB}follower
+Network card [${TAB}
+Set up Furnace with these settings?${TAB}y
+EOF
+out="$(on "$FOLLOWER" "python3 /root/answer.py /root/answers.txt -- furnace setup" 2>&1)" && rc=0 || rc=$?
+printf '%s\n' "$out"
+check "follower setup finished with the self-test passed" [ "$rc" = 0 ]
+check "follower took its settings from the bundle" on "$FOLLOWER" "grep -qx 'THIS_IP=$FOLLOWER_IP' /etc/furnace/setup.conf && grep -qx 'PEER_IP=$LEADER_IP' /etc/furnace/setup.conf && grep -qx 'XSOAR_IP=$XSOAR_IP' /etc/furnace/setup.conf"
+check "same keepalived password on both" [ "$(on "$LEADER" 'grep ^KEEPALIVED_PASSWORD= /etc/furnace/setup.conf')" = "$(on "$FOLLOWER" 'grep ^KEEPALIVED_PASSWORD= /etc/furnace/setup.conf')" ]
 check "follower does not own the shared IP" on "$FOLLOWER" "! ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
-check "bundle deleted on the follower" on "$FOLLOWER" "! test -e /root/furnace/furnace-peer-bundle.tar.gz"
+check "bundle deleted on the follower" on "$FOLLOWER" "! test -e /root/furnace-peer-bundle.tar.gz"
 check "same certificate on both" [ "$(on "$LEADER" 'sha256sum < /etc/furnace/tls/furnace.crt')" = "$(on "$FOLLOWER" 'sha256sum < /etc/furnace/tls/furnace.crt')" ]
 check "same tokens on both" [ "$(on "$LEADER" 'sha256sum < /etc/furnace/tokens.env')" = "$(on "$FOLLOWER" 'sha256sum < /etc/furnace/tokens.env')" ]
 check "cleanup timer stopped on the follower" on "$FOLLOWER" "! systemctl is-active --quiet furnace-cleanup.timer"
 
 TOKEN="$(on "$LEADER" "grep ^FURNACE_BLOCK_TOKEN= /etc/furnace/tokens.env | cut -d= -f2-")"
 for box in "$FW" "$XSOAR"; do
-    docker cp "$LEADER:/etc/furnace/tls/furnace.crt" ./furnace.crt
-    docker cp ./furnace.crt "$box:/root/furnace.crt"
-    rm -f ./furnace.crt
+    copy_between "$LEADER" /etc/furnace/tls/furnace.crt "$box" /root/furnace.crt
 done
 # The lab uses test addresses for everything. Allow them with the root-owned self-test
-# flag (valid 10 minutes), the same way install.sh does, so the API is never restarted.
+# flag (valid 10 minutes), the same way setup does, so the API is never restarted.
 lab_allow_test_ranges() {
     for box in "$LEADER" "$FOLLOWER"; do on "$box" "touch /run/furnace-state/selftest"; done
 }
@@ -175,18 +201,28 @@ r="$(docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization:
      -d '{"ip":"198.51.100.78"}' -w ' %{http_code}' "https://$FOLLOWER_IP/api/v1/ips" | tr -d '\n')"
 check "the follower refuses changes (503 not_leader)" grep -q 'not_leader.* 503$' <<< "$r"
 
-step "A second install run keeps data and tokens"
+step "The furnace command: status and import"
+check "status is fine on the leader" on "$LEADER" "furnace status"
+check "status is fine on the follower" on "$FOLLOWER" "furnace status"
+on "$LEADER" "printf '198.51.100.90\n' > /root/import.txt && chmod 600 /root/import.txt"
+check "import from a file only root can read" on "$LEADER" "furnace import-ips /root/import.txt"
+check "the imported IP is served" grep -qx "198.51.100.90" <<< "$(edl blocklist.txt)"
+
+step "Package upgrade (apt install --reinstall) keeps data and tokens"
 before_tokens="$(on "$LEADER" 'sha256sum < /etc/furnace/tokens.env')"
-on "$LEADER" "cd /root/furnace && ./install.sh" </dev/null
+out="$(on "$LEADER" "apt-get install -y -qq --reinstall /root/furnace.deb 2>&1")"
+printf '%s\n' "$out" | tail -n 5
 lab_allow_test_ranges
+check "the upgrade ran setup with the saved settings" grep -q "self-test passed" <<< "$out"
+check "the upgrade did not ask questions or show tokens" bash -c '! grep -q "API TOKENS" <<< "$1"' _ "$out"
 check "tokens unchanged" [ "$before_tokens" = "$(on "$LEADER" 'sha256sum < /etc/furnace/tokens.env')" ]
 check "the leader still owns the shared IP (no failover during upgrade)" on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 check "the IP is still blocked" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
-check "furnace-admin works" on "$LEADER" "furnace-admin stats | grep -q 'active ips *1'"
+check "furnace stats works" on "$LEADER" "furnace stats | grep -q 'active ips *2'"
 
 step "Failover: stop keepalived on the leader"
 lab_allow_test_ranges
-on "$LEADER" "/opt/furnace/bin/furnace-failover-test" && pass "failover test script (machine down)" || fail "failover test script (machine down)"
+on "$LEADER" "furnace failover-test" && pass "failover test (machine down)" || fail "failover test (machine down)"
 check "the follower now owns the shared IP" on "$FOLLOWER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 check "the cleanup timer moved to the follower" on "$FOLLOWER" "systemctl is-active --quiet furnace-cleanup.timer"
 check "the old leader stopped its cleanup timer" on "$LEADER" "! systemctl is-active --quiet furnace-cleanup.timer"
@@ -201,13 +237,18 @@ done
 check "replication now runs the other way" [ "$ok" = 1 ]
 
 step "Failover: break the web service on the new leader (health check)"
-on "$FOLLOWER" "/opt/furnace/bin/furnace-failover-test --web" && pass "failover test script (web service down)" || fail "failover test script (web service down)"
+on "$FOLLOWER" "furnace failover-test --web" && pass "failover test (web service down)" || fail "failover test (web service down)"
 check "the shared IP is back on the first server" on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 
-step "Uninstall (keeps data) on the follower"
-on "$FOLLOWER" "/opt/furnace/uninstall.sh --yes"
-check "program removed" on "$FOLLOWER" "! test -e /opt/furnace"
-check "database kept" on "$FOLLOWER" "test -f /var/lib/furnace/furnace.db"
+step "Uninstall on the follower: apt remove keeps the data, apt purge deletes it"
+on "$FOLLOWER" "apt-get remove -y -qq furnace >/dev/null 2>&1"
+check "program removed" on "$FOLLOWER" "! test -e /usr/lib/furnace && ! command -v furnace"
+check "services stopped" on "$FOLLOWER" "! systemctl is-active --quiet furnace-api && ! systemctl is-active --quiet keepalived"
+check "nginx site removed" on "$FOLLOWER" "! test -e /etc/nginx/sites-enabled/furnace"
+check "database and tokens kept" on "$FOLLOWER" "test -f /var/lib/furnace/furnace.db && test -f /etc/furnace/tokens.env"
+on "$FOLLOWER" "apt-get purge -y -qq furnace >/dev/null 2>&1"
+check "purge deleted the data and the users" on "$FOLLOWER" "! test -e /var/lib/furnace && ! test -e /etc/furnace && ! id furnace >/dev/null 2>&1"
+check "the leader keeps working" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
 
 printf '\n%s passed, %s failed (Ubuntu %s)\n' "$PASSED" "$FAILED" "$UBUNTU"
 [ "$FAILED" -eq 0 ]
