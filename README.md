@@ -15,10 +15,10 @@ The firewall keeps downloading the lists from Furnace.
 1. [How it works](#1-how-it-works)
 2. [What you need](#2-what-you-need)
 3. [Install](#3-install)
-4. [Settings in config.env](#4-settings-in-configenv)
+4. [Setup questions and settings](#4-setup-questions-and-settings)
 5. [Checklist of manual work](#5-checklist-of-manual-work)
 6. [API guide for the XSOAR engineer](#6-api-guide-for-the-xsoar-engineer)
-7. [Daily admin work (furnace-admin)](#7-daily-admin-work-furnace-admin)
+7. [Daily admin work (the furnace command)](#7-daily-admin-work-the-furnace-command)
 8. [Rules for IPs, domains and the whitelist](#8-rules-for-ips-domains-and-the-whitelist)
 9. [The nightly cleanup and the archive](#9-the-nightly-cleanup-and-the-archive)
 10. [Two servers: leader and follower](#10-two-servers-leader-and-follower)
@@ -54,98 +54,143 @@ Technology: Ubuntu 22.04 or 24.04, Python 3 with Flask, gunicorn, SQLite in WAL 
 
 - Two Ubuntu servers (22.04 or 24.04) in the same network segment. One is enough for a lab.
 - Three IP addresses in that segment: one per server and one **shared IP** (VIP, virtual IP).
-- The servers need packages from the Ubuntu repositories and from PyPI (the Python Package Index),
-  or a proxy. Offline install: put wheel files in a folder named `wheels` next to `install.sh`.
+- The servers need the Ubuntu package mirror (directly, through a proxy, or a local mirror). apt installs
+  nginx, keepalived, Flask and gunicorn from there. PyPI (the Python Package Index) is not needed.
 - The IP address the firewall uses to download EDLs, and the IP address of XSOAR.
 
 ## 3. Install
 
-Install the **leader** first, then the **follower**.
+You need one file: `furnace_<version>_all.deb`. The same file works on Ubuntu 22.04 and 24.04.
+The examples below use version 0.2.0.
 
-### 3.1 Leader
+### 3.1 Get the package
 
-1. Copy the whole `furnace` folder to the server, for example to `/root/furnace`.
-2. Create the settings file:
+- **Download it** from the GitHub releases page: <https://github.com/MahammadRahimov/furnace/releases>.
+  The repository is private, so log in to GitHub first. Or, with the GitHub command line tool:
+  ```bash
+  gh release download v0.2.0 -R MahammadRahimov/furnace -p '*.deb'
+  ```
+- **Or build it yourself** on Ubuntu or WSL: `packaging/build-deb.sh`. The file lands in `dist/`.
+- Copy it to both servers, for example: `scp furnace_0.2.0_all.deb you@SERVER_IP:~/`
+
+### 3.2 Leader
+
+1. Install the package:
    ```bash
-   cd /root/furnace
-   cp config.env.example config.env
-   nano config.env          # set ROLE=leader and your real IPs
+   sudo apt install ./furnace_0.2.0_all.deb
    ```
-3. See what the install would do. This changes nothing:
+   apt also installs what Furnace needs from Ubuntu: nginx, keepalived, Flask, gunicorn and a few tools.
+   Nothing starts yet.
+2. Set it up:
    ```bash
-   sudo ./install.sh --check
+   sudo furnace setup
    ```
-4. Install:
-   ```bash
-   sudo ./install.sh
+   Setup asks the questions from [section 4](#4-setup-questions-and-settings). Press Enter to take the answer in
+   [brackets]. A wrong answer is explained and asked again. At the end you see all answers and confirm them.
+   Example (fake addresses):
    ```
-5. The script shows the two **API tokens once** at the end. Store them in the XSOAR credentials store.
-   They are not written to the install log. You can read them later with `sudo cat /etc/furnace/tokens.env`.
-6. The script writes `/root/furnace-peer-bundle.tar.gz`. It holds the tokens, the certificate and the replication
-   key. It is secret. You copy it to the follower in the next step.
+   Is this server the leader or the follower? [leader]:
+   Network card [eth0]:
+   This server's IP [192.0.2.11]:
+   The other Furnace server's IP: 192.0.2.12
+   Shared IP: 192.0.2.10
+   Network prefix of the shared IP (24 = 255.255.255.0) [24]:
+   XSOAR IP that may call the API: 198.51.100.20
+   Firewall IP that downloads the lists (often the management IP): 198.51.100.1
+   Most entries per list [50000]:
+   Days an IP stays blocked before it moves to the archive [30]:
+   VRRP router ID (1-255) [51]:
+   SSH allowed from [any]:
+   Let Furnace set up this server's own firewall (ufw)? [yes]:
+   Set up Furnace with these settings? [yes]:
+   ```
+3. Setup configures and starts everything, then runs a self-test.
+4. It shows the two **API tokens once** at the end. Store them in the XSOAR credentials store.
+   They are not written to the log. You can read them later with `sudo cat /etc/furnace/tokens.env`.
+5. It writes `/root/furnace-peer-bundle.tar.gz` for the follower. It holds the tokens, the certificate, the
+   replication key and the leader's settings. It is secret.
 
-### 3.2 Follower
+### 3.3 Follower
 
-1. Copy the `furnace` folder to the second server.
-2. Create `config.env`. Use `ROLE=follower`. Swap `THIS_IP` and `PEER_IP`. All other values stay the same,
-   including `KEEPALIVED_PASSWORD` and `VRRP_ROUTER_ID`.
-3. Copy the bundle from the leader into the `furnace` folder (or your home folder) on the follower:
+1. Copy the bundle from the leader to the follower:
    ```bash
    # on the leader
    sudo scp /root/furnace-peer-bundle.tar.gz you@FOLLOWER_IP:~/
    ```
-4. Install:
+2. On the follower, install the package and run setup:
    ```bash
-   sudo ./install.sh
+   sudo apt install ./furnace_0.2.0_all.deb
+   sudo furnace setup
    ```
-   The script copies the secrets from the bundle and then deletes the bundle file on the follower.
-5. Delete the bundle copy wherever else you put it. Keep the one in `/root` on the leader only if you want to
-   reinstall the follower later.
+3. Answer `follower`. Setup finds the bundle in your home folder, in `/root` or in `/tmp`, or asks where it is.
+   It takes all shared settings from the leader, so it asks only for the network card. Then it deletes the bundle.
+4. Delete the bundle copy wherever else you put it. Keep the one in `/root` on the leader only if you want to set
+   up the follower again later.
 
-### 3.3 What the install script does
+### 3.4 Setup without questions
+
+For automation, give the answers in a file:
+
+```bash
+cp /usr/share/doc/furnace/config.env.example config.env
+nano config.env
+sudo furnace setup --config config.env
+```
+
+For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is not in one of the usual places.
+
+`sudo furnace setup --check` shows what setup would do and changes nothing.
+
+### 3.5 What setup does
 
 - Stops at the first error (strict mode) and tells you what went wrong.
-- Checks that it runs as root on Ubuntu 22.04 or 24.04.
-- Checks every value in `config.env` and stops with a clear message if one is wrong.
-- Installs the packages: `python3-venv nginx keepalived openssl curl ufw openssh-server sqlite3`.
+- Checks that it runs as root on Ubuntu 22.04 or 24.04, and checks every answer.
+- Saves the answers in `/etc/furnace/setup.conf` (readable by root only, it holds the keepalived password).
 - Creates the user `furnace` (no login) and the user `furnace-sync` (can only receive replication snapshots).
-- Creates a Python virtual environment in `/opt/furnace/venv` and installs Furnace into it.
-- Leader: creates both API tokens, a self-signed certificate (10 years, names the shared IP and both server IPs)
-  and the replication SSH key. Follower: copies them from the bundle.
-- Writes the nginx, systemd and keepalived files from the templates in `deploy/`.
+- Leader: creates both API tokens, a self-signed certificate (10 years, names the shared IP and both server IPs),
+  the replication SSH key and the keepalived password. Follower: copies them from the bundle.
+- Writes the nginx and keepalived files from the templates in `/usr/lib/furnace/templates`.
 - Opens only the needed ports on the host firewall (ufw): HTTPS, SSH, and VRRP (protocol 112) between the servers.
 - Starts everything and runs a **self-test**: it adds the fake IP `192.0.2.123`, checks that nginx serves it in
   `blocklist.txt`, removes it, and checks that it is gone. It also checks that the archive and the database are
   not served, and that the API refuses calls without a token.
 - Prints a summary of what worked and what you still must do by hand.
 
-**Safe to run again.** A second run upgrades the program. It never wipes the database and never changes the
-tokens or the certificate. The log is in `/var/log/furnace-install.log`. It never contains secrets.
+**Safe to run again.** Run `sudo furnace setup` again to change an answer. The brackets show the current answers.
+It never wipes the database and never changes the tokens or the certificate.
+The log is in `/var/log/furnace-setup.log`. It never contains secrets.
 
-## 4. Settings in config.env
+## 4. Setup questions and settings
 
-| Setting | Example | Meaning |
-|---|---|---|
-| `ROLE` | `leader` | `leader` (preferred leader, keepalived priority 150) or `follower` (priority 100). |
-| `THIS_IP` | `192.0.2.11` | This server's IP. It must be set on `INTERFACE`. |
-| `PEER_IP` | `192.0.2.12` | The other Furnace server. |
-| `SHARED_IP` | `192.0.2.10` | The shared IP. The firewall and XSOAR always use this address. |
-| `SHARED_IP_PREFIX` | `24` | Network prefix of the shared IP. |
-| `INTERFACE` | `eth0` | Network card name. See `ip -br addr`. |
-| `XSOAR_IP` | `198.51.100.20` | XSOAR address(es) that may call the API. Comma-separated list allowed. |
-| `FIREWALL_IP` | `198.51.100.1` | Address(es) the firewall downloads from. For a firewall HA pair, list both. |
-| `ARCHIVE_AFTER_DAYS` | `30` | Days an IP stays active before the nightly job archives it. |
-| `KEEPALIVED_PASSWORD` | (6-8 chars) | VRRP (Virtual Router Redundancy Protocol) password. Same on both servers. |
-| `VRRP_ROUTER_ID` | `51` | 1-255. Same on both servers. Must be unique in the network segment. |
-| `USE_HTTPS` | `yes` | `yes` = HTTPS (default). `no` = plain HTTP, for a test lab only. |
-| `MAX_IPS` / `MAX_DOMAINS` | `50000` | The firewall's EDL limit. Adds beyond it are refused. 0 = no limit. |
-| `SSH_ALLOW_FROM` | `any` | Who may use SSH. `any` or a list of IPs. The other server is always allowed. |
-| `HOST_FIREWALL` | `ufw` | `ufw` = configure the host firewall. `none` = leave it alone. |
+Each question saves one setting in `/etc/furnace/setup.conf`. The same names are used in a settings file for
+`furnace setup --config`.
 
-The program settings live in `/etc/furnace/furnace.env` (written by the install). They all start with `FURNACE_`:
+| Question | Setting | Default | Meaning |
+|---|---|---|---|
+| Leader or follower? | `ROLE` | `leader` | `leader` (preferred leader, keepalived priority 150) or `follower` (priority 100). |
+| Network card | `INTERFACE` | card of the default route | Card that carries this server's IP and the shared IP. See `ip -br addr`. |
+| This server's IP | `THIS_IP` | first IP of the card | It must be set on that card. |
+| The other server's IP | `PEER_IP` | | The other Furnace server. |
+| Shared IP | `SHARED_IP` | | The shared IP (VIP, virtual IP). The firewall and XSOAR always use this address. |
+| Network prefix | `SHARED_IP_PREFIX` | prefix of this server's IP | For example 24 for 255.255.255.0. |
+| XSOAR IP | `XSOAR_IP` | | XSOAR address(es) that may call the API. Comma-separated list allowed. |
+| Firewall IP | `FIREWALL_IP` | | Address(es) the firewall downloads from. For a firewall HA pair, list both. |
+| Most entries per list | `MAX_IPS`, `MAX_DOMAINS` | `50000` | The firewall's EDL limit. Adds beyond it are refused. 0 = no limit. The question sets both; a settings file can set them apart. |
+| Days before the archive | `ARCHIVE_AFTER_DAYS` | `30` | Days an IP stays active before the nightly job archives it. |
+| VRRP router ID | `VRRP_ROUTER_ID` | `51` | 1-255. Same on both servers. Must be unique in the network segment. |
+| SSH allowed from | `SSH_ALLOW_FROM` | `any` | Who may use SSH. `any` or a list of IPs. The other server is always allowed. |
+| Set up ufw? | `HOST_FIREWALL` | `ufw` | `ufw` = configure the host firewall. `none` = leave it alone. |
+| (not asked) | `KEEPALIVED_PASSWORD` | random | VRRP (Virtual Router Redundancy Protocol) password, 6-8 characters. Created on the leader. The follower gets it from the bundle. |
+| (not asked) | `USE_HTTPS` | `yes` | `yes` = HTTPS. `no` = plain HTTP, for a test lab only (settings file only). |
+
+The follower takes `SHARED_IP`, `SHARED_IP_PREFIX`, `XSOAR_IP`, `FIREWALL_IP`, `MAX_IPS`, `MAX_DOMAINS`,
+`ARCHIVE_AFTER_DAYS`, `KEEPALIVED_PASSWORD`, `VRRP_ROUTER_ID` and `USE_HTTPS` from the leader. If you change one of
+them later, run `sudo furnace setup` on both servers with the same answer.
+
+The program settings live in `/etc/furnace/furnace.env` (written by setup). They all start with `FURNACE_`:
 `FURNACE_ARCHIVE_AFTER_DAYS`, `FURNACE_MAX_IPS`, `FURNACE_MAX_DOMAINS`, `FURNACE_BACKUP_KEEP` (14),
 `FURNACE_CLEANUP_MAX_PERCENT` (20), `FURNACE_CLEANUP_MIN_SIZE` (100), `FURNACE_ALLOW_TEST_RANGES` (false).
-During the install self-test, test ranges are allowed for a few minutes by a file only root can create,
+During the setup self-test, test ranges are allowed for a few minutes by a file only root can create,
 `/run/furnace-state/selftest`. This avoids restarting the API. A restart could make keepalived move the shared IP.
 The file is removed after the test and is ignored when it is older than 10 minutes.
 The tokens `FURNACE_BLOCK_TOKEN` and `FURNACE_WHITELIST_TOKEN` are in `/etc/furnace/tokens.env`.
@@ -154,7 +199,7 @@ Tokens must be at least 20 characters. The API does not start without a block to
 
 ## 5. Checklist of manual work
 
-The install cannot do these things for you.
+Setup cannot do these things for you.
 
 ### 5.1 Network access
 
@@ -210,7 +255,7 @@ If both Furnace servers are down, the firewall keeps using the last list it down
 
 ### 5.5 After both servers are installed
 
-- [ ] Run the failover test on the leader: `sudo /opt/furnace/bin/furnace-failover-test`.
+- [ ] Run the failover test on the leader: `sudo furnace failover-test`.
 - [ ] Check the cleanup timer runs only on the server with the shared IP: `systemctl status furnace-cleanup.timer`.
 - [ ] Keep `/root/furnace-peer-bundle.tar.gz` safe or delete it.
 
@@ -469,19 +514,24 @@ IPs). XSOAR cannot reach it. It is for keepalived and the admins.
 
 ---
 
-## 7. Daily admin work (furnace-admin)
+## 7. Daily admin work (the furnace command)
 
-Run the admin command with sudo on the server that owns the shared IP. It runs as the `furnace` user.
-Files you import must be readable by that user, for example in `/tmp` or `/var/lib/furnace/reports`.
+Run `furnace` with sudo on the server that owns the shared IP. `sudo furnace help` lists all commands.
+The data commands run as the `furnace` user. A file to import that this user cannot read (for example in
+`/root`) is copied to a temporary folder first, so any path works.
 
 ```bash
-sudo furnace-admin stats                       # counts, dates, sizes, role
-sudo furnace-admin rebuild                     # rebuild blocklist.txt, domains.txt and archive.csv from the database
-sudo furnace-admin backup [--keep N]           # SQLite backup, keeps the newest N (default 14)
-sudo furnace-admin cleanup --dry-run           # what the nightly job would archive
-sudo furnace-admin cleanup [--force]           # run it now (--force skips the safety stop)
-sudo furnace-admin export ips -o /tmp/ips.csv  # also: archive, domains, whitelist-ips, whitelist-domains, audit
-sudo furnace-admin check-config                # show the settings (never the tokens)
+sudo furnace status                     # role, shared IP, services and counts; exit code 1 if something is wrong
+```
+
+```bash
+sudo furnace stats                       # counts, dates, sizes, role
+sudo furnace rebuild                     # rebuild blocklist.txt, domains.txt and archive.csv from the database
+sudo furnace backup [--keep N]           # SQLite backup, keeps the newest N (default 14)
+sudo furnace cleanup --dry-run           # what the nightly job would archive
+sudo furnace cleanup [--force]           # run it now (--force skips the safety stop)
+sudo furnace export ips -o /tmp/ips.csv  # also: archive, domains, whitelist-ips, whitelist-domains, audit
+sudo furnace check-config                # show the settings (never the tokens)
 ```
 
 A database backup also runs every day at 01:30 (`furnace-backup.timer`).
@@ -489,8 +539,8 @@ A database backup also runs every day at 01:30 (`furnace-backup.timer`).
 ### 7.1 Import IPs
 
 ```bash
-sudo furnace-admin import-ips /tmp/old-list.csv --dry-run     # check first, change nothing
-sudo furnace-admin import-ips /tmp/old-list.csv
+sudo furnace import-ips /tmp/old-list.csv --dry-run     # check first, change nothing
+sudo furnace import-ips /tmp/old-list.csv
 ```
 
 - Line formats: `ip`, `ip,date` or `ip,date,reason`.
@@ -515,9 +565,9 @@ sudo furnace-admin import-ips /tmp/old-list.csv
 ### 7.2 Import domains and whitelists
 
 ```bash
-sudo furnace-admin import-domains /tmp/domains.txt [--dry-run]            # domain or domain,reason
-sudo furnace-admin import-whitelist-ips /tmp/wl-ips.txt [--dry-run]       # IPs and CIDR ranges
-sudo furnace-admin import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
+sudo furnace import-domains /tmp/domains.txt [--dry-run]            # domain or domain,reason
+sudo furnace import-whitelist-ips /tmp/wl-ips.txt [--dry-run]       # IPs and CIDR ranges
+sudo furnace import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
 ```
 
 ## 8. Rules for IPs, domains and the whitelist
@@ -526,7 +576,7 @@ sudo furnace-admin import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
 - Single public IPs only (IPv4 and IPv6).
 - Refused: ranges, private, loopback, link-local, shared (100.64.0.0/10), multicast, reserved.
 - The documentation ranges 192.0.2.0/24, 198.51.100.0/24 and 203.0.113.0/24 are refused unless
-  `FURNACE_ALLOW_TEST_RANGES=true` (tests and the install self-test only).
+  `FURNACE_ALLOW_TEST_RANGES=true` (tests and the setup self-test only).
 - Refused when on the whitelist.
 - Already active: nothing changes, the old date is kept, and the answer says so.
 - In the archive and added again: it moves back to the active list with a new date. An IP is never in both.
@@ -554,8 +604,8 @@ sudo furnace-admin import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
 - The archive CSV is only storage. It is not an EDL. nginx never serves it.
 - **Safety stop:** if one run would remove more than 20 percent of the list, and the list has at least 100 IPs,
   the job changes nothing, writes an audit entry and exits with code 3. systemd marks the run as failed.
-  Check the dates. If the removal is correct, run `sudo furnace-admin cleanup --force`.
-- `sudo furnace-admin cleanup --dry-run` shows what would move.
+  Check the dates. If the removal is correct, run `sudo furnace cleanup --force`.
+- `sudo furnace cleanup --dry-run` shows what would move.
 - Logs: `journalctl -u furnace-cleanup`.
 
 ## 10. Two servers: leader and follower
@@ -589,8 +639,8 @@ sudo furnace-admin import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
 Run it on the server that owns the shared IP:
 
 ```bash
-sudo /opt/furnace/bin/furnace-failover-test        # stops keepalived here (like a dead machine)
-sudo /opt/furnace/bin/furnace-failover-test --web  # stops nginx here (the web service breaks)
+sudo furnace failover-test        # stops keepalived here (like a dead machine)
+sudo furnace failover-test --web  # stops nginx here (the web service breaks)
 ```
 
 It stops the service on purpose, waits for the other server to take the shared IP, checks that it answers on the
@@ -600,10 +650,11 @@ shared IP as the leader, and then starts the service again. Afterwards the other
 
 | Path | What |
 |---|---|
-| `/opt/furnace/venv` | The program (Python virtual environment). |
-| `/opt/furnace/bin` | Helper scripts (keepalived, replication, failover test). |
-| `/usr/local/bin/furnace-admin` | The admin command. |
-| `/etc/furnace/furnace.env` | Settings (no secrets). |
+| `/usr/bin/furnace` | The command. |
+| `/usr/lib/furnace/` | The program, setup, templates and helper scripts (keepalived, replication, failover test). |
+| `/lib/systemd/system/furnace-*` | The systemd units. |
+| `/etc/furnace/setup.conf` | Your setup answers. Readable by root only. |
+| `/etc/furnace/furnace.env` | Program settings (no secrets). |
 | `/etc/furnace/tokens.env` | API tokens. Readable only by `furnace`. |
 | `/etc/furnace/tls/` | Certificate and private key. |
 | `/etc/furnace/ssh/` | Replication key. |
@@ -614,7 +665,7 @@ shared IP as the leader, and then starts the service again. Afterwards the other
 | `/var/lib/furnace-edl/` | `blocklist.txt` and `domains.txt` (served by nginx). |
 | `/var/lib/furnace-incoming/` | Snapshots received from the other server. |
 | `/run/furnace-state/role` | `leader` or `follower` (written by keepalived). |
-| `/var/log/furnace-install.log` | Install log. |
+| `/var/log/furnace-setup.log` | Setup log. |
 
 Services: `furnace-api` (gunicorn), `nginx`, `keepalived`. Timers: `furnace-cleanup`, `furnace-backup`,
 `furnace-replicate`. Path unit: `furnace-apply-replica`.
@@ -622,18 +673,29 @@ Logs: `journalctl -u furnace-api`, `/var/log/nginx/furnace-access.log`.
 
 ## 12. Upgrade and uninstall
 
-**Upgrade:** copy the new `furnace` folder to the server (keep your `config.env`) and run `sudo ./install.sh`
-again. Do the follower first, then the leader. Data, tokens and the certificate are kept.
-The API is reloaded without downtime, and keepalived is restarted only if its settings changed, so an upgrade
-does not move the shared IP. If you change `config.env` values that affect keepalived (for example the
-priority or the password), the restart can move the shared IP to the other server. That is safe.
+**Upgrade:** install the new package. Do the follower first, then the leader.
+
+```bash
+sudo apt install ./furnace_0.3.0_all.deb
+```
+
+The package runs `furnace setup --upgrade` by itself. It uses the saved answers and asks no questions.
+Data, tokens and the certificate are kept. The API is reloaded without downtime, and keepalived is restarted only
+if its settings changed, so an upgrade does not move the shared IP. If you change answers that affect keepalived
+(for example the VRRP router ID), the restart can move the shared IP to the other server. That is safe.
+
+If the upgrade step reports a problem, the package stays installed. Fix the problem and run
+`sudo furnace setup --upgrade`. The details are in `/var/log/furnace-setup.log`.
 
 **Uninstall:**
 
 ```bash
-sudo /opt/furnace/uninstall.sh            # removes the program and services, keeps the data
-sudo /opt/furnace/uninstall.sh --purge    # also deletes the database, backups, tokens, certificate and users
+sudo apt remove furnace    # removes the program and stops the services, keeps the data and the tokens
+sudo apt purge furnace     # also deletes the database, backups, tokens, certificate and users
 ```
+
+`apt remove` also removes the Furnace nginx site, the keepalived configuration (the shared IP is released) and the
+Furnace ufw rules. ufw itself stays on. Installing the package again later uses the kept data.
 
 ## 13. Tests
 
@@ -649,7 +711,8 @@ They cover validation, the duplicate rule, restore from the archive, the cleanup
 API (tokens, separate whitelist token, errors), many requests at the same time (threads and processes), and that
 no temporary files are left behind.
 
-Integration test with Docker (two servers, a fake firewall and a fake XSOAR; only test addresses):
+Integration test with Docker (two servers, a fake firewall and a fake XSOAR; only test addresses).
+It builds the `.deb`, installs it with apt and answers the setup questions through a terminal:
 
 ```bash
 tests/integration/run.sh 24.04
@@ -659,12 +722,17 @@ tests/integration/run.sh 22.04
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
-The integration test passed 37 of 37 checks on Ubuntu 22.04 and on Ubuntu 24.04 (v0.1.0). It covers:
-`install.sh --check`, refusing bad settings, leader and follower install, tokens and certificate copied through
-the bundle, the self-test, API and EDL access through the shared IP, nginx access rules (firewall only for EDLs,
-XSOAR only for the API, archive not served), replication both ways, the follower refusing changes, a second
-install that keeps data and tokens without moving the shared IP, both failover modes, the cleanup timer moving
-with the shared IP, and uninstall.
+The integration test passed 65 of 65 checks on Ubuntu 22.04 and on Ubuntu 24.04 (v0.2.0). It covers:
+building the package, `apt install` with its dependencies, nothing running before setup, `setup --check`, refusing
+bad settings, a follower without a bundle, the leader setup by answering the questions (including a wrong answer
+that is asked again, the card and IP found automatically, the keepalived password created), the follower setup with
+only two questions, tokens, certificate and settings copied through the bundle, the self-test, API and EDL access
+through the shared IP, nginx access rules (firewall only for EDLs, XSOAR only for the API, archive not served),
+replication both ways, the follower refusing changes, `furnace status`, an import from a file only root can read,
+a package upgrade that keeps data and tokens without moving the shared IP, both failover modes, the cleanup timer
+moving with the shared IP, `apt remove` (data kept) and `apt purge` (data deleted).
+
+The unit tests also pass with Ubuntu's own Flask packages: Flask 2.0.1 on 22.04 and Flask 3.0.2 on 24.04.
 
 ## 14. What was not tested
 
@@ -680,5 +748,9 @@ Be aware of these limits before you go live:
 - **Long running time.** No test ran for days. Audit log growth and backup rotation over months were not tested.
 - **Large real lists with the firewall.** 30,000-line imports were timed (about 2 seconds), but not loaded by a
   firewall.
-- **Offline install with a `wheels` folder.** The code path exists but was not tested.
-- **`USE_HTTPS=no`** (HTTP test mode) and `HOST_FIREWALL=none` were not run in the integration test.
+- **A server without the Ubuntu package mirror.** apt needs the mirror, a proxy or a local mirror for the
+  dependencies. An install without any of them was not tested.
+- **`furnace setup` over a real SSH session.** The questions were answered through a terminal in a container,
+  not by a person over SSH.
+- **`USE_HTTPS=no`** (HTTP test mode), `HOST_FIREWALL=none` and `furnace setup --config` for a follower were
+  not run in the integration test.
