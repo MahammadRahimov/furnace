@@ -192,8 +192,13 @@ def _require_leader(settings: Settings) -> None:
         raise ImportError_("This server is the standby. Run imports on the leader.")
 
 
-def _write_report(report: ImportReport, source: Path, report_path: Path | None, now: datetime) -> None:
-    path = report_path or Path.cwd() / f"{source.name}.{now.strftime('%Y%m%d-%H%M%S')}.report.txt"
+def _write_report(report: ImportReport, source: Path, report_path: Path | None, now: datetime,
+                  settings: Settings) -> None:
+    if report_path is None:
+        folder = settings.data_dir / "reports"
+        folder.mkdir(parents=True, exist_ok=True)
+        report_path = folder / f"{source.name}.{now.strftime('%Y%m%d-%H%M%S')}.report.txt"
+    path = report_path
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(f"Furnace import report - {db.to_iso(now)}\n")
         handle.write(f"Source file: {source}\n")
@@ -335,7 +340,7 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
                 edl.write_archive_csv(conn, settings)
         finally:
             conn.close()
-    _write_report(report, source, report_path, now)
+    _write_report(report, source, report_path, now, settings)
     return report
 
 
@@ -397,7 +402,7 @@ def import_domains(settings: Settings, source: Path, dry_run: bool = False, adde
                 edl.write_domains(conn, settings)
         finally:
             conn.close()
-    _write_report(report, source, report_path, now)
+    _write_report(report, source, report_path, now, settings)
     return report
 
 
@@ -443,5 +448,5 @@ def import_whitelist(settings: Settings, source: Path, kind: str, dry_run: bool 
         report.skipped.append(Skipped(0, value, "removed_from_blocklist" if not dry_run
                                       else "would_be_removed_from_blocklist"))
     report.skipped.sort(key=lambda s: s.line_no)
-    _write_report(report, source, report_path, now)
+    _write_report(report, source, report_path, now, settings)
     return report

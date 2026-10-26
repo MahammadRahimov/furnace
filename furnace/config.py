@@ -134,6 +134,11 @@ class Settings:
         if os.path.isfile(path):
             env.update(read_env_file(path))
         env.update({k: v for k, v in os.environ.items() if k.startswith("FURNACE_")})
+        # Tokens live in their own file that only the furnace user can read.
+        tokens_file = env.get("FURNACE_TOKENS_FILE")
+        if tokens_file and os.access(tokens_file, os.R_OK):
+            for key, value in read_env_file(tokens_file).items():
+                env.setdefault(key, value)
         return cls.from_env(env)
 
     def check_tokens(self) -> None:

@@ -1,0 +1,47 @@
+# Furnace - written by install.sh. A new install run writes this file again.
+# Both servers start as BACKUP with nopreempt: a server that comes back
+# does not take the shared IP back. The higher priority wins only at the
+# very first start, when both servers start together.
+
+global_defs {
+    router_id furnace_{{ROLE}}
+    script_user root
+    enable_script_security
+}
+
+vrrp_script chk_furnace {
+    script "/opt/furnace/bin/furnace-health-check"
+    interval 5
+    timeout 4
+    fall 3
+    rise 2
+}
+
+vrrp_instance FURNACE {
+    state BACKUP
+    nopreempt
+    interface {{INTERFACE}}
+    virtual_router_id {{VRRP_ROUTER_ID}}
+    priority {{PRIORITY}}
+    advert_int 1
+
+    unicast_src_ip {{THIS_IP}}
+    unicast_peer {
+        {{PEER_IP}}
+    }
+
+    authentication {
+        auth_type PASS
+        auth_pass {{KEEPALIVED_PASSWORD}}
+    }
+
+    virtual_ipaddress {
+        {{SHARED_IP}}/{{SHARED_IP_PREFIX}} dev {{INTERFACE}}
+    }
+
+    track_script {
+        chk_furnace
+    }
+
+    notify /opt/furnace/bin/furnace-notify
+}

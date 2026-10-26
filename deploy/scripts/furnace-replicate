@@ -1,0 +1,21 @@
+#!/bin/bash
+# Runs every minute on both servers (systemd timer), as the furnace user.
+# Only the leader does something: it makes a SQLite backup snapshot and
+# pushes it over SSH to the other server, with a dedicated key.
+set -euo pipefail
+
+ROLE="$(cat /run/furnace-state/role 2>/dev/null || echo follower)"
+if [ "$ROLE" != "leader" ]; then
+    exit 0
+fi
+
+# shellcheck source=/dev/null
+. /etc/furnace/install.env
+
+OUT=/var/lib/furnace/replica/outgoing.db
+/opt/furnace/venv/bin/furnace-admin snapshot "$OUT"
+
+gzip -c "$OUT" | ssh -i /etc/furnace/ssh/replica_key \
+    -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 \
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/var/lib/furnace/replica/known_hosts \
+    "furnace-sync@${PEER_IP}"

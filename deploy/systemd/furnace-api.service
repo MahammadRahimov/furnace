@@ -1,0 +1,25 @@
+[Unit]
+Description=Furnace blocklist API (gunicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=furnace
+Group=furnace
+UMask=0027
+EnvironmentFile=/etc/furnace/furnace.env
+EnvironmentFile=/etc/furnace/tokens.env
+ExecStart=/opt/furnace/venv/bin/gunicorn --workers 3 --bind 127.0.0.1:8081 \
+    --forwarded-allow-ips 127.0.0.1 --access-logfile - --timeout 120 furnace.wsgi:app
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/furnace /var/lib/furnace-edl
+
+[Install]
+WantedBy=multi-user.target

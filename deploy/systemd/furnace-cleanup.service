@@ -1,0 +1,15 @@
+[Unit]
+Description=Furnace nightly cleanup (move old IPs to the archive)
+
+[Service]
+Type=oneshot
+User=furnace
+Group=furnace
+UMask=0027
+EnvironmentFile=/etc/furnace/furnace.env
+ExecStart=/opt/furnace/venv/bin/furnace-admin cleanup
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/furnace /var/lib/furnace-edl

@@ -1,0 +1,22 @@
+#!/bin/bash
+# Runs on the receiving server as the furnace-sync user. It is the only
+# command the replication key may run (forced command in authorized_keys).
+# It saves the snapshot. A systemd path unit then loads it as the furnace user.
+set -euo pipefail
+umask 027
+
+DIR=/var/lib/furnace-incoming
+TMP="$(mktemp "$DIR/.snapshot.XXXXXX")"
+trap 'rm -f "$TMP"' EXIT
+
+# Limit the input to 2 GB so a broken sender cannot fill the disk.
+head -c 2147483648 | gunzip -c > "$TMP"
+
+if [ "$(head -c 15 "$TMP")" != "SQLite format 3" ]; then
+    echo "The received data is not a SQLite database. It was dropped." >&2
+    exit 1
+fi
+
+chmod 0640 "$TMP"
+mv -f "$TMP" "$DIR/snapshot.db"
+trap - EXIT

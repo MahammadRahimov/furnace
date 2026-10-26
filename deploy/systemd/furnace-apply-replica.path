@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for a new Furnace snapshot from the leader
+
+[Path]
+PathChanged=/var/lib/furnace-incoming/snapshot.db
+Unit=furnace-apply-replica.service
+
+[Install]
+WantedBy=multi-user.target

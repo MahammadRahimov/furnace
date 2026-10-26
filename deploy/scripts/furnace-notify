@@ -1,0 +1,34 @@
+#!/bin/bash
+# keepalived calls this script when the state of this server changes.
+# Arguments: TYPE NAME STATE (STATE is MASTER, BACKUP, FAULT or STOP).
+#
+# It writes the role file that Furnace reads, and starts the nightly
+# cleanup timer only on the server that owns the shared IP.
+set -euo pipefail
+
+STATE="${3:-}"
+DIR=/run/furnace-state
+
+install -d -m 0755 "$DIR"
+
+set_role() {
+    printf '%s\n' "$1" > "$DIR/role.tmp"
+    chmod 0644 "$DIR/role.tmp"
+    mv -f "$DIR/role.tmp" "$DIR/role"
+}
+
+case "$STATE" in
+    MASTER)
+        set_role leader
+        systemctl start furnace-cleanup.timer || true
+        logger -t furnace "This server now owns the shared IP. It is the leader."
+        ;;
+    BACKUP|FAULT|STOP)
+        set_role follower
+        systemctl stop furnace-cleanup.timer || true
+        logger -t furnace "This server is now the standby (keepalived state: $STATE)."
+        ;;
+    *)
+        logger -t furnace "furnace-notify: unknown state '$STATE', no change."
+        ;;
+esac

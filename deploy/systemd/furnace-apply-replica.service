@@ -1,0 +1,15 @@
+[Unit]
+Description=Load the newest Furnace snapshot from the leader (follower only)
+
+[Service]
+Type=oneshot
+User=furnace
+Group=furnace
+UMask=0027
+EnvironmentFile=/etc/furnace/furnace.env
+ExecStart=/opt/furnace/venv/bin/furnace-admin apply-replica /var/lib/furnace-incoming/snapshot.db
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/furnace /var/lib/furnace-edl

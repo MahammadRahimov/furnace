@@ -1,0 +1,13 @@
+#!/bin/bash
+# keepalived health check. Exits 0 when nginx and the API answer /health.
+# If it fails 3 times in a row, keepalived moves the shared IP to the other server.
+set -euo pipefail
+
+# shellcheck source=/dev/null
+. /etc/furnace/install.env
+
+if [ "${USE_HTTPS:-yes}" = "yes" ]; then
+    exec curl -fsS --max-time 3 -o /dev/null --cacert /etc/furnace/tls/furnace.crt https://127.0.0.1/health
+else
+    exec curl -fsS --max-time 3 -o /dev/null http://127.0.0.1/health
+fi

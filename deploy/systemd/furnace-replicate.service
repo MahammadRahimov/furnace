@@ -1,0 +1,11 @@
+[Unit]
+Description=Furnace replication: push a database snapshot to the other server (leader only)
+
+[Service]
+Type=oneshot
+User=furnace
+Group=furnace
+UMask=0027
+EnvironmentFile=/etc/furnace/furnace.env
+ExecStart=/opt/furnace/bin/furnace-replicate
+TimeoutStartSec=50

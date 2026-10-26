@@ -1,0 +1,86 @@
+#!/bin/bash
+# Furnace failover test. Run it as root on the server that owns the shared IP.
+#
+# It stops this server on purpose, checks that the other server takes the
+# shared IP and answers on it, then starts this server again. Because of
+# nopreempt, the shared IP stays on the other server afterwards.
+#
+# Usage: sudo furnace-failover-test [--web]
+#   default: stop keepalived here (like a dead machine)
+#   --web:   stop nginx here (the machine is alive but the web service is broken;
+#            the keepalived health check must move the IP)
+set -euo pipefail
+
+MODE=keepalived
+[ "${1:-}" = "--web" ] && MODE=nginx
+
+[ "$(id -u)" -eq 0 ] || { echo "Run as root: sudo $0 $*" >&2; exit 1; }
+# shellcheck source=/dev/null
+. /etc/furnace/install.env
+
+has_shared_ip() {
+    ip -o -4 addr show dev "$INTERFACE" | grep -qw "inet ${SHARED_IP}/"
+}
+
+if [ "$USE_HTTPS" = "yes" ]; then
+    URL="https://${SHARED_IP}/health"
+    CURL_TLS=(--cacert /etc/furnace/tls/furnace.crt)
+else
+    URL="http://${SHARED_IP}/health"
+    CURL_TLS=()
+fi
+
+if ! has_shared_ip; then
+    echo "This server does not own the shared IP ${SHARED_IP}. Run the test on the leader." >&2
+    exit 1
+fi
+
+restore() {
+    systemctl start "$MODE" || true
+}
+trap restore EXIT
+
+echo "1. This server owns the shared IP ${SHARED_IP}."
+echo "2. Stopping ${MODE} on this server on purpose."
+systemctl stop "$MODE"
+
+echo "3. Waiting up to 40 seconds for the shared IP to leave this server..."
+for _ in $(seq 1 40); do
+    has_shared_ip || break
+    sleep 1
+done
+if has_shared_ip; then
+    echo "FAIL: the shared IP is still on this server after 40 seconds." >&2
+    exit 1
+fi
+echo "   The shared IP left this server."
+
+echo "4. Waiting up to 30 seconds for the other server to answer on ${URL}..."
+ANSWER=""
+for _ in $(seq 1 30); do
+    if ANSWER="$(curl -fsS --max-time 3 "${CURL_TLS[@]}" "$URL" 2>/dev/null)"; then
+        break
+    fi
+    ANSWER=""
+    sleep 1
+done
+if [ -z "$ANSWER" ]; then
+    echo "FAIL: nobody answers on the shared IP." >&2
+    exit 1
+fi
+echo "   Answer: $ANSWER"
+if ! printf '%s' "$ANSWER" | grep -q '"role": *"leader"'; then
+    echo "FAIL: the server on the shared IP does not say it is the leader." >&2
+    exit 1
+fi
+
+echo "5. Starting ${MODE} on this server again."
+trap - EXIT
+systemctl start "$MODE"
+sleep 5
+if has_shared_ip; then
+    echo "WARNING: this server took the shared IP back. Check nopreempt in keepalived.conf." >&2
+    exit 1
+fi
+echo "PASS: the other server took over and answers on the shared IP."
+echo "This server is now the standby. That is expected (nopreempt)."

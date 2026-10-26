@@ -1,0 +1,15 @@
+[Unit]
+Description=Furnace daily database backup
+
+[Service]
+Type=oneshot
+User=furnace
+Group=furnace
+UMask=0027
+EnvironmentFile=/etc/furnace/furnace.env
+ExecStart=/opt/furnace/venv/bin/furnace-admin backup
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/furnace
