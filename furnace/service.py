@@ -143,7 +143,7 @@ class Furnace:
             except Rejected as error:
                 return self._reject(conn, "add", "ip", raw, error, "", "", source, now)
             try:
-                ip = validate_ip(value, self.settings.allow_test_ranges)
+                ip = validate_ip(value, self.settings.test_ranges_allowed())
                 cidr = self._ip_whitelisted(conn, ip)
                 if cidr:
                     raise Rejected("whitelisted", f"This IP is covered by the whitelist entry {cidr}. "

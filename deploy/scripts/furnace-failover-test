@@ -19,7 +19,7 @@ MODE=keepalived
 . /etc/furnace/install.env
 
 has_shared_ip() {
-    ip -o -4 addr show dev "$INTERFACE" | grep -qw "inet ${SHARED_IP}/"
+    ip -o -4 addr show dev "$INTERFACE" | grep -qF "inet ${SHARED_IP}/"
 }
 
 if [ "$USE_HTTPS" = "yes" ]; then
@@ -55,13 +55,15 @@ if has_shared_ip; then
 fi
 echo "   The shared IP left this server."
 
-echo "4. Waiting up to 30 seconds for the other server to answer on ${URL}..."
+echo "4. Waiting up to 30 seconds for the other server to answer as leader on ${URL}..."
+# keepalived adds the shared IP a moment before its notify script marks the server
+# as leader, so the first answer can still say "follower". Wait for "leader".
 ANSWER=""
 for _ in $(seq 1 30); do
-    if ANSWER="$(curl -fsS --max-time 3 "${CURL_TLS[@]}" "$URL" 2>/dev/null)"; then
+    ANSWER="$(curl -fsS --max-time 3 "${CURL_TLS[@]}" "$URL" 2>/dev/null || true)"
+    if printf '%s' "$ANSWER" | grep -q '"role": *"leader"'; then
         break
     fi
-    ANSWER=""
     sleep 1
 done
 if [ -z "$ANSWER" ]; then

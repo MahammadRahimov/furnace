@@ -33,20 +33,23 @@ fail() { printf '  FAIL  %s\n' "$*"; FAILED=$((FAILED + 1)); }
 check() { local name="$1"; shift; if "$@"; then pass "$name"; else fail "$name"; fi; }
 on() { local box="$1"; shift; docker exec "$box" bash -c "$*"; }
 
+remove_lab() {
+    docker rm -f "$LEADER" "$FOLLOWER" "$FW" "$XSOAR" >/dev/null 2>&1 || true
+    docker network rm "$NET" >/dev/null 2>&1 || true
+}
 teardown() {
     if [ "${KEEP:-0}" = "1" ]; then
         echo "KEEP=1: containers are still running. Remove them with: docker rm -f $LEADER $FOLLOWER $FW $XSOAR; docker network rm $NET"
         return
     fi
-    docker rm -f "$LEADER" "$FOLLOWER" "$FW" "$XSOAR" >/dev/null 2>&1 || true
-    docker network rm "$NET" >/dev/null 2>&1 || true
+    remove_lab
 }
 trap teardown EXIT
 
 step "Build the test image (Ubuntu $UBUNTU with systemd)"
 BUILD_DIR="$(cd "$ROOT/tests/integration" && (pwd -W 2>/dev/null || pwd))"  # pwd -W: Windows path in Git Bash
 docker build -q --build-arg "UBUNTU=$UBUNTU" -t "$IMAGE" "$BUILD_DIR" >/dev/null
-teardown
+remove_lab
 docker network create --subnet 192.0.2.0/24 --gateway 192.0.2.1 "$NET" >/dev/null
 
 start_box() {
@@ -132,17 +135,18 @@ for box in "$FW" "$XSOAR"; do
     docker cp ./furnace.crt "$box:/root/furnace.crt"
     rm -f ./furnace.crt
 done
-# The lab uses test addresses for everything, so allow them on both servers.
-for box in "$LEADER" "$FOLLOWER"; do
-    on "$box" "sed -i 's/^FURNACE_ALLOW_TEST_RANGES=.*/FURNACE_ALLOW_TEST_RANGES=true/' /etc/furnace/furnace.env && systemctl restart furnace-api"
-done
-sleep 3
+# The lab uses test addresses for everything. Allow them with the root-owned self-test
+# flag (valid 10 minutes), the same way install.sh does, so the API is never restarted.
+lab_allow_test_ranges() {
+    for box in "$LEADER" "$FOLLOWER"; do on "$box" "touch /run/furnace-state/selftest"; done
+}
+lab_allow_test_ranges
 
 api() {  # api METHOD PATH [JSON] -> prints "HTTP_CODE BODY", called from the XSOAR box
     local data=()
     [ -n "${3:-}" ] && data=(-H 'Content-Type: application/json' -d "$3")
     docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $TOKEN" \
-        -X "$1" "${data[@]}" -w ' %{http_code}' "https://$SHARED_IP$2"
+        -X "$1" "${data[@]}" -w ' %{http_code}' "https://$SHARED_IP$2" | tr -d '\n'
 }
 edl() { docker exec "$FW" curl -sS --cacert /root/furnace.crt "https://$SHARED_IP/edl/$1"; }
 code_from() { docker exec "$1" curl -s -o /dev/null -w '%{http_code}' --cacert /root/furnace.crt "$2"; }
@@ -168,20 +172,21 @@ done
 check "the follower has the IP in its blocklist.txt" [ "$ok" = 1 ]
 check "the follower has the domain" on "$FOLLOWER" "grep -qx bad.example.com /var/lib/furnace-edl/domains.txt"
 r="$(docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-     -d '{"ip":"198.51.100.78"}' -w ' %{http_code}' "https://$FOLLOWER_IP/api/v1/ips")"
+     -d '{"ip":"198.51.100.78"}' -w ' %{http_code}' "https://$FOLLOWER_IP/api/v1/ips" | tr -d '\n')"
 check "the follower refuses changes (503 not_leader)" grep -q 'not_leader.* 503$' <<< "$r"
 
 step "A second install run keeps data and tokens"
 before_tokens="$(on "$LEADER" 'sha256sum < /etc/furnace/tokens.env')"
 on "$LEADER" "cd /root/furnace && ./install.sh" </dev/null
-on "$LEADER" "sed -i 's/^FURNACE_ALLOW_TEST_RANGES=.*/FURNACE_ALLOW_TEST_RANGES=true/' /etc/furnace/furnace.env && systemctl restart furnace-api"
-sleep 3
+lab_allow_test_ranges
 check "tokens unchanged" [ "$before_tokens" = "$(on "$LEADER" 'sha256sum < /etc/furnace/tokens.env')" ]
+check "the leader still owns the shared IP (no failover during upgrade)" on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 check "the IP is still blocked" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
 check "furnace-admin works" on "$LEADER" "furnace-admin stats | grep -q 'active ips *1'"
 
 step "Failover: stop keepalived on the leader"
-on "$LEADER" "furnace-failover-test" && pass "failover test script (machine down)" || fail "failover test script (machine down)"
+lab_allow_test_ranges
+on "$LEADER" "/opt/furnace/bin/furnace-failover-test" && pass "failover test script (machine down)" || fail "failover test script (machine down)"
 check "the follower now owns the shared IP" on "$FOLLOWER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 check "the cleanup timer moved to the follower" on "$FOLLOWER" "systemctl is-active --quiet furnace-cleanup.timer"
 check "the old leader stopped its cleanup timer" on "$LEADER" "! systemctl is-active --quiet furnace-cleanup.timer"
@@ -196,7 +201,7 @@ done
 check "replication now runs the other way" [ "$ok" = 1 ]
 
 step "Failover: break the web service on the new leader (health check)"
-on "$FOLLOWER" "furnace-failover-test --web" && pass "failover test script (web service down)" || fail "failover test script (web service down)"
+on "$FOLLOWER" "/opt/furnace/bin/furnace-failover-test --web" && pass "failover test script (web service down)" || fail "failover test script (web service down)"
 check "the shared IP is back on the first server" on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 
 step "Uninstall (keeps data) on the follower"

@@ -249,7 +249,7 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
                 report.total_lines += 1
                 is_first, first_data = first_data, False
                 try:
-                    ip = validate_ip(fields[0], settings.allow_test_ranges)
+                    ip = validate_ip(fields[0], settings.test_ranges_allowed())
                 except Rejected as error:
                     if is_first and looks_like_header(fields[0]):
                         report.skipped.append(Skipped(number, text, "header"))

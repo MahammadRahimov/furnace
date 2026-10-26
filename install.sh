@@ -31,7 +31,7 @@ NEW_TOKENS=0
 
 # --------------------------------------------------------------------------- output
 
-say()  { printf '\n==> %s\n' "$*"; }
+say()  { printf '\n==> %s  [%s]\n' "$*" "$(date +%T)"; }
 ok()   { printf '    [ok] %s\n' "$*"; DONE+=("$*"); }
 info() { printf '    %s\n' "$*"; }
 warn() { printf '    [warning] %s\n' "$*"; }
@@ -224,6 +224,16 @@ apt-get install -y -qq python3 python3-venv nginx keepalived openssl curl ufw op
     openssh-client sqlite3 gzip >/dev/null
 ok "Packages installed"
 
+# Replication needs the SSH server. Ubuntu 24.04 starts it through ssh.socket, 22.04 through ssh.service.
+if ! systemctl is-active --quiet ssh.service && ! systemctl is-active --quiet ssh.socket; then
+    if systemctl cat ssh.socket >/dev/null 2>&1 && [ "${VERSION_ID}" = "24.04" ]; then
+        systemctl enable --quiet --now ssh.socket
+    else
+        systemctl enable --quiet --now ssh.service
+    fi
+    ok "SSH server started (needed for replication)"
+fi
+
 say "Creating users and folders"
 if ! id furnace >/dev/null 2>&1; then
     useradd --system --user-group --home-dir "$DATA" --no-create-home --shell /usr/sbin/nologin furnace
@@ -389,8 +399,13 @@ export R_FIREWALL_ALLOW R_XSOAR_ALLOW R_LISTEN R_TLS
 
 render() { python3 "$HERE/deploy/render.py" "$1" "$2"; }
 
-render "$HERE/deploy/templates/furnace.env.tmpl" "$ETC/furnace.env"
-chown root:furnace "$ETC/furnace.env" && chmod 0640 "$ETC/furnace.env"
+# Remember whether the settings change: only then does the API need a full restart.
+ENV_CHANGED=1
+NEW_ENV="$(mktemp)"
+render "$HERE/deploy/templates/furnace.env.tmpl" "$NEW_ENV"
+if cmp -s "$NEW_ENV" "$ETC/furnace.env"; then ENV_CHANGED=0; fi
+install -m 0640 -o root -g furnace "$NEW_ENV" "$ETC/furnace.env"
+rm -f "$NEW_ENV"
 
 cat > "$ETC/install.env" <<EOF
 # Non-secret install settings, used by the Furnace helper scripts. Written by install.sh.
@@ -430,9 +445,22 @@ if [ -f /etc/keepalived/keepalived.conf ] && ! grep -q "^# Furnace" /etc/keepali
     cp /etc/keepalived/keepalived.conf "/etc/keepalived/keepalived.conf.before-furnace.$(date +%Y%m%d%H%M%S)"
     warn "An existing keepalived.conf was saved with the suffix .before-furnace.*"
 fi
-(umask 077; render "$HERE/deploy/templates/keepalived.conf.tmpl" /etc/keepalived/keepalived.conf)
+# Restart keepalived only when its configuration really changes. A restart releases
+# the shared IP, and with nopreempt the other server would keep it.
+KEEPALIVED_CHANGED=1
+NEW_KA="$(mktemp)"
+(umask 077; R_KEEPALIVED_PASSWORD="$CFG_KEEPALIVED_PASSWORD" \
+    render "$HERE/deploy/templates/keepalived.conf.tmpl" "$NEW_KA")
+if cmp -s "$NEW_KA" /etc/keepalived/keepalived.conf; then
+    KEEPALIVED_CHANGED=0
+    rm -f "$NEW_KA"
+else
+    install -m 0600 -o root -g root "$NEW_KA" /etc/keepalived/keepalived.conf
+    rm -f "$NEW_KA"
+fi
 ok "keepalived configured (unicast VRRP to $CFG_PEER_IP, priority $PRIORITY, nopreempt, health check)"
 
+cmp -s "$HERE/deploy/systemd/furnace-api.service" /etc/systemd/system/furnace-api.service || ENV_CHANGED=1
 for unit in "$HERE"/deploy/systemd/*; do
     install -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"
 done
@@ -475,12 +503,23 @@ say "Starting services"
 runuser -u furnace -- env FURNACE_CONFIG="$ETC/furnace.env" "$OPT/venv/bin/furnace-admin" rebuild >/dev/null
 ok "Database ready and EDL files written (existing data kept)"
 systemctl enable --quiet furnace-api.service
-systemctl restart furnace-api.service
+if systemctl is-active --quiet furnace-api.service && [ "$ENV_CHANGED" -eq 0 ]; then
+    # Upgrade without downtime: new workers load the new code, the main process keeps serving.
+    systemctl reload furnace-api.service
+    info "furnace-api reloaded with the new program (no downtime)."
+else
+    systemctl restart furnace-api.service
+fi
 systemctl enable --quiet nginx
-systemctl restart nginx
+if systemctl is-active --quiet nginx; then systemctl reload nginx; else systemctl start nginx; fi
 systemctl enable --quiet --now furnace-replicate.timer furnace-backup.timer furnace-apply-replica.path
 systemctl enable --quiet keepalived
-systemctl restart keepalived
+if [ "$KEEPALIVED_CHANGED" -eq 1 ] || ! systemctl is-active --quiet keepalived; then
+    systemctl restart keepalived
+    info "keepalived (re)started. If this server held the shared IP, the other server may hold it now."
+else
+    info "keepalived configuration unchanged. Not restarted, so the shared IP does not move."
+fi
 ok "Services started: furnace-api, nginx, keepalived, replication, backup"
 
 # --------------------------------------------------------------------------- self-test
@@ -494,10 +533,9 @@ HDR=""
 pass() { ok "Self-test: $*"; }
 fail() { printf '    [FAIL] Self-test: %s\n' "$*"; FAILED=1; TODO+=("Self-test failed: $*"); }
 
+# Allow the test range for a few minutes without restarting the API (a restart could move the shared IP).
 set_test_ranges() {
-    sed -i "s/^FURNACE_ALLOW_TEST_RANGES=.*/FURNACE_ALLOW_TEST_RANGES=$1/" "$ETC/furnace.env"
-    systemctl restart furnace-api.service
-    wait_health || fail "the API did not come back after a restart"
+    if [ "$1" = "true" ]; then touch "$STATE_DIR/selftest"; else rm -f "$STATE_DIR/selftest"; fi
 }
 
 served_blocklist_has() {
@@ -522,10 +560,7 @@ wait_health() {
 
 cleanup_selftest() {
     [ -n "$HDR" ] && rm -f "$HDR"
-    if grep -q "^FURNACE_ALLOW_TEST_RANGES=true" "$ETC/furnace.env"; then
-        sed -i "s/^FURNACE_ALLOW_TEST_RANGES=.*/FURNACE_ALLOW_TEST_RANGES=false/" "$ETC/furnace.env"
-        systemctl restart furnace-api.service || true
-    fi
+    rm -f "$STATE_DIR/selftest"
 }
 
 code_of() { "${CURL[@]}" -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true; }
@@ -590,7 +625,7 @@ say "Summary"
 for item in "${DONE[@]}"; do printf '  - %s\n' "$item"; done
 
 if [ "$NEW_TOKENS" -eq 1 ]; then
-    if [ -w /dev/tty ]; then
+    if { : > /dev/tty; } 2>/dev/null; then   # a real terminal is attached
         {
             printf '\n  ================== API TOKENS (shown only once) ==================\n'
             printf '  Store them in the XSOAR credentials store. They are NOT in the log.\n'

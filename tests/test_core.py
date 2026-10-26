@@ -128,6 +128,26 @@ def test_settings_from_env_and_tokens():
         pass
 
 
+def test_selftest_flag(tmp_path, monkeypatch):
+    import os
+    from types import SimpleNamespace
+    flag = tmp_path / "selftest"
+    s = Settings(selftest_flag=flag)
+    assert not s.test_ranges_allowed()           # no flag
+    flag.write_text("")
+    if os.getuid() != 0:
+        assert not s.test_ranges_allowed()       # not owned by root: ignored
+    real_stat = type(flag).stat
+    def fake_stat(path, age):
+        return SimpleNamespace(st_uid=0, st_mtime=time.time() - age)
+    monkeypatch.setattr(type(flag), "stat", lambda p, *a, **k: fake_stat(p, 5))
+    assert s.test_ranges_allowed()               # fresh root-owned flag
+    monkeypatch.setattr(type(flag), "stat", lambda p, *a, **k: fake_stat(p, 3600))
+    assert not s.test_ranges_allowed()           # forgotten flag stops working
+    monkeypatch.setattr(type(flag), "stat", real_stat)
+    assert Settings(allow_test_ranges=True).test_ranges_allowed()
+
+
 def test_role_file(tmp_path):
     role = tmp_path / "role"
     s = Settings(role_file=role)

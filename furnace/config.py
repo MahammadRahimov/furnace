@@ -8,11 +8,13 @@ for the services and which furnace-admin reads on its own.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_CONFIG_FILE = "/etc/furnace/furnace.env"
 MIN_TOKEN_LENGTH = 20
+SELFTEST_FLAG_MAX_AGE = 600  # seconds
 
 
 class ConfigError(Exception):
@@ -74,6 +76,7 @@ class Settings:
     cleanup_max_percent: int = 20
     cleanup_min_size: int = 100
     role_file: Path | None = None  # written by keepalived; None means "always leader"
+    selftest_flag: Path | None = None  # root-owned file that allows test ranges for a short time
     lock_timeout: int = 30
 
     @property
@@ -123,6 +126,7 @@ class Settings:
             cleanup_min_size=_int("FURNACE_CLEANUP_MIN_SIZE",
                                   env.get("FURNACE_CLEANUP_MIN_SIZE"), 100),
             role_file=Path(role_file) if role_file else None,
+            selftest_flag=Path(env["FURNACE_SELFTEST_FLAG"]) if env.get("FURNACE_SELFTEST_FLAG") else None,
             lock_timeout=_int("FURNACE_LOCK_TIMEOUT", env.get("FURNACE_LOCK_TIMEOUT"), 30, minimum=1),
         )
 
@@ -163,6 +167,23 @@ class Settings:
             return self.role_file.read_text(encoding="utf-8").strip() == "leader"
         except OSError:
             return False
+
+    def test_ranges_allowed(self) -> bool:
+        """Test ranges are allowed by the setting, or for a short time by the self-test flag.
+
+        The install self-test creates the flag instead of restarting the API, because a
+        restart can make keepalived move the shared IP. Only a recent flag owned by root
+        counts, so a forgotten flag stops working after 10 minutes.
+        """
+        if self.allow_test_ranges:
+            return True
+        if self.selftest_flag is None:
+            return False
+        try:
+            info = self.selftest_flag.stat()
+        except OSError:
+            return False
+        return info.st_uid == 0 and (time.time() - info.st_mtime) < SELFTEST_FLAG_MAX_AGE
 
     def ensure_dirs(self) -> None:
         for path in (self.data_dir, self.edl_dir, self.archive_dir, self.backup_dir):

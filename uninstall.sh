@@ -51,7 +51,8 @@ if nginx -t -q 2>/dev/null; then systemctl reload nginx 2>/dev/null || true; fi
 echo "==> Removing host firewall rules added by Furnace"
 if command -v ufw >/dev/null 2>&1; then
     while true; do
-        num="$(ufw status numbered 2>/dev/null | grep -E '# furnace' | head -n1 | sed -E 's/^\[ *([0-9]+)\].*/\1/')"
+        num="$( (ufw status numbered 2>/dev/null || true) | grep -E '# furnace' | head -n1 \
+                | sed -E 's/^\[ *([0-9]+)\].*/\1/' || true)"
         [ -n "$num" ] || break
         ufw --force delete "$num" >/dev/null
     done
