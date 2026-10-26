@@ -24,9 +24,10 @@ def test_rangeset_merges_and_finds():
 
 
 def test_rangeset_is_fast():
-    nets = [ipaddress.ip_network(f"{a}.{b}.0.0/16") for a in range(11, 50) for b in range(0, 256, 3)]
+    # Only documentation space: 5,000 ranges and 30,000 IPs inside 2001:db8::/32.
+    nets = [ipaddress.ip_network(f"2001:db8:{n * 3:x}::/48") for n in range(5000)]
     rs = RangeSet(nets)
-    ips = [ipaddress.ip_address(f"{a}.{b}.1.1") for a in range(1, 120) for b in range(256)]
+    ips = [ipaddress.ip_address(f"2001:db8:{n:x}::1") for n in range(30000)]
     start = time.perf_counter()
     hits = sum(1 for ip in ips if ip in rs)
     assert hits > 0
