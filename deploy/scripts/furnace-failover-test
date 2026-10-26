@@ -5,7 +5,7 @@
 # shared IP and answers on it, then starts this server again. Because of
 # nopreempt, the shared IP stays on the other server afterwards.
 #
-# Usage: sudo furnace-failover-test [--web]
+# Usage: sudo furnace failover-test [--web]
 #   default: stop keepalived here (like a dead machine)
 #   --web:   stop nginx here (the machine is alive but the web service is broken;
 #            the keepalived health check must move the IP)
@@ -14,7 +14,7 @@ set -euo pipefail
 MODE=keepalived
 [ "${1:-}" = "--web" ] && MODE=nginx
 
-[ "$(id -u)" -eq 0 ] || { echo "Run as root: sudo $0 $*" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || { echo "Run as root: sudo furnace failover-test $*" >&2; exit 1; }
 # shellcheck source=/dev/null
 . /etc/furnace/install.env
 

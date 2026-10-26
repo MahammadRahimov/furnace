@@ -1,0 +1,32 @@
+#!/bin/sh
+# Runs after the package files are in place: on the first install and on every upgrade.
+set -e
+
+LIB=/usr/lib/furnace
+
+if [ "$1" = "configure" ]; then
+    systemd-tmpfiles --create furnace.conf >/dev/null 2>&1 || true
+    python3 -m compileall -q "$LIB/furnace" >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+
+    if [ -f /etc/furnace/setup.conf ]; then
+        # Already set up: apply the new version with the saved answers. A problem here
+        # must not break apt, so it is reported and the package stays installed.
+        echo "Furnace: updating this server with the saved settings (furnace setup --upgrade)..."
+        if ! "$LIB/setup.sh" --upgrade; then
+            echo "" >&2
+            echo "WARNING: Furnace was upgraded, but 'furnace setup --upgrade' reported a problem." >&2
+            echo "         See /var/log/furnace-setup.log, fix it, then run: sudo furnace setup --upgrade" >&2
+        fi
+    else
+        cat <<'EOF'
+
+  Furnace is installed. Now set it up (it asks a few questions):
+
+      sudo furnace setup
+
+EOF
+    fi
+fi
+
+exit 0

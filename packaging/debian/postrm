@@ -1,0 +1,25 @@
+#!/bin/sh
+# Runs after the package files are gone.
+#   apt remove furnace  -> the data, tokens and certificate are kept
+#   apt purge furnace   -> everything is deleted
+set -e
+
+case "$1" in
+    remove)
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        rm -rf /run/furnace-state
+        echo "Furnace is removed. The data is kept in /var/lib/furnace and /etc/furnace."
+        echo "Install the package again to use it. To delete all data: sudo apt purge furnace"
+        ;;
+    purge)
+        rm -rf /var/lib/furnace /var/lib/furnace-edl /var/lib/furnace-incoming /var/lib/furnace-sync \
+            /etc/furnace /run/furnace-state
+        rm -f /root/furnace-peer-bundle.tar.gz /var/log/furnace-setup.log
+        userdel furnace-sync >/dev/null 2>&1 || true
+        userdel furnace >/dev/null 2>&1 || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        echo "Furnace is purged. The database, backups, tokens, certificate and users were deleted."
+        ;;
+esac
+
+exit 0

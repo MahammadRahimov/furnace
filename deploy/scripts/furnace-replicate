@@ -13,7 +13,7 @@ fi
 . /etc/furnace/install.env
 
 OUT=/var/lib/furnace/replica/outgoing.db
-/opt/furnace/venv/bin/furnace-admin snapshot "$OUT"
+PYTHONPATH=/usr/lib/furnace PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m furnace snapshot "$OUT"
 
 gzip -c "$OUT" | ssh -i /etc/furnace/ssh/replica_key \
     -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 \

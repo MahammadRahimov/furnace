@@ -7,7 +7,8 @@ User=furnace
 Group=furnace
 UMask=0027
 EnvironmentFile=/etc/furnace/furnace.env
-ExecStart=/opt/furnace/venv/bin/furnace-admin cleanup
+Environment=PYTHONPATH=/usr/lib/furnace PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m furnace cleanup
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

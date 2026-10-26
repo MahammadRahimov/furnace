@@ -1,7 +1,7 @@
-"""furnace-admin: commands for the server admin.
+"""Data commands for the server admin, run through the furnace command.
 
-Run it as the furnace user, for example:
-    sudo -u furnace /opt/furnace/venv/bin/furnace-admin stats
+The furnace command runs them as the furnace user, for example:
+    sudo furnace stats
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ EXPORTS = {
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="furnace-admin", description="Admin commands for the Furnace blocklist server.")
+    p = argparse.ArgumentParser(prog="furnace", description="Admin commands for the Furnace blocklist server.")
     p.add_argument("--config", help="Settings file (default /etc/furnace/furnace.env).")
     p.add_argument("--version", action="version", version=f"furnace {__version__}")
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")

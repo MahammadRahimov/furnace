@@ -1,0 +1,127 @@
+#!/bin/bash
+# furnace: the one command for the Furnace blocklist server.
+# Run "furnace help" for the list of commands.
+set -euo pipefail
+
+LIB=/usr/lib/furnace
+ETC=/etc/furnace
+STATE_DIR=/run/furnace-state
+
+py() { PYTHONPATH="$LIB" PYTHONDONTWRITEBYTECODE=1 python3 "$@"; }
+version() { py -c 'import furnace; print(furnace.__version__)'; }
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || { echo "Run this with sudo: sudo furnace $*" >&2; exit 1; }
+}
+
+need_setup() {
+    [ -f "$ETC/furnace.env" ] || { echo "Furnace is installed but not set up yet. Run: sudo furnace setup" >&2; exit 1; }
+}
+
+usage() {
+    cat <<EOF
+Furnace $(version): blocklist server for Palo Alto EDLs (External Dynamic Lists).
+
+Usage: sudo furnace COMMAND [options]
+
+Setup and health:
+  setup                  Ask the setup questions, then configure and start everything.
+  setup --config FILE    The same, with the answers from a settings file (no questions).
+  setup --check          Show what setup would do. Change nothing.
+  status                 Show the role, the services and the list counts.
+  failover-test [--web]  Check that the other server takes over (run it on the leader).
+  version                Show the version.
+
+Data (details: sudo furnace COMMAND --help):
+EOF
+    py - <<'PY'
+from furnace.admin import build_parser
+
+parser = build_parser()
+for action in parser._subparsers._group_actions:
+    for choice in action._choices_actions:
+        if not choice.help.startswith("(replication"):
+            print(f"  {choice.dest:<23}{choice.help}")
+PY
+    echo
+    echo "Uninstall: sudo apt remove furnace (keeps the data), sudo apt purge furnace (deletes all data)."
+}
+
+# The data commands run as the furnace user. A file to import that this user cannot
+# read (for example in /root) is copied to a temporary folder first.
+run_data_command() {
+    need_root "$@"
+    need_setup
+    local args=("$@") tmp="" i
+    if [[ "${args[0]}" == import-* ]]; then
+        for ((i = 1; i < ${#args[@]}; i++)); do
+            case "${args[i]}" in
+                --report|--added-by|--reason|--date-format|--old-ips|--config) i=$((i + 1)) ;;
+                -*) ;;
+                *)
+                    if [ -f "${args[i]}" ] && ! runuser -u furnace -- test -r "${args[i]}"; then
+                        tmp="$(mktemp -d /tmp/furnace-import.XXXXXX)"
+                        cp "${args[i]}" "$tmp/$(basename "${args[i]}")"
+                        chown -R furnace:furnace "$tmp"
+                        args[i]="$tmp/$(basename "${args[i]}")"
+                    fi
+                    break
+                    ;;
+            esac
+        done
+    fi
+    local code=0
+    runuser -u furnace -- env FURNACE_CONFIG="$ETC/furnace.env" PYTHONPATH="$LIB" PYTHONDONTWRITEBYTECODE=1 \
+        python3 -m furnace "${args[@]}" || code=$?
+    [ -n "$tmp" ] && rm -rf "$tmp"
+    return "$code"
+}
+
+status() {
+    need_root status
+    need_setup
+    # shellcheck source=/dev/null
+    . "$ETC/install.env"
+    local role problems=0 unit state want
+    role="$(cat "$STATE_DIR/role" 2>/dev/null || echo unknown)"
+    echo "Furnace $(version)"
+    if ip -o -4 addr show dev "$INTERFACE" 2>/dev/null | grep -qF "inet ${SHARED_IP}/"; then
+        echo "Role:     $role (this server owns the shared IP $SHARED_IP)"
+    else
+        echo "Role:     $role (the shared IP $SHARED_IP is on the other server, $PEER_IP)"
+    fi
+    echo "Server:   $THIS_IP on $INTERFACE, other server $PEER_IP"
+    echo
+    echo "Services:"
+    for unit in furnace-api.service nginx.service keepalived.service furnace-replicate.timer \
+                furnace-backup.timer furnace-apply-replica.path furnace-cleanup.timer; do
+        state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+        want=active
+        if [ "$unit" = "furnace-cleanup.timer" ]; then
+            [ "$role" = "leader" ] || want=inactive   # the cleanup runs on the leader only
+        fi
+        if [ "$state" = "$want" ]; then
+            printf '  %-28s %s\n' "$unit" "$state"
+        else
+            printf '  %-28s %s   <-- expected %s\n' "$unit" "$state" "$want"
+            problems=1
+        fi
+    done
+    echo
+    run_data_command stats || problems=1
+    if [ "$problems" -ne 0 ]; then
+        echo
+        echo "Something is not right. Look at: sudo journalctl -u furnace-api -u keepalived -u nginx --since -1h"
+        return 1
+    fi
+}
+
+case "${1:-help}" in
+    help|-h|--help) usage ;;
+    version|--version) version ;;
+    setup) shift; need_root setup; exec "$LIB/setup.sh" "$@" ;;
+    status) status ;;
+    failover-test) shift; need_root failover-test; need_setup; exec "$LIB/bin/furnace-failover-test" "$@" ;;
+    snapshot|apply-replica) echo "'$1' is used by the replication only." >&2; exit 2 ;;
+    *) run_data_command "$@" ;;
+esac

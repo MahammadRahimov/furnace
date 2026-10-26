@@ -77,14 +77,14 @@ class Furnace:
 
     def _rebuild(self, conn: sqlite3.Connection, *which: str) -> None:
         """Rebuild files after a commit. A failure here never undoes the change:
-        the next change, the nightly job or 'furnace-admin rebuild' writes the file again."""
+        the next change, the nightly job or 'furnace rebuild' writes the file again."""
         writers = {"ips": edl.write_blocklist, "domains": edl.write_domains,
                    "archive": edl.write_archive_csv}
         for name in which:
             try:
                 writers[name](conn, self.settings)
             except Exception:
-                log.exception("Could not rebuild the %s file. Run 'furnace-admin rebuild'.", name)
+                log.exception("Could not rebuild the %s file. Run 'furnace rebuild'.", name)
 
     def _not_leader(self, action: str, object_type: str, value: str) -> Result | None:
         if self.settings.is_leader():

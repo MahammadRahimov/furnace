@@ -1,0 +1,17 @@
+Package: furnace
+Version: @VERSION@
+Architecture: all
+Maintainer: Mahammad Rahimov <224394699+MahammadRahimov@users.noreply.github.com>
+Installed-Size: @SIZE@
+Depends: python3 (>= 3.10), python3-flask (>= 2.0), python3-gunicorn (>= 20.1), nginx, keepalived, openssl,
+ curl, openssh-server, openssh-client, sqlite3, ufw, iproute2, gzip, tar, util-linux, passwd
+Section: net
+Priority: optional
+Homepage: https://github.com/MahammadRahimov/furnace
+Description: Blocklist server that publishes EDL files for a Palo Alto firewall
+ Furnace keeps a blocklist of IPs and domains. XSOAR adds and removes entries
+ through an HTTPS API. A Palo Alto firewall downloads the lists as External
+ Dynamic Lists (EDLs). Two servers share one IP address with keepalived, and
+ the leader copies its database to the follower every minute.
+ .
+ After the install, run: sudo furnace setup

@@ -1,0 +1,38 @@
+#!/bin/sh
+# Runs before the package files are removed or replaced.
+# On an upgrade everything keeps running: postinst reloads the new version.
+set -e
+
+UNITS="furnace-api.service furnace-cleanup.timer furnace-cleanup.service furnace-backup.timer
+furnace-backup.service furnace-replicate.timer furnace-replicate.service furnace-apply-replica.path
+furnace-apply-replica.service"
+
+if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+    echo "Furnace: stopping the services..."
+    for unit in $UNITS; do
+        systemctl disable --now "$unit" >/dev/null 2>&1 || true
+    done
+
+    if [ -f /etc/keepalived/keepalived.conf ] && grep -q "^# Furnace" /etc/keepalived/keepalived.conf; then
+        systemctl disable --now keepalived >/dev/null 2>&1 || true
+        rm -f /etc/keepalived/keepalived.conf
+        echo "Furnace: removed its keepalived configuration and stopped keepalived (the shared IP is released)."
+    fi
+
+    rm -f /etc/nginx/sites-enabled/furnace /etc/nginx/sites-available/furnace
+    if nginx -t -q >/dev/null 2>&1; then systemctl reload nginx >/dev/null 2>&1 || true; fi
+
+    if command -v ufw >/dev/null 2>&1; then
+        while true; do
+            num="$( (ufw status numbered 2>/dev/null || true) | grep -E '# furnace' | head -n1 \
+                    | sed -E 's/^\[ *([0-9]+)\].*/\1/' || true)"
+            [ -n "$num" ] || break
+            ufw --force delete "$num" >/dev/null
+        done
+        sed -i '/furnace-vrrp/d' /etc/ufw/before.rules 2>/dev/null || true
+        echo "Furnace: removed its ufw rules. ufw stays on. Check the rest with: sudo ufw status"
+    fi
+fi
+
+rm -rf /usr/lib/furnace/furnace/__pycache__
+exit 0

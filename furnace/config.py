@@ -2,7 +2,7 @@
 
 All settings come from environment variables that start with FURNACE_.
 On a server they live in /etc/furnace/furnace.env, which systemd loads
-for the services and which furnace-admin reads on its own.
+for the services and which the furnace command reads on its own.
 """
 
 from __future__ import annotations

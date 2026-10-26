@@ -1,0 +1,899 @@
+#!/usr/bin/env bash
+# Furnace setup for Ubuntu 22.04 and 24.04. Run it as: sudo furnace setup
+#
+#   sudo furnace setup                 ask the questions, then configure and start everything
+#   sudo furnace setup --config FILE   take the answers from a settings file (no questions)
+#   sudo furnace setup --bundle FILE   the follower bundle from the leader (default: look in the usual places)
+#   sudo furnace setup --check         show what setup would do, change nothing
+#   sudo furnace setup --upgrade       use the saved answers again (the package upgrade runs this)
+#
+# Safe to run again: it never wipes the database and never changes the
+# API tokens or the certificate.
+set -Eeuo pipefail
+umask 022
+
+LIB=/usr/lib/furnace
+ETC=/etc/furnace
+DATA=/var/lib/furnace
+EDL=/var/lib/furnace-edl
+INCOMING=/var/lib/furnace-incoming
+SYNC_HOME=/var/lib/furnace-sync
+STATE_DIR=/run/furnace-state
+SETUP_CONF="$ETC/setup.conf"
+LOG=/var/log/furnace-setup.log
+BUNDLE_NAME=furnace-peer-bundle.tar.gz
+
+MODE=ask
+CONFIG=""
+BUNDLE_ARG=""
+CHECK=0
+LOGGING=0
+DONE=()
+TODO=()
+FAILED=0
+NEW_TOKENS=0
+UNPACK=""
+BUNDLE=""
+BUNDLE_ERR=""
+HDR=""
+
+# --------------------------------------------------------------------------- output
+
+say()  { printf '\n==> %s  [%s]\n' "$*" "$(date +%T)"; }
+ok()   { printf '    [ok] %s\n' "$*"; DONE+=("$*"); }
+info() { printf '    %s\n' "$*"; }
+warn() { printf '    [warning] %s\n' "$*"; }
+die()  { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+on_error() {
+    printf '\nERROR: setup stopped at line %s. Nothing after this point was done.\n' "$1" >&2
+    [ "$LOGGING" -eq 1 ] && printf 'See %s for details.\n' "$LOG" >&2
+}
+cleanup() {
+    [ -n "$UNPACK" ] && rm -rf "$UNPACK"
+    [ -n "$HDR" ] && rm -f "$HDR"
+    rm -f "$STATE_DIR/selftest"
+}
+trap 'on_error $LINENO' ERR
+trap cleanup EXIT
+
+usage() {
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+    exit "${1:-0}"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check) CHECK=1 ;;
+        --config) shift; [ $# -gt 0 ] || usage 2; CONFIG="$1"; MODE=config ;;
+        --bundle) shift; [ $# -gt 0 ] || usage 2; BUNDLE_ARG="$1" ;;
+        --upgrade) MODE=upgrade ;;
+        -h|--help) usage 0 ;;
+        *) echo "Unknown option: $1" >&2; usage 2 ;;
+    esac
+    shift
+done
+
+# --------------------------------------------------------------------------- basic checks
+
+[ "$(id -u)" -eq 0 ] || die "Run setup as root: sudo furnace setup"
+
+[ -r /etc/os-release ] || die "Cannot read /etc/os-release. Only Ubuntu 22.04 and 24.04 are supported."
+# shellcheck source=/dev/null
+. /etc/os-release
+if [ "${ID:-}" != "ubuntu" ] || { [ "${VERSION_ID:-}" != "22.04" ] && [ "${VERSION_ID:-}" != "24.04" ]; }; then
+    die "This is ${PRETTY_NAME:-an unknown system}. Only Ubuntu 22.04 and 24.04 are supported."
+fi
+
+if [ -d /opt/furnace/venv ]; then
+    die "An old Furnace (installed with install.sh) is on this server.
+  Remove it first. This keeps the database and the tokens:  sudo /opt/furnace/uninstall.sh
+  Then run setup again."
+fi
+
+# --------------------------------------------------------------------------- settings
+
+KEYS="ROLE THIS_IP PEER_IP SHARED_IP SHARED_IP_PREFIX INTERFACE XSOAR_IP FIREWALL_IP ARCHIVE_AFTER_DAYS
+KEEPALIVED_PASSWORD VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS SSH_ALLOW_FROM HOST_FIREWALL"
+# The order the checks run in: later checks use the earlier values.
+CHECK_ORDER="ROLE INTERFACE THIS_IP PEER_IP SHARED_IP SHARED_IP_PREFIX XSOAR_IP FIREWALL_IP ARCHIVE_AFTER_DAYS
+KEEPALIVED_PASSWORD VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS SSH_ALLOW_FROM HOST_FIREWALL"
+# Settings the follower takes from the leader. They must be the same on both servers.
+SHARED_KEYS="SHARED_IP SHARED_IP_PREFIX XSOAR_IP FIREWALL_IP ARCHIVE_AFTER_DAYS KEEPALIVED_PASSWORD
+VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS"
+
+for k in $KEYS; do printf -v "CFG_$k" '%s' ""; done
+
+trim() {
+    local s="${1%$'\r'}"
+    s="${s#"${s%%[![:space:]]*}"}"
+    printf '%s' "${s%"${s##*[![:space:]]}"}"
+}
+
+# load_file FILE PREFIX: read KEY=VALUE lines into PREFIX_KEY variables.
+load_file() {
+    local file="$1" prefix="$2" line key value
+    [ -f "$file" ] || die "The settings file $file does not exist."
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="$(trim "$line")"
+        [ -z "$line" ] && continue
+        [ "${line:0:1}" = "#" ] && continue
+        [[ "$line" == *=* ]] || die "Bad line in $file: '$line'. Use KEY=VALUE."
+        key="$(trim "${line%%=*}")"
+        value="$(trim "${line#*=}")"
+        if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
+            value="${BASH_REMATCH[1]}"
+        fi
+        case " $(echo $KEYS) " in
+            *" $key "*) printf -v "${prefix}_$key" '%s' "$value" ;;
+            *) die "Unknown setting '$key' in $file." ;;
+        esac
+    done < "$file"
+}
+
+is_ipv4() {
+    python3 - "$1" <<'PY' 2>/dev/null
+import ipaddress, sys
+ip = ipaddress.ip_address(sys.argv[1])
+sys.exit(0 if ip.version == 4 and str(ip) == sys.argv[1] else 1)
+PY
+}
+
+is_ip_or_cidr() {
+    python3 - "$1" <<'PY' 2>/dev/null
+import ipaddress, sys
+ipaddress.ip_network(sys.argv[1], strict=True)
+PY
+}
+
+is_int_between() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]; }
+
+split_list() { echo "$1" | tr ',' ' '; }
+
+# Network helpers, used for the default answers.
+default_card() { ip -o -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}'; }
+card_of_ip()   { ip -o -4 addr show 2>/dev/null | awk -v ip="$1" '{split($4, a, "/"); if (a[1] == ip) { print $2; exit }}'; }
+primary_ip()   { ip -o -4 addr show dev "$1" primary 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}'; }
+prefix_of()    { ip -o -4 addr show dev "$1" 2>/dev/null | awk -v ip="$2" '{split($4, a, "/"); if (a[1] == ip) { print a[2]; exit }}'; }
+
+# One check per setting. Each prints the problem and returns 1, or returns 0.
+check_ROLE() { [[ "$1" =~ ^(leader|follower)$ ]] || { echo "ROLE must be 'leader' or 'follower', not '$1'."; return 1; }; }
+check_INTERFACE() {
+    [[ "$1" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]] || { echo "INTERFACE '$1' is not a valid network card name."; return 1; }
+    ip link show "$1" >/dev/null 2>&1 || { echo "The network card '$1' does not exist on this server. See: ip -br addr"; return 1; }
+}
+check_THIS_IP() {
+    is_ipv4 "$1" || { echo "THIS_IP '$1' is not a valid IPv4 address."; return 1; }
+    ip -o -4 addr show dev "$CFG_INTERFACE" | grep -qw "inet ${1}/[0-9]*" \
+        || { echo "THIS_IP $1 is not set on the network card $CFG_INTERFACE. See: ip -br addr"; return 1; }
+}
+check_PEER_IP() {
+    is_ipv4 "$1" || { echo "PEER_IP '$1' is not a valid IPv4 address."; return 1; }
+    [ "$1" != "$CFG_THIS_IP" ] || { echo "PEER_IP must be the other server, not this server ($CFG_THIS_IP)."; return 1; }
+}
+check_SHARED_IP() {
+    is_ipv4 "$1" || { echo "SHARED_IP '$1' is not a valid IPv4 address."; return 1; }
+    [ "$1" != "$CFG_THIS_IP" ] && [ "$1" != "$CFG_PEER_IP" ] \
+        || { echo "SHARED_IP must be a third address, not the IP of one of the servers."; return 1; }
+}
+check_SHARED_IP_PREFIX() { is_int_between "$1" 8 32 || { echo "SHARED_IP_PREFIX must be a number from 8 to 32."; return 1; }; }
+check_ip_list() {  # NAME VALUE
+    local item
+    [ -n "$(split_list "$2" | tr -d ' ')" ] || { echo "$1 needs at least one IP address."; return 1; }
+    for item in $(split_list "$2"); do
+        is_ip_or_cidr "$item" || { echo "$1 contains '$item'. That is not a valid IP address."; return 1; }
+    done
+}
+check_XSOAR_IP() { check_ip_list XSOAR_IP "$1"; }
+check_FIREWALL_IP() { check_ip_list FIREWALL_IP "$1"; }
+check_ARCHIVE_AFTER_DAYS() { is_int_between "$1" 1 3650 || { echo "ARCHIVE_AFTER_DAYS must be a number from 1 to 3650."; return 1; }; }
+check_KEEPALIVED_PASSWORD() {
+    [[ "$1" =~ ^[A-Za-z0-9._@%+=:!-]{6,8}$ ]] \
+        || { echo "KEEPALIVED_PASSWORD must be 6 to 8 characters: letters, numbers or . _ @ % + = : ! -"; return 1; }
+    [ "$1" != "Chg3Me!x" ] || { echo "KEEPALIVED_PASSWORD is still the example value. Choose your own or leave it empty."; return 1; }
+}
+check_VRRP_ROUTER_ID() { is_int_between "$1" 1 255 || { echo "VRRP_ROUTER_ID must be a number from 1 to 255."; return 1; }; }
+check_USE_HTTPS() { [[ "$1" =~ ^(yes|no)$ ]] || { echo "USE_HTTPS must be 'yes' or 'no'."; return 1; }; }
+check_MAX_IPS() { is_int_between "$1" 0 10000000 || { echo "MAX_IPS must be a number (0 means no limit)."; return 1; }; }
+check_MAX_DOMAINS() { is_int_between "$1" 0 10000000 || { echo "MAX_DOMAINS must be a number (0 means no limit)."; return 1; }; }
+check_SSH_ALLOW_FROM() {
+    [ "$1" = "any" ] && return 0
+    local item
+    for item in $(split_list "$1"); do
+        is_ip_or_cidr "$item" || { echo "SSH_ALLOW_FROM contains '$item'. Use 'any' or IP addresses."; return 1; }
+    done
+}
+check_HOST_FIREWALL() { [[ "$1" =~ ^(ufw|none)$ ]] || { echo "HOST_FIREWALL must be 'ufw' or 'none'."; return 1; }; }
+
+validate_all() {
+    local k var msg
+    for k in $CHECK_ORDER; do
+        var="CFG_$k"
+        [ -n "${!var}" ] || die "The setting $k is empty."
+        msg="$("check_$k" "${!var}")" || die "$msg"
+    done
+}
+
+new_password() {
+    python3 -c 'import secrets, string; a = string.ascii_letters + string.digits; print("".join(secrets.choice(a) for _ in range(8)))'
+}
+
+# Fill in what is still empty. Cards and IPs are found on this server.
+fill_defaults() {
+    : "${CFG_SHARED_IP_PREFIX:=24}" "${CFG_VRRP_ROUTER_ID:=51}" "${CFG_USE_HTTPS:=yes}"
+    : "${CFG_MAX_IPS:=50000}" "${CFG_MAX_DOMAINS:=50000}" "${CFG_SSH_ALLOW_FROM:=any}"
+    : "${CFG_HOST_FIREWALL:=ufw}" "${CFG_ARCHIVE_AFTER_DAYS:=30}"
+    if [ -z "$CFG_INTERFACE" ]; then
+        if [ -n "$CFG_THIS_IP" ]; then CFG_INTERFACE="$(card_of_ip "$CFG_THIS_IP")"; else CFG_INTERFACE="$(default_card)"; fi
+    fi
+    if [ -z "$CFG_THIS_IP" ] && [ -n "$CFG_INTERFACE" ]; then CFG_THIS_IP="$(primary_ip "$CFG_INTERFACE")"; fi
+    if [ -z "$CFG_KEEPALIVED_PASSWORD" ] && [ "$CFG_ROLE" = "leader" ]; then CFG_KEEPALIVED_PASSWORD="$(new_password)"; fi
+    return 0
+}
+
+have_secrets() { [ -f "$ETC/tokens.env" ] && [ -f "$ETC/tls/furnace.crt" ] && [ -f "$ETC/ssh/replica_key" ]; }
+
+# --------------------------------------------------------------------------- follower bundle
+
+find_bundle() {
+    local place home=""
+    [ -n "${SUDO_USER:-}" ] && home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    for place in "$BUNDLE_ARG" "$PWD/$BUNDLE_NAME" "${home:+$home/$BUNDLE_NAME}" "/root/$BUNDLE_NAME" "/tmp/$BUNDLE_NAME"; do
+        [ -n "$place" ] && [ -f "$place" ] && { echo "$place"; return 0; }
+    done
+    return 1
+}
+
+# open_bundle FILE: unpack it, check it, and read the leader's settings into B_*.
+# Returns 1 with the problem in BUNDLE_ERR when the file is not a usable bundle.
+open_bundle() {
+    local f
+    [ -n "$UNPACK" ] && rm -rf "$UNPACK"
+    UNPACK="$(mktemp -d)"
+    if ! (umask 077; tar -xzf "$1" -C "$UNPACK" 2>/dev/null); then
+        BUNDLE_ERR="$1 is not a Furnace bundle (it cannot be unpacked)."
+        return 1
+    fi
+    for f in tokens.env tls/furnace.crt tls/furnace.key ssh/replica_key ssh/replica_key.pub setup.conf; do
+        if [ ! -f "$UNPACK/$f" ]; then
+            BUNDLE_ERR="The bundle $1 is incomplete ($f is missing). Make it again with a current Furnace on the leader."
+            return 1
+        fi
+    done
+    for k in $KEYS; do printf -v "B_$k" '%s' ""; done
+    load_file "$UNPACK/setup.conf" B
+    [ "$B_ROLE" = "leader" ] || { BUNDLE_ERR="The bundle $1 was not made by a leader."; return 1; }
+    BUNDLE="$1"
+}
+
+# Take the shared settings from the leader. STRICT=1: a different value in the
+# settings file is an error. The follower's IP is the leader's PEER_IP.
+apply_bundle() {
+    local strict="$1" k b c
+    for k in $SHARED_KEYS; do
+        b="B_$k"; c="CFG_$k"
+        if [ "$strict" -eq 1 ] && [ -n "${!c}" ] && [ "${!c}" != "${!b}" ]; then
+            die "$k is '${!c}' in your settings file, but '${!b}' on the leader. Both servers need the same value. Remove it from the file or use the leader's value."
+        fi
+        printf -v "$c" '%s' "${!b}"
+    done
+    if [ -n "$CFG_THIS_IP" ] && [ "$CFG_THIS_IP" != "$B_PEER_IP" ]; then
+        die "This server is $CFG_THIS_IP, but the leader expects the follower at $B_PEER_IP (PEER_IP on the leader)."
+    fi
+    if [ -n "$CFG_PEER_IP" ] && [ "$CFG_PEER_IP" != "$B_THIS_IP" ]; then
+        die "PEER_IP is $CFG_PEER_IP, but the leader is $B_THIS_IP."
+    fi
+    CFG_THIS_IP="$B_PEER_IP"
+    CFG_PEER_IP="$B_THIS_IP"
+    : "${CFG_SSH_ALLOW_FROM:=$B_SSH_ALLOW_FROM}" "${CFG_HOST_FIREWALL:=$B_HOST_FIREWALL}"
+    if [ -z "$CFG_INTERFACE" ]; then
+        CFG_INTERFACE="$(card_of_ip "$CFG_THIS_IP")"
+        [ -n "$CFG_INTERFACE" ] || die "The leader expects this server at $CFG_THIS_IP, but no network card here has that IP.
+  Check PEER_IP on the leader (sudo cat $SETUP_CONF there), or set the IP on this server. See: ip -br addr"
+    fi
+}
+
+# --------------------------------------------------------------------------- questions
+
+# ask KEY QUESTION DEFAULT: ask until the answer passes check_KEY.
+ask() {
+    local key="$1" question="$2" default="$3" answer msg
+    while true; do
+        if [ -n "$default" ]; then
+            read -r -p "  $question [$default]: " answer < /dev/tty || die "No answer (the input was closed)."
+        else
+            read -r -p "  $question: " answer < /dev/tty || die "No answer (the input was closed)."
+        fi
+        answer="$(trim "$answer")"
+        answer="${answer:-$default}"
+        if [ -z "$answer" ]; then
+            echo "    Please type an answer."
+            continue
+        fi
+        if msg="$("check_$key" "$answer")"; then
+            printf -v "CFG_$key" '%s' "$answer"
+            return 0
+        fi
+        printf '    %s\n' "$msg"
+    done
+}
+
+# ask_yes_no QUESTION DEFAULT(yes|no): returns 0 for yes.
+ask_yes_no() {
+    local answer
+    while true; do
+        read -r -p "  $1 [$2]: " answer < /dev/tty || die "No answer (the input was closed)."
+        answer="$(trim "$answer")"
+        answer="${answer:-$2}"
+        case "${answer,,}" in
+            y|yes) return 0 ;;
+            n|no) return 1 ;;
+            *) echo "    Please answer yes or no." ;;
+        esac
+    done
+}
+
+note() { printf '\n  %s\n' "$*"; }
+
+ask_follower_from_bundle() {
+    local place msg
+    if ! { place="$(find_bundle)" && open_bundle "$place"; }; then
+        [ -n "$BUNDLE_ERR" ] && printf '    %s\n' "$BUNDLE_ERR"
+        note "The follower needs the file $BUNDLE_NAME from the leader."
+        note "On the leader it is /root/$BUNDLE_NAME. Copy it to this server first."
+        while true; do
+            read -r -p "  Where is $BUNDLE_NAME? (full path): " place < /dev/tty || die "No answer (the input was closed)."
+            place="$(trim "$place")"
+            if [ ! -f "$place" ]; then echo "    There is no file $place."; continue; fi
+            if open_bundle "$place"; then break; fi
+            printf '    %s\n' "$BUNDLE_ERR"
+        done
+    fi
+    note "Found the leader's bundle: $BUNDLE"
+    info "  The leader is $B_THIS_IP. This server must be $B_PEER_IP. The other settings come from the leader."
+    apply_bundle 0
+    note "Network card for $CFG_THIS_IP and the shared IP ($CFG_SHARED_IP)."
+    ask INTERFACE "Network card" "$CFG_INTERFACE"
+    msg="$(check_THIS_IP "$CFG_THIS_IP")" || die "$msg"
+}
+
+ask_all() {
+    local card ip
+    note "Leader = the first server. Follower = the second (standby) server. Set up the leader first."
+    ask ROLE "Is this server the leader or the follower?" "${CFG_ROLE:-leader}"
+    if [ "$CFG_ROLE" = "follower" ] && ! have_secrets; then
+        ask_follower_from_bundle
+        return
+    fi
+
+    card="${CFG_INTERFACE:-$(default_card)}"
+    note "The network card that carries this server's IP and the shared IP. See: ip -br addr"
+    ask INTERFACE "Network card" "$card"
+    ip="${CFG_THIS_IP:-$(primary_ip "$CFG_INTERFACE")}"
+    ask THIS_IP "This server's IP" "$ip"
+    ask PEER_IP "The other Furnace server's IP" "$CFG_PEER_IP"
+    note "The shared IP (VIP) is a free third address. The firewall and XSOAR always use it."
+    ask SHARED_IP "Shared IP" "$CFG_SHARED_IP"
+    ask SHARED_IP_PREFIX "Network prefix of the shared IP (24 = 255.255.255.0)" \
+        "${CFG_SHARED_IP_PREFIX:-$(prefix_of "$CFG_INTERFACE" "$CFG_THIS_IP")}"
+    note "Several addresses are allowed, separated by commas (for example XSOAR engines, a firewall HA pair)."
+    ask XSOAR_IP "XSOAR IP that may call the API" "$CFG_XSOAR_IP"
+    ask FIREWALL_IP "Firewall IP that downloads the lists (often the management IP)" "$CFG_FIREWALL_IP"
+    note "The firewall's EDL limit. Adds beyond it are refused. 0 = no limit. Used for both lists."
+    ask MAX_IPS "Most entries per list" "${CFG_MAX_IPS:-50000}"
+    CFG_MAX_DOMAINS="$CFG_MAX_IPS"
+    ask ARCHIVE_AFTER_DAYS "Days an IP stays blocked before it moves to the archive" "${CFG_ARCHIVE_AFTER_DAYS:-30}"
+    note "VRRP router ID: the same on both servers, unique in this network. Keep 51 if you are not sure."
+    ask VRRP_ROUTER_ID "VRRP router ID (1-255)" "${CFG_VRRP_ROUTER_ID:-51}"
+    note "Who may log in with SSH: 'any', or IPs separated by commas. The other server is always allowed."
+    ask SSH_ALLOW_FROM "SSH allowed from" "${CFG_SSH_ALLOW_FROM:-any}"
+    local fw_default=yes
+    [ "${CFG_HOST_FIREWALL:-ufw}" = "none" ] && fw_default=no
+    if ask_yes_no "Let Furnace set up this server's own firewall (ufw)?" "$fw_default"; then
+        CFG_HOST_FIREWALL=ufw
+    else
+        CFG_HOST_FIREWALL=none
+    fi
+}
+
+show_settings() {
+    printf '\n  Settings:\n'
+    printf '    %-22s %s\n' "Role" "$CFG_ROLE" "Network card" "$CFG_INTERFACE" "This server" "$CFG_THIS_IP" \
+        "Other server" "$CFG_PEER_IP" "Shared IP" "$CFG_SHARED_IP/$CFG_SHARED_IP_PREFIX" "XSOAR" "$CFG_XSOAR_IP" \
+        "Firewall" "$CFG_FIREWALL_IP" "Most IPs / domains" "$CFG_MAX_IPS / $CFG_MAX_DOMAINS" \
+        "Archive after" "$CFG_ARCHIVE_AFTER_DAYS days" "VRRP router ID" "$CFG_VRRP_ROUTER_ID" \
+        "SSH allowed from" "$CFG_SSH_ALLOW_FROM" "Host firewall" "$CFG_HOST_FIREWALL" "HTTPS" "$CFG_USE_HTTPS"
+}
+
+write_setup_conf() {
+    local k var
+    (
+        umask 077
+        {
+            echo "# Furnace settings, saved by 'furnace setup'. Secret (keepalived password)."
+            echo "# Change them with: sudo furnace setup"
+            for k in $KEYS; do var="CFG_$k"; printf '%s=%s\n' "$k" "${!var}"; done
+        } > "$SETUP_CONF.tmp"
+    )
+    mv -f "$SETUP_CONF.tmp" "$SETUP_CONF"
+}
+
+# --------------------------------------------------------------------------- collect the settings
+
+case "$MODE" in
+    upgrade)
+        [ -f "$SETUP_CONF" ] || die "Furnace is not set up yet. Run: sudo furnace setup"
+        load_file "$SETUP_CONF" CFG
+        ;;
+    config)
+        load_file "$CONFIG" CFG
+        msg="$(check_ROLE "$CFG_ROLE")" || die "$msg"
+        if [ "$CFG_ROLE" = "follower" ] && ! have_secrets; then
+            place="$(find_bundle)" || die "The follower needs $BUNDLE_NAME from the leader.
+  1. Set up the leader first. It writes /root/$BUNDLE_NAME.
+  2. Copy that file to this server, for example to /root or your home folder.
+  3. Run setup again, or give the path: sudo furnace setup --config $CONFIG --bundle FILE"
+            open_bundle "$place" || die "$BUNDLE_ERR"
+            apply_bundle 1
+        fi
+        ;;
+    ask)
+        { : < /dev/tty; } 2>/dev/null || die "setup asks questions, but there is no terminal. Use: sudo furnace setup --config FILE"
+        printf '\nFurnace setup. Press Enter to take the answer in [brackets].\n'
+        if [ -f "$SETUP_CONF" ]; then
+            load_file "$SETUP_CONF" CFG
+            printf 'Furnace is already set up here. The brackets show the current answers.\n'
+        fi
+        ask_all
+        ;;
+esac
+fill_defaults
+validate_all
+
+if [ "$MODE" = "ask" ]; then
+    show_settings
+    printf '\n'
+    ask_yes_no "Set up Furnace with these settings?" yes || { echo "Stopped. Nothing was changed."; exit 1; }
+fi
+
+if [ "$CFG_ROLE" = "leader" ]; then PRIORITY=150; else PRIORITY=100; fi
+if [ "$CFG_USE_HTTPS" = "yes" ]; then WEB_PORT=443; SCHEME=https; else WEB_PORT=80; SCHEME=http; fi
+SSH_PORT="$( (sshd -T 2>/dev/null || true) | awk '$1=="port"{print $2; exit}')"
+SSH_PORT="${SSH_PORT:-22}"
+
+# --------------------------------------------------------------------------- check mode
+
+exists() { [ -e "$1" ] && echo "exists, kept" || echo "will be created"; }
+
+if [ "$CHECK" -eq 1 ]; then
+    say "Check mode: this is what setup would do. Nothing is changed."
+    [ -f "$SETUP_CONF" ] && info "Furnace is already set up. This run would UPDATE it." \
+                         || info "Furnace is not set up yet. This run would SET IT UP."
+    info "Settings: role $CFG_ROLE, this server $CFG_THIS_IP on $CFG_INTERFACE, other server $CFG_PEER_IP,"
+    info "  shared IP $CFG_SHARED_IP/$CFG_SHARED_IP_PREFIX, XSOAR $CFG_XSOAR_IP, firewall $CFG_FIREWALL_IP"
+    info "Users: furnace (no login), furnace-sync (replication only, forced command)"
+    info "Database $DATA/furnace.db: $(exists "$DATA/furnace.db")"
+    info "API tokens $ETC/tokens.env: $(exists "$ETC/tokens.env")"
+    if [ "$CFG_USE_HTTPS" = "yes" ]; then
+        info "Certificate $ETC/tls/furnace.crt: $(exists "$ETC/tls/furnace.crt")"
+    fi
+    info "Replication key $ETC/ssh/replica_key: $(exists "$ETC/ssh/replica_key")"
+    if [ "$CFG_ROLE" = "follower" ] && ! have_secrets; then
+        info "Follower: secrets come from the leader bundle $BUNDLE"
+    fi
+    info "Files written: $SETUP_CONF, $ETC/furnace.env, $ETC/install.env, /etc/nginx/sites-available/furnace,"
+    info "  /etc/keepalived/keepalived.conf (priority $PRIORITY)"
+    if [ "$CFG_HOST_FIREWALL" = "ufw" ]; then
+        info "Host firewall (ufw): allow SSH port $SSH_PORT from $CFG_SSH_ALLOW_FROM and $CFG_PEER_IP,"
+        info "  port $WEB_PORT from firewall ($CFG_FIREWALL_IP), XSOAR ($CFG_XSOAR_IP) and $CFG_PEER_IP,"
+        info "  VRRP (protocol 112) from $CFG_PEER_IP. Deny everything else coming in."
+    else
+        info "Host firewall: not touched (HOST_FIREWALL=none)."
+    fi
+    info "Services: furnace-api, nginx, keepalived, timers furnace-replicate, furnace-backup,"
+    info "  furnace-cleanup (started by keepalived on the leader only)"
+    info "Self-test: add 192.0.2.123, check it in the served EDL, remove it (leader only)"
+    exit 0
+fi
+
+# --------------------------------------------------------------------------- setup steps
+
+touch "$LOG" && chmod 0600 "$LOG"
+exec > >(tee -a "$LOG") 2>&1
+LOGGING=1
+printf '\n----- Furnace setup started %s (%s) -----\n' "$(date -u +%FT%TZ)" "$MODE"
+
+# Replication needs the SSH server. Ubuntu 24.04 starts it through ssh.socket, 22.04 through ssh.service.
+if ! systemctl is-active --quiet ssh.service && ! systemctl is-active --quiet ssh.socket; then
+    if systemctl cat ssh.socket >/dev/null 2>&1 && [ "${VERSION_ID}" = "24.04" ]; then
+        systemctl enable --quiet --now ssh.socket
+    else
+        systemctl enable --quiet --now ssh.service
+    fi
+    ok "SSH server started (needed for replication)"
+fi
+
+say "Creating users and folders"
+if ! id furnace >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir "$DATA" --no-create-home --shell /usr/sbin/nologin furnace
+fi
+if ! id furnace-sync >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir "$SYNC_HOME" --create-home --shell /bin/sh furnace-sync
+fi
+usermod -p '*' furnace-sync   # no password; only the replication key can log in
+install -d -m 0750 -o root -g furnace "$ETC"
+install -d -m 0700 -o root -g root "$ETC/tls"
+install -d -m 0750 -o root -g furnace "$ETC/ssh"
+install -d -m 0750 -o furnace -g furnace "$DATA" "$DATA/archive" "$DATA/backups" "$DATA/reports" "$DATA/replica"
+install -d -m 0755 -o furnace -g furnace "$EDL"
+install -d -m 2750 -o furnace-sync -g furnace "$INCOMING"
+install -d -m 0700 -o furnace-sync -g furnace-sync "$SYNC_HOME" "$SYNC_HOME/.ssh"
+install -d -m 0755 "$STATE_DIR"
+[ -f "$STATE_DIR/role" ] || echo follower > "$STATE_DIR/role"
+ok "Users furnace and furnace-sync, and folders are ready"
+
+write_setup_conf
+ok "Settings saved in $SETUP_CONF"
+
+as_furnace() {
+    runuser -u furnace -- env FURNACE_CONFIG="$ETC/furnace.env" PYTHONPATH="$LIB" PYTHONDONTWRITEBYTECODE=1 \
+        python3 -m furnace "$@"
+}
+VERSION="$(PYTHONPATH="$LIB" python3 -c 'import furnace; print(furnace.__version__)')"
+
+# --------------------------------------------------------------------------- secrets
+
+cert_names_ok() {
+    local san
+    san="$(openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null || true)"
+    for ip in "$CFG_SHARED_IP" "$CFG_THIS_IP" "$CFG_PEER_IP"; do
+        grep -Eq "IP Address:${ip//./\\.}(,|\$)" <<< "$san" || return 1
+    done
+}
+
+make_tokens() {
+    local block whitelist
+    block="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    whitelist="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    (umask 077; printf 'FURNACE_BLOCK_TOKEN=%s\nFURNACE_WHITELIST_TOKEN=%s\n' "$block" "$whitelist" > "$ETC/tokens.env")
+}
+
+make_cert() {
+    local key="$ETC/tls/furnace.key" crt="$ETC/tls/furnace.crt"
+    (umask 077; openssl req -x509 -newkey rsa:3072 -sha256 -days 3650 -nodes \
+        -keyout "$key" -out "$crt" -subj "/CN=Furnace ${CFG_SHARED_IP}/O=Furnace" \
+        -addext "subjectAltName=IP:${CFG_SHARED_IP},IP:${CFG_THIS_IP},IP:${CFG_PEER_IP},IP:127.0.0.1" \
+        -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+        -addext "keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign" \
+        -addext "extendedKeyUsage=serverAuth" 2>/dev/null)
+    chmod 0644 "$crt"
+}
+
+fix_secret_modes() {
+    chown furnace:furnace "$ETC/tokens.env" && chmod 0400 "$ETC/tokens.env"
+    chown furnace:furnace "$ETC/ssh/replica_key" && chmod 0400 "$ETC/ssh/replica_key"
+    chmod 0644 "$ETC/ssh/replica_key.pub"
+    chmod 0600 "$ETC/tls/furnace.key"
+    chmod 0644 "$ETC/tls/furnace.crt"
+}
+
+say "Preparing secrets (API tokens, certificate, replication key)"
+if [ "$CFG_ROLE" = "leader" ]; then
+    if [ ! -f "$ETC/tokens.env" ]; then
+        make_tokens
+        NEW_TOKENS=1
+        ok "New API tokens created in $ETC/tokens.env"
+    else
+        ok "API tokens kept (not changed)"
+    fi
+    if [ ! -f "$ETC/tls/furnace.crt" ] || [ ! -f "$ETC/tls/furnace.key" ]; then
+        make_cert
+        ok "Self-signed certificate created (10 years) for ${CFG_SHARED_IP}, ${CFG_THIS_IP}, ${CFG_PEER_IP}"
+    else
+        ok "Certificate kept (not changed)"
+    fi
+    if [ ! -f "$ETC/ssh/replica_key" ]; then
+        ssh-keygen -q -t ed25519 -N "" -C "furnace-replica" -f "$ETC/ssh/replica_key"
+        ok "Replication SSH key created"
+    else
+        ok "Replication SSH key kept (not changed)"
+    fi
+    fix_secret_modes
+    BUNDLE="/root/$BUNDLE_NAME"
+    (umask 077; tar -czf "$BUNDLE" -C "$ETC" tokens.env tls/furnace.crt tls/furnace.key ssh/replica_key \
+        ssh/replica_key.pub setup.conf)
+    chmod 0600 "$BUNDLE"
+    ok "Follower bundle written to $BUNDLE (secret: copy it to the follower, then delete the copy)"
+else
+    if have_secrets; then
+        ok "Tokens, certificate and replication key kept (not changed)"
+    else
+        cert_names_ok "$UNPACK/tls/furnace.crt" \
+            || die "The certificate in the bundle does not name ${CFG_SHARED_IP}, ${CFG_THIS_IP} and ${CFG_PEER_IP}."
+        cp "$UNPACK/tokens.env" "$ETC/tokens.env"
+        cp "$UNPACK/tls/furnace.crt" "$UNPACK/tls/furnace.key" "$ETC/tls/"
+        cp "$UNPACK/ssh/replica_key" "$UNPACK/ssh/replica_key.pub" "$ETC/ssh/"
+        fix_secret_modes
+        rm -f "$BUNDLE"
+        ok "Tokens, certificate and replication key copied from the leader bundle (bundle file deleted)"
+    fi
+fi
+if [ "$CFG_USE_HTTPS" = "yes" ] && ! cert_names_ok "$ETC/tls/furnace.crt"; then
+    warn "The certificate does not name all of ${CFG_SHARED_IP}, ${CFG_THIS_IP}, ${CFG_PEER_IP}."
+    warn "If the IPs changed: delete $ETC/tls on the leader, run setup there, then on the follower."
+    TODO+=("Fix the certificate: it does not name all server IPs.")
+fi
+
+# --------------------------------------------------------------------------- config files
+
+say "Writing configuration files"
+export R_ROLE="$CFG_ROLE" R_THIS_IP="$CFG_THIS_IP" R_PEER_IP="$CFG_PEER_IP" R_SHARED_IP="$CFG_SHARED_IP"
+export R_SHARED_IP_PREFIX="$CFG_SHARED_IP_PREFIX" R_INTERFACE="$CFG_INTERFACE" R_PRIORITY="$PRIORITY"
+export R_VRRP_ROUTER_ID="$CFG_VRRP_ROUTER_ID" R_ARCHIVE_AFTER_DAYS="$CFG_ARCHIVE_AFTER_DAYS"
+export R_MAX_IPS="$CFG_MAX_IPS" R_MAX_DOMAINS="$CFG_MAX_DOMAINS"
+
+allow_lines() {
+    local item out=""
+    for item in $(split_list "$1"); do out+="        allow ${item};"$'\n'; done
+    printf '%s' "${out%$'\n'}"
+}
+R_FIREWALL_ALLOW="$(allow_lines "$CFG_FIREWALL_IP")"
+R_XSOAR_ALLOW="$(allow_lines "$CFG_XSOAR_IP")"
+if [ "$CFG_USE_HTTPS" = "yes" ]; then
+    R_LISTEN="    listen 443 ssl;"
+    R_TLS="    ssl_certificate $ETC/tls/furnace.crt;
+    ssl_certificate_key $ETC/tls/furnace.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:furnace_tls:5m;"
+else
+    R_LISTEN="    listen 80;"
+    R_TLS="    # Plain HTTP (USE_HTTPS=no). Test lab only."
+fi
+export R_FIREWALL_ALLOW R_XSOAR_ALLOW R_LISTEN R_TLS
+
+render() { python3 "$LIB/render.py" "$1" "$2"; }
+
+# Remember whether the settings change: only then does the API need a full restart.
+ENV_CHANGED=1
+NEW_ENV="$(mktemp)"
+render "$LIB/templates/furnace.env.tmpl" "$NEW_ENV"
+if cmp -s "$NEW_ENV" "$ETC/furnace.env"; then ENV_CHANGED=0; fi
+install -m 0640 -o root -g furnace "$NEW_ENV" "$ETC/furnace.env"
+rm -f "$NEW_ENV"
+
+cat > "$ETC/install.env" <<EOF
+# Non-secret settings, used by the Furnace helper scripts. Written by 'furnace setup'.
+ROLE=$CFG_ROLE
+THIS_IP=$CFG_THIS_IP
+PEER_IP=$CFG_PEER_IP
+SHARED_IP=$CFG_SHARED_IP
+INTERFACE=$CFG_INTERFACE
+USE_HTTPS=$CFG_USE_HTTPS
+EOF
+chmod 0644 "$ETC/install.env"
+ok "Wrote $ETC/furnace.env and $ETC/install.env"
+
+PUBKEY="$(cat "$ETC/ssh/replica_key.pub")"
+printf 'restrict,command="%s/bin/furnace-receive-replica" %s\n' "$LIB" "$PUBKEY" > "$SYNC_HOME/.ssh/authorized_keys"
+chown furnace-sync:furnace-sync "$SYNC_HOME/.ssh/authorized_keys"
+chmod 0600 "$SYNC_HOME/.ssh/authorized_keys"
+ok "Replication login prepared (furnace-sync may only receive snapshots)"
+
+render "$LIB/templates/nginx-furnace.conf.tmpl" /etc/nginx/sites-available/furnace
+ln -sf /etc/nginx/sites-available/furnace /etc/nginx/sites-enabled/furnace
+if [ -L /etc/nginx/sites-enabled/default ]; then
+    rm -f /etc/nginx/sites-enabled/default
+    info "Disabled the nginx default site"
+fi
+nginx -t -q || die "The nginx configuration test failed. See the messages above."
+ok "nginx configured (EDL only to $CFG_FIREWALL_IP, API only to $CFG_XSOAR_IP, rate limits on)"
+
+if [ -f /etc/keepalived/keepalived.conf ] && ! grep -q "^# Furnace" /etc/keepalived/keepalived.conf; then
+    cp /etc/keepalived/keepalived.conf "/etc/keepalived/keepalived.conf.before-furnace.$(date +%Y%m%d%H%M%S)"
+    warn "An existing keepalived.conf was saved with the suffix .before-furnace.*"
+fi
+# Restart keepalived only when its configuration really changes. A restart releases
+# the shared IP, and with nopreempt the other server would keep it.
+KEEPALIVED_CHANGED=1
+NEW_KA="$(mktemp)"
+(umask 077; R_KEEPALIVED_PASSWORD="$CFG_KEEPALIVED_PASSWORD" \
+    render "$LIB/templates/keepalived.conf.tmpl" "$NEW_KA")
+if cmp -s "$NEW_KA" /etc/keepalived/keepalived.conf; then
+    KEEPALIVED_CHANGED=0
+    rm -f "$NEW_KA"
+else
+    install -m 0600 -o root -g root "$NEW_KA" /etc/keepalived/keepalived.conf
+    rm -f "$NEW_KA"
+fi
+ok "keepalived configured (unicast VRRP to $CFG_PEER_IP, priority $PRIORITY, nopreempt, health check)"
+
+# The package brings the systemd units. If the API unit changed (for example in an
+# upgrade), a reload is not enough: the API needs a restart.
+API_UNIT_SUM="$(sha256sum /lib/systemd/system/furnace-api.service | cut -d' ' -f1)"
+[ "$API_UNIT_SUM" = "$(cat "$ETC/.api-unit.sha256" 2>/dev/null || true)" ] || ENV_CHANGED=1
+systemctl daemon-reload
+ok "systemd units ready"
+
+# --------------------------------------------------------------------------- host firewall
+
+if [ "$CFG_HOST_FIREWALL" = "ufw" ]; then
+    say "Configuring the host firewall (ufw)"
+    ufw default deny incoming >/dev/null
+    ufw default allow outgoing >/dev/null
+    if [ "$CFG_SSH_ALLOW_FROM" = "any" ]; then
+        ufw allow "$SSH_PORT/tcp" comment 'furnace ssh' >/dev/null
+    else
+        for src in $(split_list "$CFG_SSH_ALLOW_FROM"); do
+            ufw allow from "$src" to any port "$SSH_PORT" proto tcp comment 'furnace ssh' >/dev/null
+        done
+    fi
+    ufw allow from "$CFG_PEER_IP" to any port "$SSH_PORT" proto tcp comment 'furnace replication' >/dev/null
+    for src in $(split_list "$CFG_FIREWALL_IP") $(split_list "$CFG_XSOAR_IP") "$CFG_PEER_IP"; do
+        ufw allow from "$src" to any port "$WEB_PORT" proto tcp comment 'furnace web' >/dev/null
+    done
+    if ! ufw allow from "$CFG_PEER_IP" to any proto vrrp comment 'furnace vrrp' >/dev/null 2>&1; then
+        # Older ufw without the vrrp keyword: add a raw rule for protocol 112.
+        if ! grep -q "furnace-vrrp" /etc/ufw/before.rules; then
+            sed -i "/^COMMIT/i -A ufw-before-input -p 112 -s ${CFG_PEER_IP} -j ACCEPT -m comment --comment furnace-vrrp" \
+                /etc/ufw/before.rules
+        fi
+    fi
+    ufw --force enable >/dev/null
+    ok "Host firewall on: SSH ($SSH_PORT), port $WEB_PORT from firewall/XSOAR/peer, VRRP from $CFG_PEER_IP"
+else
+    TODO+=("Host firewall was not configured (HOST_FIREWALL=none). Open port $WEB_PORT, SSH and VRRP (protocol 112) yourself.")
+fi
+
+# --------------------------------------------------------------------------- start
+
+say "Starting services"
+as_furnace rebuild >/dev/null
+ok "Database ready and EDL files written (existing data kept)"
+systemctl enable --quiet furnace-api.service
+if systemctl is-active --quiet furnace-api.service && [ "$ENV_CHANGED" -eq 0 ]; then
+    # Upgrade without downtime: new workers load the new code, the main process keeps serving.
+    systemctl reload furnace-api.service
+    info "furnace-api reloaded with the new program (no downtime)."
+else
+    systemctl restart furnace-api.service
+fi
+echo "$API_UNIT_SUM" > "$ETC/.api-unit.sha256"
+systemctl enable --quiet nginx
+if systemctl is-active --quiet nginx; then systemctl reload nginx; else systemctl start nginx; fi
+systemctl enable --quiet --now furnace-replicate.timer furnace-backup.timer furnace-apply-replica.path
+systemctl enable --quiet keepalived
+if [ "$KEEPALIVED_CHANGED" -eq 1 ] || ! systemctl is-active --quiet keepalived; then
+    systemctl restart keepalived
+    info "keepalived (re)started. If this server held the shared IP, the other server may hold it now."
+else
+    info "keepalived configuration unchanged. Not restarted, so the shared IP does not move."
+fi
+ok "Services started: furnace-api, nginx, keepalived, replication, backup"
+
+# --------------------------------------------------------------------------- self-test
+
+CURL=(curl -sS --max-time 10)
+[ "$CFG_USE_HTTPS" = "yes" ] && CURL+=(--cacert "$ETC/tls/furnace.crt")
+BASE="${SCHEME}://127.0.0.1"
+TEST_IP=192.0.2.123
+
+pass() { ok "Self-test: $*"; }
+fail() { printf '    [FAIL] Self-test: %s\n' "$*"; FAILED=1; TODO+=("Self-test failed: $*"); }
+
+# Allow the test range for a few minutes without restarting the API (a restart could move the shared IP).
+set_test_ranges() {
+    if [ "$1" = "true" ]; then touch "$STATE_DIR/selftest"; else rm -f "$STATE_DIR/selftest"; fi
+}
+
+served_blocklist_has() {
+    local body
+    body="$("${CURL[@]}" "$BASE/edl/blocklist.txt" 2>/dev/null || true)"
+    grep -qx "$1" <<< "$body"
+}
+
+peer_is_leader() {
+    local answer
+    answer="$("${CURL[@]}" "${SCHEME}://${CFG_PEER_IP}/health" 2>/dev/null || true)"
+    grep -q '"role": *"leader"' <<< "$answer"
+}
+
+wait_health() {
+    for _ in $(seq 1 30); do
+        "${CURL[@]}" -o /dev/null -f "$BASE/health" 2>/dev/null && return 0
+        sleep 1
+    done
+    return 1
+}
+
+code_of() { "${CURL[@]}" -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true; }
+
+say "Self-test"
+if wait_health; then pass "/health answers"; else fail "/health does not answer"; fi
+for file in blocklist.txt domains.txt; do
+    [ "$(code_of "$BASE/edl/$file")" = "200" ] && pass "nginx serves /edl/$file" || fail "nginx does not serve /edl/$file"
+done
+for path in /edl/archive.csv /archive/archive.csv /furnace.db /edl/../furnace/furnace.db; do
+    c="$(code_of --path-as-is "$BASE$path")"
+    [ "$c" = "404" ] || [ "$c" = "403" ] || [ "$c" = "400" ] && pass "$path is not served ($c)" || fail "$path answered $c"
+done
+[ "$(code_of -X POST "$BASE/api/v1/ips")" = "401" ] && pass "the API refuses calls without a token" \
+    || fail "the API did not refuse a call without a token"
+
+HDR="$(mktemp)"
+chmod 0600 "$HDR"
+printf 'Authorization: Bearer %s\n' "$(grep '^FURNACE_BLOCK_TOKEN=' "$ETC/tokens.env" | cut -d= -f2-)" > "$HDR"
+
+if [ "$CFG_ROLE" = "leader" ]; then
+    for _ in $(seq 1 30); do
+        [ "$(cat "$STATE_DIR/role" 2>/dev/null)" = "leader" ] && break
+        sleep 1
+    done
+    if [ "$(cat "$STATE_DIR/role" 2>/dev/null)" != "leader" ] && peer_is_leader; then
+        warn "The other server ($CFG_PEER_IP) owns the shared IP now (nopreempt). That is normal after a failover."
+        warn "The add/remove self-test runs only on the server that owns the shared IP. Skipped."
+    elif [ "$(cat "$STATE_DIR/role" 2>/dev/null)" != "leader" ]; then
+        fail "keepalived did not make this server the leader within 30 seconds"
+    else
+        pass "keepalived made this server the leader"
+        set_test_ranges true
+        c="$(code_of -X POST -H @"$HDR" -H 'Content-Type: application/json' \
+             -d "{\"ip\":\"$TEST_IP\",\"reason\":\"setup self-test\",\"added_by\":\"furnace setup\"}" "$BASE/api/v1/ips")"
+        [ "$c" = "201" ] || [ "$c" = "200" ] && pass "added $TEST_IP through the API ($c)" || fail "could not add $TEST_IP (HTTP $c)"
+        served_blocklist_has "$TEST_IP" && pass "$TEST_IP is in the blocklist served by nginx" \
+            || fail "$TEST_IP is not in the served blocklist"
+        c="$(code_of -X DELETE -H @"$HDR" "$BASE/api/v1/ips/$TEST_IP?removed_by=furnace%20setup")"
+        [ "$c" = "200" ] && pass "removed $TEST_IP through the API" || fail "could not remove $TEST_IP (HTTP $c)"
+        served_blocklist_has "$TEST_IP" && fail "$TEST_IP is still in the served blocklist" \
+            || pass "$TEST_IP is gone from the served blocklist"
+        set_test_ranges false
+    fi
+else
+    c="$(code_of -X POST -H @"$HDR" -H 'Content-Type: application/json' -d "{\"ip\":\"$TEST_IP\"}" "$BASE/api/v1/ips")"
+    if [ "$(cat "$STATE_DIR/role" 2>/dev/null)" = "leader" ]; then
+        warn "This follower owns the shared IP right now (the leader is down or not set up yet)."
+    elif [ "$c" = "503" ]; then
+        pass "the follower refuses changes while it is not the leader (503)"
+    else
+        fail "the follower answered $c to a change (expected 503)"
+    fi
+fi
+rm -f "$HDR"; HDR=""
+
+# --------------------------------------------------------------------------- summary
+
+say "Summary"
+for item in "${DONE[@]}"; do printf '  - %s\n' "$item"; done
+
+if [ "$NEW_TOKENS" -eq 1 ]; then
+    if { : > /dev/tty; } 2>/dev/null; then   # a real terminal is attached
+        {
+            printf '\n  ================== API TOKENS (shown only once) ==================\n'
+            printf '  Store them in the XSOAR credentials store. They are NOT in the log.\n'
+            sed 's/^/  /' "$ETC/tokens.env"
+            printf '  ===================================================================\n\n'
+        } > /dev/tty
+    else
+        printf '\n  New API tokens were created. Read them once with: sudo cat %s\n' "$ETC/tokens.env"
+    fi
+fi
+
+if [ "$MODE" != "upgrade" ]; then
+    if [ "$CFG_ROLE" = "leader" ]; then
+        TODO+=("Follower ($CFG_PEER_IP): copy /root/$BUNDLE_NAME and the .deb file there, then run: sudo apt install ./furnace_${VERSION}_all.deb && sudo furnace setup")
+    fi
+    TODO+=("Allow on the network: firewall -> $CFG_SHARED_IP:$WEB_PORT, XSOAR -> $CFG_SHARED_IP:$WEB_PORT, VRRP and SSH between $CFG_THIS_IP and $CFG_PEER_IP.")
+    TODO+=("Firewall: import $ETC/tls/furnace.crt as a trusted CA, create a certificate profile, and create two EDL objects (IP List and Domain List). See the README.")
+    TODO+=("XSOAR: store the tokens and the certificate, then build the HTTP calls. See the API guide in the README.")
+    TODO+=("After both servers are set up: run sudo furnace failover-test on the leader.")
+fi
+
+if [ "${#TODO[@]}" -gt 0 ]; then
+    printf '\n  Still to do by hand:\n'
+    for item in "${TODO[@]}"; do printf '  - %s\n' "$item"; done
+fi
+printf '\n  Log file: %s (no secrets in it)\n' "$LOG"
+
+if [ "$FAILED" -ne 0 ]; then
+    printf '\nSetup finished, but the self-test FAILED. Check the items above.\n' >&2
+    exit 1
+fi
+printf '\nFurnace %s is set up and the self-test passed. Check it any time with: sudo furnace status\n' "$VERSION"

@@ -7,5 +7,5 @@ User=furnace
 Group=furnace
 UMask=0027
 EnvironmentFile=/etc/furnace/furnace.env
-ExecStart=/opt/furnace/bin/furnace-replicate
+ExecStart=/usr/lib/furnace/bin/furnace-replicate
 TimeoutStartSec=50

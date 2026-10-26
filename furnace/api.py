@@ -51,8 +51,9 @@ def create_app(settings: Settings | None = None) -> Flask:
 
     app = Flask("furnace")
     app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
-    app.config["JSON_SORT_KEYS"] = False
-    app.json.sort_keys = False  # type: ignore[attr-defined]
+    app.config["JSON_SORT_KEYS"] = False  # Flask 2.0 and 2.1 (Ubuntu 22.04)
+    if hasattr(app, "json"):  # Flask 2.2 and newer
+        app.json.sort_keys = False  # type: ignore[attr-defined]
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)  # type: ignore[method-assign]
     app.extensions["furnace"] = furnace
 

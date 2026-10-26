@@ -1,7 +1,7 @@
 [Unit]
 Description=Run the Furnace cleanup every night
 # Not enabled at boot. keepalived starts this timer only on the server
-# that owns the shared IP (see /opt/furnace/bin/furnace-notify).
+# that owns the shared IP (see /usr/lib/furnace/bin/furnace-notify).
 
 [Timer]
 OnCalendar=*-*-* 02:30:00

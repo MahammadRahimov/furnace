@@ -1,4 +1,4 @@
-# Furnace - written by install.sh. A new install run writes this file again.
+# Furnace - written by "furnace setup". Running setup again writes this file again.
 # Both servers start as BACKUP with nopreempt: a server that comes back
 # does not take the shared IP back. The higher priority wins only at the
 # very first start, when both servers start together.
@@ -10,7 +10,7 @@ global_defs {
 }
 
 vrrp_script chk_furnace {
-    script "/opt/furnace/bin/furnace-health-check"
+    script "/usr/lib/furnace/bin/furnace-health-check"
     interval 5
     timeout 4
     fall 3
@@ -43,5 +43,5 @@ vrrp_instance FURNACE {
         chk_furnace
     }
 
-    notify /opt/furnace/bin/furnace-notify
+    notify /usr/lib/furnace/bin/furnace-notify
 }

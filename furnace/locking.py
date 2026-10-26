@@ -1,7 +1,7 @@
 """A file lock around every change, so two requests cannot clash.
 
 flock works across processes (gunicorn workers, the cleanup job,
-furnace-admin) and across threads, because each use opens the file again.
+the furnace command) and across threads, because each use opens the file again.
 """
 
 from __future__ import annotations
