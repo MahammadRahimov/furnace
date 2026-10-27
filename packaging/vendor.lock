@@ -1,0 +1,20 @@
+# Libraries bundled inside the Furnace package (in /usr/lib/furnace/vendor).
+# Exact versions with SHA-256 hashes. The build stops if a download does not match.
+# All of them work with Python 3.9 and newer. Pure Python only, so one package fits every CPU.
+# MarkupSafe comes as source: only its pure Python part is used (no C speedups).
+#
+# To update: change a line (version, hash and URL from https://pypi.org/project/NAME/#files),
+# rebuild, and run all tests.
+#
+# file                                    sha256                                                            url
+blinker-1.9.0-py3-none-any.whl            ba0efaa9080b619ff2f3459d1d500c57bddea4a6b424b60a91141db6fd2f08bc  https://files.pythonhosted.org/packages/10/cb/f2ad4230dc2eb1a74edf38f1a38b9b52277f75bef262d8908e60d957e13c/blinker-1.9.0-py3-none-any.whl
+click-8.1.8-py3-none-any.whl              63c132bbbed01578a06712a2d1f497bb62d9c1c0d329b7903a866228027263b2  https://files.pythonhosted.org/packages/7e/d4/7ebdbd03970677812aac39c869717059dbb71a4cfc033ca6e5221787892c/click-8.1.8-py3-none-any.whl
+flask-3.1.3-py3-none-any.whl              f4bcbefc124291925f1a26446da31a5178f9483862233b23c0c96a20701f670c  https://files.pythonhosted.org/packages/7f/9c/34f6962f9b9e9c71f6e5ed806e0d0ff03c9d1b0b2340088a0cf4bce09b18/flask-3.1.3-py3-none-any.whl
+gunicorn-23.0.0-py3-none-any.whl          ec400d38950de4dfd418cff8328b2c8faed0edb0d517d3394e457c317908ca4d  https://files.pythonhosted.org/packages/cb/7d/6dac2a6e1eba33ee43f318edbed4ff29151a49b5d37f080aad1e6469bca4/gunicorn-23.0.0-py3-none-any.whl
+importlib_metadata-8.7.1-py3-none-any.whl 5a1f80bf1daa489495071efbb095d75a634cf28a8bc299581244063b53176151  https://files.pythonhosted.org/packages/fa/5e/f8e9a1d23b9c20a551a8a02ea3637b4642e22c2626e3a13a9a29cdea99eb/importlib_metadata-8.7.1-py3-none-any.whl
+itsdangerous-2.2.0-py3-none-any.whl       c6242fc49e35958c8b15141343aa660db5fc54d4f13a1db01a3f5891b98700ef  https://files.pythonhosted.org/packages/04/96/92447566d16df59b2a776c0fb82dbc4d9e07cd95062562af01e408583fc4/itsdangerous-2.2.0-py3-none-any.whl
+jinja2-3.1.6-py3-none-any.whl             85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67  https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl
+markupsafe-3.0.4.tar.gz                   2e9ad7dd851bf45fab9f75cbff4cb493fee9979e8d8c7c9c3ee119022518edd6  https://files.pythonhosted.org/packages/38/9b/e422a865e1d5d57d0e509b4e0bf1c1a70a7f6382c29a5aa428df994c8bc8/markupsafe-3.0.4.tar.gz
+packaging-26.3-py3-none-any.whl           d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c  https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl
+werkzeug-3.1.9-py3-none-any.whl           6392e50c78460ba618e5b21f08a71f59c99ce99cdc6cf6e3dd7e6ccca8754fab  https://files.pythonhosted.org/packages/a1/38/df03f564f43cec2684823f3cccae1a652ee7face1cbaa76fb223096e64d7/werkzeug-3.1.9-py3-none-any.whl
+zipp-3.23.1-py3-none-any.whl              0b3596c50a5c700c9cb40ba8d86d9f2cc4807e9bedb06bcdf7fac85633e444dc  https://files.pythonhosted.org/packages/08/8a/0861bec20485572fbddf3dfba2910e38fe249796cb73ecdeb74e07eeb8d3/zipp-3.23.1-py3-none-any.whl

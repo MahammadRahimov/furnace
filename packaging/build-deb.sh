@@ -3,9 +3,9 @@
 #
 #   packaging/build-deb.sh [OUTPUT_DIR]
 #
-# Needs dpkg-deb, so run it on Debian or Ubuntu (WSL works too).
-# One package fits Ubuntu 22.04 and 24.04: Furnace is pure Python and uses
-# Ubuntu's own Flask and gunicorn packages.
+# Needs dpkg-deb, curl and python3, so run it on Debian or Ubuntu (WSL works too).
+# One package fits every supported Debian and Ubuntu: Furnace is pure Python and
+# brings its own Flask and gunicorn (packaging/vendor.lock).
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,7 +26,9 @@ install -m 0644 "$ROOT"/furnace/*.py "$LIB/furnace/"
 install -m 0755 "$ROOT/deploy/setup.sh" "$LIB/setup.sh"
 install -m 0644 "$ROOT/deploy/render.py" "$LIB/render.py"
 install -m 0644 "$ROOT"/deploy/templates/*.tmpl "$LIB/templates/"
-install -m 0755 "$ROOT"/deploy/scripts/* "$LIB/bin/"
+install -m 0755 "$ROOT"/deploy/scripts/* "$ROOT/deploy/furnace-python" "$LIB/bin/"
+"$ROOT/packaging/vendor.sh" "$LIB/vendor"   # Flask, gunicorn and what they need (pinned, hash-checked)
+find "$LIB/vendor" -type d -exec chmod 0755 {} + && find "$LIB/vendor" -type f -exec chmod 0644 {} +
 install -m 0755 "$ROOT/deploy/furnace" "$PKG/usr/bin/furnace"
 install -m 0644 "$ROOT"/deploy/systemd/* "$PKG/lib/systemd/system/"
 install -m 0644 "$ROOT/deploy/tmpfiles.conf" "$PKG/usr/lib/tmpfiles.d/furnace.conf"

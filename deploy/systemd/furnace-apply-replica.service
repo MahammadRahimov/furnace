@@ -7,8 +7,7 @@ User=furnace
 Group=furnace
 UMask=0027
 EnvironmentFile=/etc/furnace/furnace.env
-Environment=PYTHONPATH=/usr/lib/furnace PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/python3 -m furnace apply-replica /var/lib/furnace-incoming/snapshot.db
+ExecStart=/usr/lib/furnace/bin/furnace-python -m furnace apply-replica /var/lib/furnace-incoming/snapshot.db
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

@@ -3,18 +3,22 @@
 # It builds the .deb, installs it like a user would, and answers the setup questions.
 # Only documentation addresses are used (192.0.2.0/24). Nothing real is touched.
 #
-#   tests/integration/run.sh [22.04|24.04]     run the test (default 24.04)
-#   KEEP=1 tests/integration/run.sh            leave the containers running afterwards
+#   tests/integration/run.sh [SYSTEM]     run the test on SYSTEM (default ubuntu:24.04)
+#   KEEP=1 tests/integration/run.sh       leave the containers running afterwards
+#
+# SYSTEM is a Docker image name: ubuntu:22.04, ubuntu:24.04, debian:12, debian:13.
+# A plain version like 22.04 means ubuntu:22.04.
 #
 # Needs: docker, privileged containers (systemd, keepalived and ufw need them),
 # and internet access from the containers (apt).
 set -Eeuo pipefail
 export MSYS_NO_PATHCONV=1   # Git Bash on Windows: do not rewrite /paths
 
-UBUNTU="${1:-24.04}"
+SYSTEM="${1:-ubuntu:24.04}"
+[[ "$SYSTEM" == *:* ]] || SYSTEM="ubuntu:$SYSTEM"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NET=furnace-test
-IMAGE="furnace-test-ubuntu:${UBUNTU}"
+IMAGE="furnace-test-${SYSTEM/:/-}"
 LEADER=furnace-leader
 FOLLOWER=furnace-follower
 FW=furnace-fw
@@ -50,12 +54,12 @@ teardown() {
 }
 trap teardown EXIT
 
-step "Build the test image (Ubuntu $UBUNTU with systemd) and the .deb package"
+step "Build the test image ($SYSTEM with systemd) and the .deb package"
 BUILD_DIR="$(cd "$ROOT/tests/integration" && (pwd -W 2>/dev/null || pwd))"  # pwd -W: Windows path in Git Bash
-docker build -q --load --build-arg "UBUNTU=$UBUNTU" -t "$IMAGE" "$BUILD_DIR" >/dev/null
+docker build -q --load --build-arg "BASE=$SYSTEM" -t "$IMAGE" "$BUILD_DIR" >/dev/null
 mkdir -p "$ROOT/dist"
-tar -C "$ROOT" --exclude=.git --exclude=__pycache__ --exclude=.pytest_cache --exclude=dist -cf - . \
-    | docker run -i --rm "ubuntu:$UBUNTU" bash -c \
+tar -C "$ROOT" --exclude=.git --exclude=__pycache__ --exclude=.pytest_cache --exclude=dist --exclude=build/vendor-test -cf - . \
+    | docker run -i --rm "$IMAGE" bash -c \
         'mkdir /src && tar -xf - -C /src && /src/packaging/build-deb.sh /out >/dev/null && cat /out/*.deb' > "$DEB"
 check "the package was built" test -s "$DEB"
 remove_lab
@@ -86,6 +90,8 @@ for box in "$LEADER" "$FOLLOWER"; do
     check "$box: the install tells the user to run setup" grep -q "sudo furnace setup" <<< "$out"
 done
 check "the furnace command works" on "$LEADER" "furnace version | grep -qx '[0-9.]*'"
+check "Flask and gunicorn come from the package, not from the system" \
+    on "$LEADER" "! dpkg -s python3-flask >/dev/null 2>&1 && ! dpkg -s python3-gunicorn >/dev/null 2>&1 && test -d /usr/lib/furnace/vendor/flask"
 check "the install starts nothing before setup" on "$LEADER" "! systemctl is-active --quiet furnace-api && ! test -e /etc/furnace/setup.conf"
 out="$(on "$LEADER" "furnace status 2>&1" || true)"
 check "status says that setup is still needed" grep -q "not set up yet" <<< "$out"
@@ -303,5 +309,5 @@ on "$FOLLOWER" "apt-get purge -y -qq furnace >/dev/null 2>&1"
 check "purge deleted the data and the users" on "$FOLLOWER" "! test -e /var/lib/furnace && ! test -e /var/lib/furnace-auth && ! test -e /etc/furnace && ! id furnace >/dev/null 2>&1"
 check "the leader keeps working" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
 
-printf '\n%s passed, %s failed (Ubuntu %s)\n' "$PASSED" "$FAILED" "$UBUNTU"
+printf '\n%s passed, %s failed (%s)\n' "$PASSED" "$FAILED" "$SYSTEM"
 [ "$FAILED" -eq 0 ]

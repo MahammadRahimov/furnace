@@ -57,40 +57,57 @@ HTTPS requests, and any list reader that can download a text file over HTTPS wit
   Furnace stores only hashes of tokens and passwords. An address that sends 10 wrong tokens is locked for
   15 minutes.
 
-Technology: Ubuntu 22.04 or 24.04, Python 3 with Flask, gunicorn, SQLite in WAL mode (Write-Ahead Logging) with
-`synchronous=FULL`, nginx, systemd and keepalived.
+Technology: Linux with systemd, Python 3.9 or newer, Flask and gunicorn (bundled inside the package), SQLite in
+WAL mode (Write-Ahead Logging) with `synchronous=FULL`, nginx, keepalived and OpenSSL.
+
+**Supported systems** (tested, see [section 13](#13-tests)):
+
+| System | Versions | Package |
+|---|---|---|
+| Ubuntu | 22.04, 24.04 | `.deb` |
+| Debian | 12, 13 | `.deb` |
+
+More systems are planned: the Red Hat family (RHEL, Rocky, AlmaLinux, Oracle Linux), Fedora, Amazon Linux and SUSE.
+
+**Bundled libraries.** Flask, gunicorn and the small libraries they need are inside the package
+(`/usr/lib/furnace/vendor`), with exact versions checked by SHA-256 (`packaging/vendor.lock`). So Furnace runs the
+same on every system, and the servers never download anything from PyPI (the Python Package Index). The other side:
+a security fix in Flask or gunicorn reaches you with a new Furnace release, not with the system's own updates.
 
 ## 2. What you need
 
-- Two Ubuntu servers (22.04 or 24.04) in the same network segment. One is enough for a lab.
+- Two Linux servers from the supported list (above), in the same network segment. One is enough for a lab.
+  Both should run the same system.
 - Three IP addresses in that segment: one per server and one **shared IP** (VIP, virtual IP).
-- The servers need the Ubuntu package mirror (directly, through a proxy, or a local mirror). apt installs
-  nginx, keepalived, Flask and gunicorn from there. PyPI (the Python Package Index) is not needed.
+- The servers need their system's package mirror (directly, through a proxy, or a local mirror). apt installs
+  nginx, keepalived, Python and a few tools from there. Flask and gunicorn are already in the Furnace package.
 - Optional: the IP addresses of the list reader and of the caller, if you want to limit access to them.
   By default every address may connect, and the token and the login protect Furnace.
 
 ## 3. Install
 
-You need one file: `furnace_<version>_all.deb`. The same file works on Ubuntu 22.04 and 24.04.
-The examples below use version 0.3.1.
+You need one file: `furnace_<version>_all.deb`. The same file works on every supported Ubuntu and Debian.
+The examples below use version 0.4.0.
 
 ### 3.1 Get the package
 
 - **Download it** from the GitHub releases page: <https://github.com/MahammadRahimov/furnace/releases>.
   The repository is private, so log in to GitHub first. Or, with the GitHub command line tool:
   ```bash
-  gh release download v0.3.1 -R MahammadRahimov/furnace -p '*.deb'
+  gh release download v0.4.0 -R MahammadRahimov/furnace -p '*.deb'
   ```
-- **Or build it yourself** on Ubuntu or WSL: `packaging/build-deb.sh`. The file lands in `dist/`.
-- Copy it to both servers, for example: `scp furnace_0.3.1_all.deb you@SERVER_IP:~/`
+- **Or build it yourself** on Ubuntu, Debian or WSL: `packaging/build-deb.sh`. The file lands in `dist/`.
+  The build needs `curl` and `python3`. The first build downloads the bundled libraries once (into
+  `build/vendor-cache/`) and stops if one does not match its SHA-256 hash.
+- Copy it to both servers, for example: `scp furnace_0.4.0_all.deb you@SERVER_IP:~/`
 
 ### 3.2 Leader
 
 1. Install the package:
    ```bash
-   sudo apt install ./furnace_0.3.1_all.deb
+   sudo apt install ./furnace_0.4.0_all.deb
    ```
-   apt also installs what Furnace needs from Ubuntu: nginx, keepalived, Flask, gunicorn and a few tools.
+   apt also installs what Furnace needs from the system: nginx, keepalived, Python and a few tools.
    Nothing starts yet.
 2. Set it up:
    ```bash
@@ -133,7 +150,7 @@ The examples below use version 0.3.1.
    ```
 2. On the follower, install the package and run setup:
    ```bash
-   sudo apt install ./furnace_0.3.1_all.deb
+   sudo apt install ./furnace_0.4.0_all.deb
    sudo furnace setup
    ```
 3. Answer `follower`. Setup finds the bundle in your home folder, in `/root` or in `/tmp`, or asks where it is.
@@ -158,7 +175,7 @@ For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is 
 ### 3.5 What setup does
 
 - Stops at the first error (strict mode) and tells you what went wrong.
-- Checks that it runs as root on Ubuntu 22.04 or 24.04, and checks every answer.
+- Checks that it runs as root on a supported system, and checks every answer.
 - Saves the answers in `/etc/furnace/setup.conf` (readable by root only, it holds the keepalived password).
 - Creates the user `furnace` (no login) and the user `furnace-sync` (can only receive replication snapshots).
 - Leader: creates a self-signed certificate (10 years, names the shared IP and both server IPs), the replication
@@ -517,7 +534,7 @@ The certificate is valid for 10 years.
 IPs). Callers and list readers cannot reach it. It is for keepalived and the admins.
 
 ```json
-{"status": "ok", "version": "0.3.1", "role": "leader", "ips": 1234, "domains": 56}
+{"status": "ok", "version": "0.4.0", "role": "leader", "ips": 1234, "domains": 56}
 ```
 
 ---
@@ -688,6 +705,8 @@ shared IP as the leader, and then starts the service again. Afterwards the other
 |---|---|
 | `/usr/bin/furnace` | The command. |
 | `/usr/lib/furnace/` | The program, setup, templates and helper scripts (keepalived, replication, failover test). |
+| `/usr/lib/furnace/vendor/` | The bundled libraries: Flask, gunicorn and what they need. |
+| `/usr/lib/furnace/bin/furnace-python` | Starts Python 3.9+ with Furnace and the bundled libraries. Every Furnace service uses it. |
 | `/lib/systemd/system/furnace-*` | The systemd units. |
 | `/etc/furnace/setup.conf` | Your setup answers. Readable by root only. |
 | `/etc/furnace/furnace.env` | Program settings (no secrets). |
@@ -714,13 +733,17 @@ Logs: `journalctl -u furnace-api`, `/var/log/nginx/furnace-access.log`.
 **Upgrade:** install the new package. Do the follower first, then the leader.
 
 ```bash
-sudo apt install ./furnace_0.3.1_all.deb
+sudo apt install ./furnace_0.4.0_all.deb
 ```
 
 The package runs `furnace setup --upgrade` by itself. It uses the saved answers and asks no questions.
 Data, tokens and the certificate are kept. The API is reloaded without downtime, and keepalived is restarted only
 if its settings changed, so an upgrade does not move the shared IP. If you change answers that affect keepalived
 (for example the VRRP router ID), the restart can move the shared IP to the other server. That is safe.
+
+**From 0.3 to 0.4:** nothing to do. Flask and gunicorn now come with Furnace. The system's
+`python3-flask` and `python3-gunicorn` are no longer needed; remove them with `sudo apt autoremove` if nothing else
+uses them.
 
 **From 0.3.0 to 0.3.1:** nothing to do. The settings get their new names (`API_ALLOW_FROM`,
 `LISTS_ALLOW_FROM`). Tokens and logins made by 0.3.0 keep their names (`xsoar`, `xsoar-whitelist`, `paloalto`).
@@ -766,15 +789,18 @@ Integration test with Docker (two servers, a fake list reader and a fake caller;
 It builds the `.deb`, installs it with apt and answers the setup questions through a terminal:
 
 ```bash
-tests/integration/run.sh 24.04
-tests/integration/run.sh 22.04
+tests/integration/run.sh ubuntu:24.04
+tests/integration/run.sh ubuntu:22.04
+tests/integration/run.sh debian:12
+tests/integration/run.sh debian:13
 ```
 
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
-The integration test passed 91 of 91 checks on Ubuntu 22.04 and on Ubuntu 24.04 (v0.3.1). It covers:
-building the package, `apt install` with its dependencies, nothing running before setup, `setup --check`, refusing
+The integration test passed 92 of 92 checks on Ubuntu 22.04, Ubuntu 24.04, Debian 12 and Debian 13 (v0.4.0).
+It covers:
+building the package, `apt install` with its dependencies, Flask and gunicorn from the bundle (not the system), nothing running before setup, `setup --check`, refusing
 bad settings, a follower without a bundle, the leader setup by answering the questions (including a wrong answer
 that is asked again, the card and IP found automatically, the keepalived password created), the follower setup with
 only two questions, certificate and settings copied through the bundle, the secrets shown once and never in the
@@ -785,7 +811,8 @@ replication both ways, the follower refusing changes, `furnace status`, an impor
 a package upgrade that keeps data and tokens without moving the shared IP, both failover modes, the cleanup timer
 moving with the shared IP, `apt remove` (data kept) and `apt purge` (data deleted).
 
-The unit tests also pass with Ubuntu's own Flask packages: Flask 2.0.1 on 22.04 and Flask 3.0.2 on 24.04.
+The unit tests also pass with the bundled libraries on Python 3.9 (the oldest supported) and Python 3.13
+(Debian 13).
 
 ## 14. What was not tested
 
@@ -795,13 +822,14 @@ Be aware of these limits before you go live:
   The PAN-OS menus in this README come from documentation and may differ in your version.
 - **A real XSOAR server.** The API calls were tested with curl. XSOAR's own way to trust a certificate was not
   tested.
+- **Debian on real servers.** Debian 12 and 13 were tested in Docker containers only.
 - **keepalived on real servers or VMs.** It was tested only in Docker containers on one host. Real switches,
   VMware/Hyper-V port security, ARP behaviour and a real network outage (split brain) were not tested.
 - **A real power cut.** SQLite `synchronous=FULL` and atomic renames are designed for this, but it was not tested.
 - **Long running time.** No test ran for days. Audit log growth and backup rotation over months were not tested.
 - **Large real lists with the firewall.** 30,000-line imports were timed (about 2 seconds), but not loaded by a
   firewall.
-- **A server without the Ubuntu package mirror.** apt needs the mirror, a proxy or a local mirror for the
+- **A server without its system's package mirror.** apt needs the mirror, a proxy or a local mirror for the
   dependencies. An install without any of them was not tested.
 - **`furnace setup` over a real SSH session.** The questions were answered through a terminal in a container,
   not by a person over SSH.

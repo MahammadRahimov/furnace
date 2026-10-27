@@ -7,7 +7,7 @@ LIB=/usr/lib/furnace
 ETC=/etc/furnace
 STATE_DIR=/run/furnace-state
 
-py() { PYTHONPATH="$LIB" PYTHONDONTWRITEBYTECODE=1 python3 "$@"; }
+py() { "$LIB/bin/furnace-python" "$@"; }
 version() { py -c 'import furnace; print(furnace.__version__)'; }
 
 need_root() {
@@ -72,7 +72,7 @@ run_data_command() {
     fi
     local code=0
     runuser -u furnace -- env FURNACE_CONFIG="$ETC/furnace.env" FURNACE_ACTOR="${SUDO_USER:-root}" \
-        PYTHONPATH="$LIB" PYTHONDONTWRITEBYTECODE=1 python3 -m furnace "${args[@]}" || code=$?
+        "$LIB/bin/furnace-python" -m furnace "${args[@]}" || code=$?
     [ -n "$tmp" ] && rm -rf "$tmp"
     return "$code"
 }

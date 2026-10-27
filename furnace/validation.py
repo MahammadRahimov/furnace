@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from typing import Union
 
-IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
-IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
+IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]  # not "|": Python 3.9 is supported
+IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 
 TEST_RANGES = tuple(ipaddress.ip_network(n) for n in
                     ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"))

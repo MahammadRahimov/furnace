@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Furnace setup for Ubuntu 22.04 and 24.04. Run it as: sudo furnace setup
+# Furnace setup for Ubuntu 22.04 and 24.04, Debian 12 and 13. Run it as: sudo furnace setup
 #
 #   sudo furnace setup                 ask the questions, then configure and start everything
 #   sudo furnace setup --config FILE   take the answers from a settings file (no questions)
@@ -13,6 +13,7 @@ set -Eeuo pipefail
 umask 022
 
 LIB=/usr/lib/furnace
+PY="$LIB/bin/furnace-python"   # Python 3.9+ with the bundled libraries, the same on every Linux
 ETC=/etc/furnace
 DATA=/var/lib/furnace
 EDL=/var/lib/furnace-edl
@@ -79,12 +80,14 @@ done
 
 [ "$(id -u)" -eq 0 ] || die "Run setup as root: sudo furnace setup"
 
-[ -r /etc/os-release ] || die "Cannot read /etc/os-release. Only Ubuntu 22.04 and 24.04 are supported."
+SUPPORTED="Ubuntu 22.04 and 24.04, Debian 12 and 13"
+[ -r /etc/os-release ] || die "Cannot read /etc/os-release. Supported: $SUPPORTED."
 # shellcheck source=/dev/null
 . /etc/os-release
-if [ "${ID:-}" != "ubuntu" ] || { [ "${VERSION_ID:-}" != "22.04" ] && [ "${VERSION_ID:-}" != "24.04" ]; }; then
-    die "This is ${PRETTY_NAME:-an unknown system}. Only Ubuntu 22.04 and 24.04 are supported."
-fi
+case "${ID:-}:${VERSION_ID:-}" in
+    ubuntu:22.04|ubuntu:24.04|debian:12|debian:13) ;;
+    *) die "This is ${PRETTY_NAME:-an unknown system}. Supported: $SUPPORTED." ;;
+esac
 
 if [ -d /opt/furnace/venv ]; then
     die "An old Furnace (installed with install.sh) is on this server.
@@ -137,7 +140,7 @@ load_file() {
 }
 
 is_ipv4() {
-    python3 - "$1" <<'PY' 2>/dev/null
+    "$PY" - "$1" <<'PY' 2>/dev/null
 import ipaddress, sys
 ip = ipaddress.ip_address(sys.argv[1])
 sys.exit(0 if ip.version == 4 and str(ip) == sys.argv[1] else 1)
@@ -145,7 +148,7 @@ PY
 }
 
 is_ip_or_cidr() {
-    python3 - "$1" <<'PY' 2>/dev/null
+    "$PY" - "$1" <<'PY' 2>/dev/null
 import ipaddress, sys
 ipaddress.ip_network(sys.argv[1], strict=True)
 PY
@@ -231,7 +234,7 @@ validate_all() {
 }
 
 new_password() {
-    python3 -c 'import secrets, string; a = string.ascii_letters + string.digits; print("".join(secrets.choice(a) for _ in range(8)))'
+    "$PY" -c 'import secrets, string; a = string.ascii_letters + string.digits; print("".join(secrets.choice(a) for _ in range(8)))'
 }
 
 # Fill in what is still empty. Cards and IPs are found on this server.
@@ -521,9 +524,9 @@ exec > >(tee -a "$LOG") 2>&1
 LOGGING=1
 printf '\n----- Furnace setup started %s (%s) -----\n' "$(date -u +%FT%TZ)" "$MODE"
 
-# Replication needs the SSH server. Ubuntu 24.04 starts it through ssh.socket, 22.04 through ssh.service.
+# Replication needs the SSH server. Ubuntu 24.04 starts it through ssh.socket, the others through ssh.service.
 if ! systemctl is-active --quiet ssh.service && ! systemctl is-active --quiet ssh.socket; then
-    if systemctl cat ssh.socket >/dev/null 2>&1 && [ "${VERSION_ID}" = "24.04" ]; then
+    if systemctl cat ssh.socket >/dev/null 2>&1 && [ "${ID}:${VERSION_ID}" = "ubuntu:24.04" ]; then
         systemctl enable --quiet --now ssh.socket
     else
         systemctl enable --quiet --now ssh.service
@@ -555,10 +558,9 @@ write_setup_conf
 ok "Settings saved in $SETUP_CONF"
 
 as_furnace() {
-    runuser -u furnace -- env FURNACE_CONFIG="$ETC/furnace.env" PYTHONPATH="$LIB" PYTHONDONTWRITEBYTECODE=1 \
-        python3 -m furnace "$@"
+    runuser -u furnace -- env FURNACE_CONFIG="$ETC/furnace.env" "$PY" -m furnace "$@"
 }
-VERSION="$(PYTHONPATH="$LIB" python3 -c 'import furnace; print(furnace.__version__)')"
+VERSION="$("$PY" -c 'import furnace; print(furnace.__version__)')"
 
 # --------------------------------------------------------------------------- secrets
 
@@ -655,7 +657,7 @@ else
 fi
 export R_LISTS_ALLOW R_API_ALLOW R_LISTEN R_TLS
 
-render() { python3 "$LIB/render.py" "$1" "$2"; }
+render() { "$PY" "$LIB/render.py" "$1" "$2"; }
 
 # Remember whether the settings change: only then does the API need a full restart.
 ENV_CHANGED=1
@@ -797,7 +799,7 @@ fail() { printf '    [FAIL] Self-test: %s\n' "$*"; FAILED=1; TODO+=("Self-test f
 # No API restart is needed (a restart could move the shared IP). It is removed at the end.
 start_selftest() {
     local token
-    token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    token="$("$PY" -c 'import secrets; print(secrets.token_urlsafe(32))')"
     (umask 027; printf '%s\n' "$token" > "$STATE_DIR/selftest")
     chown root:furnace "$STATE_DIR/selftest"
     HDR="$(mktemp)"

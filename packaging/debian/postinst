@@ -6,7 +6,7 @@ LIB=/usr/lib/furnace
 
 if [ "$1" = "configure" ]; then
     systemd-tmpfiles --create furnace.conf >/dev/null 2>&1 || true
-    python3 -m compileall -q "$LIB/furnace" >/dev/null 2>&1 || true
+    "$LIB/bin/furnace-python" -m compileall -q "$LIB/furnace" "$LIB/vendor" >/dev/null 2>&1 || true
     systemctl daemon-reload >/dev/null 2>&1 || true
 
     if [ -f /etc/furnace/setup.conf ]; then
