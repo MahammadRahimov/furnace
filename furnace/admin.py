@@ -164,7 +164,7 @@ def cmd_edl_user(settings: Settings, args: argparse.Namespace) -> int:
         if args.action == "add":
             _show_secret(f"New EDL login '{name}'. Password:", auth.add_edl_user(conn, name, _actor()))
         elif args.action == "rotate":
-            _show_secret(f"New password for the EDL login '{name}'. Put it in the firewall's EDL objects. "
+            _show_secret(f"New password for the EDL login '{name}'. Give it to the device that downloads the lists. "
                          "The old one no longer works.", auth.rotate_edl_user(conn, name, _actor()))
         else:
             auth.remove_edl_user(conn, name, _actor())
@@ -197,10 +197,10 @@ def cmd_init_secrets(settings: Settings, args: argparse.Namespace) -> int:
             for name in auth.import_legacy_tokens(conn, read_env_file(args.legacy_tokens)):
                 print(f"migrated\t{name}")
         if not conn.execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0]:
-            for name, scope in (("xsoar", "block"), ("xsoar-whitelist", "whitelist")):
+            for name, scope in (("block", "block"), ("whitelist", "whitelist")):
                 print(f"token\t{name}\t{scope}\t{auth.add_token(conn, name, scope, 'setup')}")
         if not conn.execute("SELECT COUNT(*) FROM edl_users").fetchone()[0]:
-            print(f"edl\tpaloalto\t{auth.add_edl_user(conn, 'paloalto', 'setup')}")
+            print(f"edl\tlists\t{auth.add_edl_user(conn, 'lists', 'setup')}")
         edl.write_edl_users(conn, settings)
     return 0
 

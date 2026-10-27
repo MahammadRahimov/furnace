@@ -20,7 +20,7 @@ need_setup() {
 
 usage() {
     cat <<EOF
-Furnace $(version): blocklist server for Palo Alto EDLs (External Dynamic Lists).
+Furnace $(version): blocklist server that publishes IP and domain lists (EDLs, threat feeds).
 
 Usage: sudo furnace COMMAND [options]
 

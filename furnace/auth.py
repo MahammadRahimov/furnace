@@ -5,7 +5,7 @@ them to the other server. Only a hash is stored. A token or a password is
 shown once, when it is made. Lost? Make a new one with "rotate".
 
 API tokens: SHA-256 of a long random token. A token has a name (who uses it,
-for example "xsoar") and a scope: block (IPs and domains), whitelist, or all.
+for example "soar" or "ui") and a scope: block (IPs and domains), whitelist, or all.
 
 EDL logins: nginx basic auth. The password hash is SHA-512 crypt ($6$),
 made by openssl. nginx reads the users file on every request, so a change
@@ -138,11 +138,11 @@ def import_legacy_tokens(conn: sqlite3.Connection, values: dict[str, str]) -> li
     whitelist = values.get("FURNACE_WHITELIST_TOKEN", "").strip()
     added: list[str] = []
     if block:
-        add_token(conn, "xsoar", "block" if whitelist and whitelist != block else "all", "upgrade", token=block)
-        added.append("xsoar")
+        add_token(conn, "block", "block" if whitelist and whitelist != block else "all", "upgrade", token=block)
+        added.append("block")
     if whitelist and whitelist != block:
-        add_token(conn, "xsoar-whitelist", "whitelist", "upgrade", token=whitelist)
-        added.append("xsoar-whitelist")
+        add_token(conn, "whitelist", "whitelist", "upgrade", token=whitelist)
+        added.append("whitelist")
     return added
 
 

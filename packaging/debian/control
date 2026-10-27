@@ -8,10 +8,11 @@ Depends: python3 (>= 3.10), python3-flask (>= 2.0), python3-gunicorn (>= 20.1), 
 Section: net
 Priority: optional
 Homepage: https://github.com/MahammadRahimov/furnace
-Description: Blocklist server that publishes EDL files for a Palo Alto firewall
- Furnace keeps a blocklist of IPs and domains. XSOAR adds and removes entries
- through an HTTPS API. A Palo Alto firewall downloads the lists as External
- Dynamic Lists (EDLs). Two servers share one IP address with keepalived, and
+Description: Blocklist server that publishes IP and domain lists for firewalls
+ Furnace keeps a blocklist of IPs and domains. A SOAR, a script or a UI adds
+ and removes entries through an HTTPS API with a token. A firewall downloads
+ the lists as plain text files (Palo Alto: External Dynamic Lists, EDLs) with
+ a login. Two servers share one IP address with keepalived, and
  the leader copies its database to the follower every minute.
  .
  After the install, run: sudo furnace setup

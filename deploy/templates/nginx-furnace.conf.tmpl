@@ -21,7 +21,7 @@ server {
     error_log /var/log/nginx/furnace-error.log warn;
 
     location = /edl/blocklist.txt {
-{{FIREWALL_ALLOW}}
+{{LISTS_ALLOW}}
         allow 127.0.0.1;
         deny all;
         auth_basic $furnace_edl_login;
@@ -33,7 +33,7 @@ server {
     }
 
     location = /edl/domains.txt {
-{{FIREWALL_ALLOW}}
+{{LISTS_ALLOW}}
         allow 127.0.0.1;
         deny all;
         auth_basic $furnace_edl_login;
@@ -45,7 +45,7 @@ server {
     }
 
     location /api/ {
-{{XSOAR_ALLOW}}
+{{API_ALLOW}}
         allow 127.0.0.1;
         deny all;
         limit_req zone=furnace_api burst=50 nodelay;

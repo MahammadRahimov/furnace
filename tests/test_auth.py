@@ -34,7 +34,7 @@ def test_only_the_hash_is_stored(conn):
     dump = "\n".join(conn.iterdump())
     assert token not in dump
     assert auth.hash_token(token) in dump
-    assert [t["name"] for t in auth.list_tokens(conn)] == ["robot.one", "ui", "xsoar", "xsoar-whitelist"]
+    assert [t["name"] for t in auth.list_tokens(conn)] == ["block", "robot.one", "ui", "whitelist"]
 
 
 def test_token_names_and_scopes_are_checked(conn):
@@ -44,7 +44,7 @@ def test_token_names_and_scopes_are_checked(conn):
     with pytest.raises(auth.AuthError):
         auth.add_token(conn, "robot", "admin", "tester")
     with pytest.raises(auth.AuthError, match="exists already"):
-        auth.add_token(conn, "xsoar", "block", "tester")
+        auth.add_token(conn, "block", "block", "tester")
     with pytest.raises(auth.AuthError, match="no token"):
         auth.rotate_token(conn, "nobody", "tester")
     with pytest.raises(auth.AuthError, match="no token"):
@@ -53,11 +53,11 @@ def test_token_names_and_scopes_are_checked(conn):
 
 def test_rotate_and_remove_work_at_once(client, conn):
     assert client.get("/api/v1/ips/198.51.100.1", headers=BLOCK).status_code == 404
-    new = auth.rotate_token(conn, "xsoar", "tester")
+    new = auth.rotate_token(conn, "block", "tester")
     assert client.get("/api/v1/ips/198.51.100.1", headers=BLOCK).status_code == 401
     fresh = {"Authorization": f"Bearer {new}"}
     assert client.get("/api/v1/ips/198.51.100.1", headers=fresh).status_code == 404
-    auth.remove_token(conn, "xsoar", "tester")
+    auth.remove_token(conn, "block", "tester")
     assert client.get("/api/v1/ips/198.51.100.1", headers=fresh).status_code == 401
     actions = [r[0] for r in conn.execute("SELECT action FROM audit_log WHERE object_type='api_token'")]
     assert actions == ["token_add", "token_add", "token_add", "token_rotate", "token_remove"]
@@ -66,7 +66,7 @@ def test_rotate_and_remove_work_at_once(client, conn):
 def test_the_audit_log_names_the_token(client, conn):
     client.post("/api/v1/ips", json={"ip": "198.51.100.5"}, headers=BLOCK)
     source = conn.execute("SELECT source FROM audit_log WHERE action='add'").fetchone()[0]
-    assert source.startswith("api:xsoar@")
+    assert source.startswith("api:block@")
 
 
 def test_selftest_token_only_with_a_valid_flag(settings, tmp_path, monkeypatch):
@@ -130,22 +130,22 @@ def openssl_check(password: str, hashed: str) -> bool:
 def test_edl_users_file(conn, settings):
     edl.ensure_files(settings)
     assert settings.edl_users_path.read_text() == ""
-    password = auth.add_edl_user(conn, "PaloAlto", "tester")
+    password = auth.add_edl_user(conn, "Lists", "tester")
     assert len(password) >= 32
     edl.rebuild_all(conn, settings)
     line = settings.edl_users_path.read_text()
     name, hashed = line.strip().split(":", 1)
-    assert name == "paloalto" and hashed.startswith("$6$") and password not in line
+    assert name == "lists" and hashed.startswith("$6$") and password not in line
     assert openssl_check(password, hashed)
     assert oct(settings.edl_users_path.stat().st_mode & 0o777) == "0o640"
 
-    new = auth.rotate_edl_user(conn, "paloalto", "tester")
+    new = auth.rotate_edl_user(conn, "lists", "tester")
     edl.write_edl_users(conn, settings)
     hashed2 = settings.edl_users_path.read_text().strip().split(":", 1)[1]
     assert openssl_check(new, hashed2) and not openssl_check(password, hashed2)
     with pytest.raises(auth.AuthError):
-        auth.add_edl_user(conn, "paloalto", "tester")
-    auth.remove_edl_user(conn, "paloalto", "tester")
+        auth.add_edl_user(conn, "lists", "tester")
+    auth.remove_edl_user(conn, "lists", "tester")
     edl.write_edl_users(conn, settings)
     assert settings.edl_users_path.read_text() == ""
 
@@ -155,7 +155,7 @@ def test_edl_users_file(conn, settings):
 def test_legacy_tokens_keep_working(settings, conn):
     conn.execute("DELETE FROM api_tokens")
     old = {"FURNACE_BLOCK_TOKEN": "old-block-token-0123456789", "FURNACE_WHITELIST_TOKEN": "old-wl-token-0123456789"}
-    assert auth.import_legacy_tokens(conn, old) == ["xsoar", "xsoar-whitelist"]
+    assert auth.import_legacy_tokens(conn, old) == ["block", "whitelist"]
     assert auth.import_legacy_tokens(conn, old) == []  # only once
     c = create_app(settings).test_client()
     assert c.get("/api/v1/ips/198.51.100.1",
@@ -164,7 +164,7 @@ def test_legacy_tokens_keep_working(settings, conn):
                  headers={"Authorization": "Bearer old-wl-token-0123456789"}).status_code == 200
 
     conn.execute("DELETE FROM api_tokens")
-    assert auth.import_legacy_tokens(conn, {"FURNACE_BLOCK_TOKEN": "old-block-token-0123456789"}) == ["xsoar"]
+    assert auth.import_legacy_tokens(conn, {"FURNACE_BLOCK_TOKEN": "old-block-token-0123456789"}) == ["block"]
     assert auth.list_tokens(conn)[0]["scope"] == "all"  # 0.2: one token did both
 
 
@@ -183,14 +183,14 @@ def test_snapshot_from_an_older_leader(settings, tmp_path):
 
 
 def test_tokens_and_logins_replicate(settings, conn, tmp_path):
-    auth.add_edl_user(conn, "paloalto", "tester")
+    auth.add_edl_user(conn, "lists", "tester")
     snap = backup.snapshot(settings, tmp_path / "snap.db")
     follower = Settings(data_dir=tmp_path / "f", edl_dir=tmp_path / "f/edl", archive_dir=tmp_path / "f/arch",
                         backup_dir=tmp_path / "f/bk", auth_dir=tmp_path / "f/auth", role_file=tmp_path / "role")
     (tmp_path / "role").write_text("follower")
     Furnace(follower).startup()
     apply_snapshot(follower, snap)
-    assert follower.edl_users_path.read_text().startswith("paloalto:$6$")
+    assert follower.edl_users_path.read_text().startswith("lists:$6$")
     r = create_app(follower).test_client().post("/api/v1/ips", json={"ip": "198.51.100.1"}, headers=BLOCK)
     assert r.status_code == 503  # the token is known; the follower refuses the change
 
@@ -234,7 +234,7 @@ def test_cli_tokens(cli, capsys, settings, tmp_path, monkeypatch):
 def test_cli_edl_users_and_lockouts(cli, capsys, settings, monkeypatch):
     assert cli(["edl-user", "list"]) == 0
     assert "nobody can download" in capsys.readouterr().out
-    assert cli(["edl-user", "add", "paloalto"]) == 0
+    assert cli(["edl-user", "add", "lists"]) == 0
     password = capsys.readouterr().out.split("Store it now:")[1].strip()
     hashed = settings.edl_users_path.read_text().strip().split(":", 1)[1]
     assert openssl_check(password, hashed)
@@ -260,8 +260,8 @@ def test_cli_init_secrets(cli, capsys, settings, tmp_path):
     legacy.write_text("FURNACE_BLOCK_TOKEN=old-block-token-0123456789\nFURNACE_WHITELIST_TOKEN=\n")
     assert cli(["init-secrets", "--legacy-tokens", str(legacy)]) == 0
     lines = [line.split("\t") for line in capsys.readouterr().out.splitlines()]
-    assert lines[0] == ["migrated", "xsoar"]
-    assert lines[1][:2] == ["edl", "paloalto"] and len(lines) == 2
+    assert lines[0] == ["migrated", "block"]
+    assert lines[1][:2] == ["edl", "lists"] and len(lines) == 2
     assert cli(["init-secrets"]) == 0
     assert capsys.readouterr().out == ""  # nothing new the second time
 
@@ -270,8 +270,8 @@ def test_cli_init_secrets(cli, capsys, settings, tmp_path):
     conn.close()
     assert cli(["init-secrets"]) == 0
     made = [line.split("\t") for line in capsys.readouterr().out.splitlines()]
-    assert [(m[0], m[1], m[2]) for m in made] == [("token", "xsoar", "block"),
-                                                  ("token", "xsoar-whitelist", "whitelist")]
+    assert [(m[0], m[1], m[2]) for m in made] == [("token", "block", "block"),
+                                                  ("token", "whitelist", "whitelist")]
     c = create_app(settings).test_client()
     assert c.get("/api/v1/ips/198.51.100.1", headers={"Authorization": f"Bearer {made[0][3]}"}).status_code == 404
     assert c.get("/api/v1/ips/198.51.100.1", headers={"Authorization": f"Bearer {ALL_TOKEN}"}).status_code == 401

@@ -30,8 +30,8 @@ def settings(tmp_path: Path) -> Settings:
     db.init_db(s.db_path)
     conn = db.connect(s.db_path)
     try:
-        auth.add_token(conn, "xsoar", "block", "test", token=BLOCK_TOKEN)
-        auth.add_token(conn, "xsoar-whitelist", "whitelist", "test", token=WHITELIST_TOKEN)
+        auth.add_token(conn, "block", "block", "test", token=BLOCK_TOKEN)
+        auth.add_token(conn, "whitelist", "whitelist", "test", token=WHITELIST_TOKEN)
         auth.add_token(conn, "ui", "all", "test", token=ALL_TOKEN)
     finally:
         conn.close()
