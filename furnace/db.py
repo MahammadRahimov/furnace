@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -84,6 +84,23 @@ CREATE TABLE IF NOT EXISTS audit_log (
     details     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+
+-- API tokens. Only the SHA-256 hash of a token is stored. scope: block, whitelist or all.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    name       TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    scope      TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT ''
+);
+
+-- Logins for the EDL download (nginx basic auth). password_hash is SHA-512 crypt.
+CREATE TABLE IF NOT EXISTS edl_users (
+    name          TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    created_by    TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -114,7 +131,7 @@ def init_db(path: Path) -> None:
     conn = connect(path)
     try:
         conn.executescript(SCHEMA)
-        conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
                      (str(SCHEMA_VERSION),))
     finally:
         conn.close()

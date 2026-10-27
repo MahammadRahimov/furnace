@@ -10,13 +10,14 @@ import argparse
 import csv
 import json
 import logging
+import os
 import sys
 from datetime import timedelta
 from pathlib import Path
 
-from . import __version__, backup, db, edl
+from . import __version__, auth, backup, db, edl
 from .cleanup import run_cleanup
-from .config import ConfigError, Settings
+from .config import ConfigError, Settings, read_env_file
 from .importer import ImportError_, import_domains, import_ips, import_whitelist
 from .locking import LockTimeout
 from .replica import ReplicaError, apply_snapshot
@@ -78,8 +79,130 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("apply-replica", help="(replication, follower only) Load a snapshot from the leader.")
     sp.add_argument("file", type=Path)
 
+    sp = sub.add_parser("token", help="API tokens: list, add NAME [--scope], rotate NAME, remove NAME.")
+    tok = sp.add_subparsers(dest="action", required=True, metavar="ACTION")
+    tok.add_parser("list", help="Show the tokens (names and scopes, never the tokens).")
+    t = tok.add_parser("add", help="Make a new token. It is shown once.")
+    t.add_argument("name")
+    t.add_argument("--scope", choices=auth.SCOPES, default="block",
+                   help="block = IPs and domains (default), whitelist, or all.")
+    t = tok.add_parser("rotate", help="Give a token a new value. The old value stops working at once.")
+    t.add_argument("name")
+    t = tok.add_parser("remove", help="Delete a token. It stops working at once.")
+    t.add_argument("name")
+
+    sp = sub.add_parser("edl-user", help="EDL logins: list, add NAME, rotate NAME, remove NAME.")
+    usr = sp.add_subparsers(dest="action", required=True, metavar="ACTION")
+    usr.add_parser("list", help="Show the EDL logins (names only).")
+    for action, text in (("add", "Make a login with a new password. It is shown once."),
+                         ("rotate", "Give a login a new password. The old one stops working at once."),
+                         ("remove", "Delete a login.")):
+        t = usr.add_parser(action, help=text)
+        t.add_argument("name")
+
+    sub.add_parser("lockouts", help="Show the IPs that are locked after too many wrong tokens.")
+    sp = sub.add_parser("unlock", help="Unlock one IP, or all with --all.")
+    sp.add_argument("ip", nargs="?")
+    sp.add_argument("--all", action="store_true")
+
+    sp = sub.add_parser("init-secrets", help="(setup) Make the first tokens and the EDL login, if there are none.")
+    sp.add_argument("--legacy-tokens", type=Path, help="tokens.env from version 0.2: keep these tokens working.")
+
     sub.add_parser("check-config", help="Check the settings file and show the settings (no secrets).")
     return p
+
+
+def _actor() -> str:
+    return os.environ.get("FURNACE_ACTOR") or "admin"
+
+
+def _need_leader(settings: Settings) -> None:
+    if not settings.is_leader():
+        raise auth.AuthError("This server is the follower. Run this on the leader (the server with the shared IP). "
+                             "The follower gets the change within a minute.")
+
+
+def _show_secret(what: str, value: str) -> None:
+    print(f"{what} It is shown only once. Store it now:\n\n    {value}\n")
+
+
+def cmd_token(settings: Settings, args: argparse.Namespace) -> int:
+    with Furnace(settings).locked() as conn:
+        if args.action == "list":
+            rows = auth.list_tokens(conn)
+            if not rows:
+                print("There are no API tokens. Make one with: sudo furnace token add NAME")
+            for r in rows:
+                print(f"{r['name']:<24} scope {r['scope']:<10} id {r['id']}  made {r['created_at']} by {r['created_by']}")
+            return 0
+        _need_leader(settings)
+        name = auth.check_name(args.name)
+        if args.action == "add":
+            _show_secret(f"New API token '{name}' (scope {args.scope}).",
+                         auth.add_token(conn, name, args.scope, _actor()))
+        elif args.action == "rotate":
+            _show_secret(f"New value for the API token '{name}'. The old value no longer works.",
+                         auth.rotate_token(conn, name, _actor()))
+        else:
+            auth.remove_token(conn, name, _actor())
+            print(f"The API token '{name}' is deleted. It no longer works.")
+        return 0
+
+
+def cmd_edl_user(settings: Settings, args: argparse.Namespace) -> int:
+    with Furnace(settings).locked() as conn:
+        if args.action == "list":
+            rows = auth.list_edl_users(conn)
+            if not rows:
+                print("There are no EDL logins, so nobody can download the EDL. "
+                      "Make one with: sudo furnace edl-user add NAME")
+            for r in rows:
+                print(f"{r['name']:<24} made {r['created_at']} by {r['created_by']}")
+            return 0
+        _need_leader(settings)
+        name = auth.check_name(args.name)
+        if args.action == "add":
+            _show_secret(f"New EDL login '{name}'. Password:", auth.add_edl_user(conn, name, _actor()))
+        elif args.action == "rotate":
+            _show_secret(f"New password for the EDL login '{name}'. Put it in the firewall's EDL objects. "
+                         "The old one no longer works.", auth.rotate_edl_user(conn, name, _actor()))
+        else:
+            auth.remove_edl_user(conn, name, _actor())
+            print(f"The EDL login '{name}' is deleted.")
+        edl.write_edl_users(conn, settings)
+        return 0
+
+
+def cmd_lockouts(settings: Settings, args: argparse.Namespace) -> int:
+    if args.command == "unlock":
+        if not args.all and not args.ip:
+            print("Give an IP, or --all.", file=sys.stderr)
+            return 2
+        count = auth.unlock(settings, None if args.all else args.ip)
+        print(f"Unlocked {count} address(es).")
+        return 0
+    rows = auth.list_lockouts(settings)
+    if not rows:
+        print("No address is locked.")
+    for r in rows:
+        print(f"{r['ip']:<40} {r['wrong_tokens']} wrong tokens, locked for {r['seconds_left']} more seconds")
+    return 0
+
+
+def cmd_init_secrets(settings: Settings, args: argparse.Namespace) -> int:
+    """For setup on the leader. Prints one tab-separated line per new secret:
+    token NAME SCOPE VALUE / edl NAME PASSWORD / migrated NAME."""
+    with Furnace(settings).locked() as conn:
+        if args.legacy_tokens and args.legacy_tokens.is_file():
+            for name in auth.import_legacy_tokens(conn, read_env_file(args.legacy_tokens)):
+                print(f"migrated\t{name}")
+        if not conn.execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0]:
+            for name, scope in (("xsoar", "block"), ("xsoar-whitelist", "whitelist")):
+                print(f"token\t{name}\t{scope}\t{auth.add_token(conn, name, scope, 'setup')}")
+        if not conn.execute("SELECT COUNT(*) FROM edl_users").fetchone()[0]:
+            print(f"edl\tpaloalto\t{auth.add_edl_user(conn, 'paloalto', 'setup')}")
+        edl.write_edl_users(conn, settings)
+    return 0
 
 
 def cmd_import(settings: Settings, args: argparse.Namespace) -> int:
@@ -143,6 +266,9 @@ def cmd_stats(settings: Settings) -> int:
             "ips_expiring_in_7_days": q("SELECT COUNT(*) FROM blocked_ips WHERE aging_from < ?", week),
             "last_cleanup": q("SELECT MAX(ts) FROM audit_log WHERE action='cleanup'"),
             "audit_entries": q("SELECT COUNT(*) FROM audit_log"),
+            "api_tokens": q("SELECT COUNT(*) FROM api_tokens"),
+            "edl_logins": q("SELECT COUNT(*) FROM edl_users"),
+            "locked_ips": len(auth.list_lockouts(settings)),
             "blocklist_txt_bytes": settings.blocklist_path.stat().st_size if settings.blocklist_path.exists() else None,
             "domains_txt_bytes": settings.domains_path.stat().st_size if settings.domains_path.exists() else None,
             "backups": len(list(settings.backup_dir.glob("furnace-*.db"))) if settings.backup_dir.exists() else 0,
@@ -163,12 +289,11 @@ def cmd_check_config(settings: Settings) -> int:
         "max_ips": settings.max_ips, "max_domains": settings.max_domains, "backup_keep": settings.backup_keep,
         "cleanup_max_percent": settings.cleanup_max_percent, "cleanup_min_size": settings.cleanup_min_size,
         "role_file": str(settings.role_file) if settings.role_file else None,
-        "block_token": "set" if settings.block_token else "MISSING",
-        "whitelist_token": "set" if settings.whitelist_token else "not set (block token is used)",
+        "auth_dir": str(settings.auth_dir),
+        "lockout": f"{settings.lockout_failures} wrong tokens in {settings.lockout_minutes} minutes",
     }
     print(json.dumps(safe, indent=2))
-    settings.check_tokens()
-    print("The settings look good.")
+    print("The settings look good. API tokens: sudo furnace token list. EDL logins: sudo furnace edl-user list.")
     return 0
 
 
@@ -205,11 +330,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "snapshot":
             backup.snapshot(settings, args.output)
             return 0
+        if args.command == "token":
+            return cmd_token(settings, args)
+        if args.command == "edl-user":
+            return cmd_edl_user(settings, args)
+        if args.command in ("lockouts", "unlock"):
+            return cmd_lockouts(settings, args)
+        if args.command == "init-secrets":
+            return cmd_init_secrets(settings, args)
         if args.command == "apply-replica":
             counts = apply_snapshot(settings, args.file)
             print(f"Snapshot applied. {counts['ips']} IPs, {counts['domains']} domains.")
             return 0
-    except (ConfigError, ImportError_, ReplicaError) as error:
+    except (ConfigError, ImportError_, ReplicaError, auth.AuthError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 2
     except LockTimeout as error:

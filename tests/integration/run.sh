@@ -99,7 +99,7 @@ XSOAR_IP=$XSOAR_IP
 FIREWALL_IP=$FW_IP
 EOF
 on "$LEADER" "furnace setup --check --config /root/leader.env"
-check "--check created no secrets and no settings" on "$LEADER" "! test -e /etc/furnace/tokens.env && ! test -e /etc/furnace/setup.conf"
+check "--check created no secrets and no settings" on "$LEADER" "! test -e /var/lib/furnace/furnace.db && ! test -e /etc/furnace/setup.conf"
 on "$LEADER" "sed 's/^ROLE=.*/ROLE=boss/' /root/leader.env > /root/bad.env"
 out="$(on "$LEADER" "furnace setup --config /root/bad.env 2>&1" || true)"
 check "wrong ROLE refused" grep -q "ROLE must be 'leader' or 'follower'" <<< "$out"
@@ -111,14 +111,15 @@ step "Set up the leader by answering the questions"
 TAB=$'\t'
 put "$LEADER" /root/answers.txt <<EOF
 leader or the follower?${TAB}
-Network card [${TAB}
+Network card name [${TAB}$LEADER_IP
+Network card name [${TAB}
 This server's IP [${TAB}
 The other Furnace server's IP:${TAB}999.1.1.1
 The other Furnace server's IP:${TAB}$FOLLOWER_IP
 Shared IP:${TAB}$SHARED_IP
 Network prefix${TAB}
-XSOAR IP that may call the API:${TAB}$XSOAR_IP
-Firewall IP that downloads${TAB}$FW_IP
+Who may call the API (XSOAR) [any]:${TAB}$XSOAR_IP
+Who may download the lists (the firewall) [any]:${TAB}$FW_IP
 Most entries per list${TAB}
 Days an IP stays${TAB}
 VRRP router ID (1-255)${TAB}
@@ -130,20 +131,30 @@ out="$(on "$LEADER" "python3 /root/answer.py /root/answers.txt -- furnace setup"
 printf '%s\n' "$out"
 check "leader setup finished with the self-test passed" [ "$rc" = 0 ]
 check "a wrong answer is explained and asked again" grep -q "PEER_IP '999.1.1.1' is not a valid IPv4 address" <<< "$out"
-check "the API tokens were shown once" grep -q "API TOKENS (shown only once)" <<< "$out"
+check "an IP as the network card is explained" grep -q "is an IP address, not a network card name" <<< "$out"
+check "the new secrets were shown once" grep -q "NEW SECRETS (shown only once" <<< "$out"
+secret_after() { grep -A1 -F "$1" <<< "$out" | tail -n1 | tr -d ' \r'; }
+TOKEN="$(secret_after "API token 'xsoar' (scope block):")"
+WL_TOKEN="$(secret_after "API token 'xsoar-whitelist' (scope whitelist):")"
+EDL_PW="$(secret_after "EDL login for the firewall: user 'paloalto', password:")"
+check "a block token, a whitelist token and an EDL password were made" \
+    bash -c '[[ "$1" == fur_* && "$2" == fur_* && ${#3} -ge 32 ]]' _ "$TOKEN" "$WL_TOKEN" "$EDL_PW"
 check "the network card and IP were found automatically" on "$LEADER" "grep -qx 'INTERFACE=eth0' /etc/furnace/setup.conf && grep -qx 'THIS_IP=$LEADER_IP' /etc/furnace/setup.conf"
 check "a keepalived password was created" on "$LEADER" "grep -Eqx 'KEEPALIVED_PASSWORD=[A-Za-z0-9]{8}' /etc/furnace/setup.conf"
 check "the saved settings are readable by root only" on "$LEADER" "[ \"\$(stat -c '%U %a' /etc/furnace/setup.conf)\" = 'root 600' ]"
 check "leader owns the shared IP" on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
-check "tokens file readable only by furnace" on "$LEADER" "[ \"\$(stat -c '%U %a' /etc/furnace/tokens.env)\" = 'furnace 400' ]"
-check "no token in the setup log" on "$LEADER" "! grep -q -f <(cut -d= -f2 /etc/furnace/tokens.env) /var/log/furnace-setup.log"
+check "no tokens file any more" on "$LEADER" "! test -e /etc/furnace/tokens.env"
+check "no secret in the setup log" on "$LEADER" "! grep -qF -e '$TOKEN' -e '$WL_TOKEN' -e '$EDL_PW' /var/log/furnace-setup.log"
+check "no secret in the database" on "$LEADER" "! sqlite3 /var/lib/furnace/furnace.db .dump | grep -qF -e '$TOKEN' -e '$EDL_PW'"
+check "the EDL users file has a SHA-512 hash, readable by nginx only" \
+    on "$LEADER" "grep -q '^paloalto:\\\$6\\\$' /var/lib/furnace-auth/edl-users && [ \"\$(stat -c '%U %G %a' /var/lib/furnace-auth/edl-users)\" = 'furnace www-data 640' ]"
 check "cleanup timer runs on the leader" on "$LEADER" "systemctl is-active --quiet furnace-cleanup.timer"
 
 step "Set up the follower (bundle copied from the leader, only two questions)"
 copy_between "$LEADER" /root/furnace-peer-bundle.tar.gz "$FOLLOWER" /root/furnace-peer-bundle.tar.gz
 put "$FOLLOWER" /root/answers.txt <<EOF
 leader or the follower?${TAB}follower
-Network card [${TAB}
+Network card name [${TAB}
 Set up Furnace with these settings?${TAB}y
 EOF
 out="$(on "$FOLLOWER" "python3 /root/answer.py /root/answers.txt -- furnace setup" 2>&1)" && rc=0 || rc=$?
@@ -154,10 +165,8 @@ check "same keepalived password on both" [ "$(on "$LEADER" 'grep ^KEEPALIVED_PAS
 check "follower does not own the shared IP" on "$FOLLOWER" "! ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 check "bundle deleted on the follower" on "$FOLLOWER" "! test -e /root/furnace-peer-bundle.tar.gz"
 check "same certificate on both" [ "$(on "$LEADER" 'sha256sum < /etc/furnace/tls/furnace.crt')" = "$(on "$FOLLOWER" 'sha256sum < /etc/furnace/tls/furnace.crt')" ]
-check "same tokens on both" [ "$(on "$LEADER" 'sha256sum < /etc/furnace/tokens.env')" = "$(on "$FOLLOWER" 'sha256sum < /etc/furnace/tokens.env')" ]
 check "cleanup timer stopped on the follower" on "$FOLLOWER" "! systemctl is-active --quiet furnace-cleanup.timer"
 
-TOKEN="$(on "$LEADER" "grep ^FURNACE_BLOCK_TOKEN= /etc/furnace/tokens.env | cut -d= -f2-")"
 for box in "$FW" "$XSOAR"; do
     copy_between "$LEADER" /etc/furnace/tls/furnace.crt "$box" /root/furnace.crt
 done
@@ -174,7 +183,7 @@ api() {  # api METHOD PATH [JSON] -> prints "HTTP_CODE BODY", called from the XS
     docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $TOKEN" \
         -X "$1" "${data[@]}" -w ' %{http_code}' "https://$SHARED_IP$2" | tr -d '\n'
 }
-edl() { docker exec "$FW" curl -sS --cacert /root/furnace.crt "https://$SHARED_IP/edl/$1"; }
+edl() { docker exec "$FW" curl -sS --cacert /root/furnace.crt -u "paloalto:$EDL_PW" "https://$SHARED_IP/edl/$1"; }
 code_from() { docker exec "$1" curl -s -o /dev/null -w '%{http_code}' --cacert /root/furnace.crt "$2"; }
 
 step "API and EDL through the shared IP"
@@ -188,6 +197,28 @@ check "the firewall may not use the API (403)" [ "$(code_from "$FW" "https://$SH
 check "XSOAR may not read the EDL (403)" [ "$(code_from "$XSOAR" "https://$SHARED_IP/edl/blocklist.txt")" = "403" ]
 check "the archive CSV is not served" [ "$(code_from "$FW" "https://$SHARED_IP/edl/archive.csv")" = "404" ]
 check "/health is not open to the firewall" [ "$(code_from "$FW" "https://$SHARED_IP/health")" = "403" ]
+check "the firewall needs the EDL login (401)" [ "$(code_from "$FW" "https://$SHARED_IP/edl/blocklist.txt")" = "401" ]
+check "a wrong EDL password is refused (401)" \
+    [ "$(docker exec "$FW" curl -s -o /dev/null -w '%{http_code}' --cacert /root/furnace.crt -u paloalto:wrong "https://$SHARED_IP/edl/blocklist.txt")" = "401" ]
+r="$(docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $WL_TOKEN" -w ' %{http_code}' "https://$SHARED_IP/api/v1/ips/$TEST_IP" | tr -d '\n')"
+check "the whitelist token may not use block calls (401)" grep -q ' 401$' <<< "$r"
+
+step "API tokens and the wrong-token lockout"
+out="$(on "$LEADER" "furnace token add lab --scope all")"
+LAB_TOKEN="$(grep -o 'fur_[A-Za-z0-9_-]*' <<< "$out")"
+check "furnace token add shows a new token" [ -n "$LAB_TOKEN" ]
+check "furnace token list never shows a token" on "$LEADER" "furnace token list | grep -q '^lab ' && ! furnace token list | grep -q fur_"
+for n in $(seq 1 10); do
+    docker exec "$XSOAR" curl -s -o /dev/null --cacert /root/furnace.crt -H "Authorization: Bearer fur_wrong$n" \
+        "https://$SHARED_IP/api/v1/ips/$TEST_IP"
+done
+check "after 10 wrong tokens even a good token is locked (429)" \
+    [ "$(docker exec "$XSOAR" curl -s -o /dev/null -w '%{http_code}' --cacert /root/furnace.crt -H "Authorization: Bearer $TOKEN" "https://$SHARED_IP/api/v1/ips/$TEST_IP")" = "429" ]
+check "furnace lockouts shows XSOAR" on "$LEADER" "furnace lockouts | grep -q '^$XSOAR_IP '"
+check "furnace unlock frees it" on "$LEADER" "furnace unlock $XSOAR_IP | grep -q 'Unlocked 1'"
+r="$(api GET "/api/v1/ips/$TEST_IP")"
+check "XSOAR works again after the unlock" grep -q ' 200$' <<< "$r"
+check "furnace token remove" on "$LEADER" "furnace token remove lab"
 
 step "Replication to the follower (waits up to 90 seconds)"
 ok=0
@@ -200,6 +231,9 @@ check "the follower has the domain" on "$FOLLOWER" "grep -qx bad.example.com /va
 r="$(docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"ip":"198.51.100.78"}' -w ' %{http_code}' "https://$FOLLOWER_IP/api/v1/ips" | tr -d '\n')"
 check "the follower refuses changes (503 not_leader)" grep -q 'not_leader.* 503$' <<< "$r"
+check "the follower got the tokens and the EDL login" \
+    [ "$(on "$LEADER" 'furnace token list; furnace edl-user list')" = "$(on "$FOLLOWER" 'furnace token list; furnace edl-user list')" ]
+check "the follower refuses token changes" on "$FOLLOWER" "furnace token add late 2>&1 | grep -q 'Run this on the leader'"
 
 step "The furnace command: status and import"
 check "status is fine on the leader" on "$LEADER" "furnace status"
@@ -209,13 +243,15 @@ check "import from a file only root can read" on "$LEADER" "furnace import-ips /
 check "the imported IP is served" grep -qx "198.51.100.90" <<< "$(edl blocklist.txt)"
 
 step "Package upgrade (apt install --reinstall) keeps data and tokens"
-before_tokens="$(on "$LEADER" 'sha256sum < /etc/furnace/tokens.env')"
+before_tokens="$(on "$LEADER" 'furnace token list; furnace edl-user list')"
 out="$(on "$LEADER" "apt-get install -y -qq --reinstall /root/furnace.deb 2>&1")"
 printf '%s\n' "$out" | tail -n 5
 lab_allow_test_ranges
 check "the upgrade ran setup with the saved settings" grep -q "self-test passed" <<< "$out"
-check "the upgrade did not ask questions or show tokens" bash -c '! grep -q "API TOKENS" <<< "$1"' _ "$out"
-check "tokens unchanged" [ "$before_tokens" = "$(on "$LEADER" 'sha256sum < /etc/furnace/tokens.env')" ]
+check "the upgrade made no new secrets" bash -c '! grep -q "NEW SECRETS" <<< "$1"' _ "$out"
+check "no secrets file after the upgrade" on "$LEADER" "! test -e /root/furnace-new-secrets.txt"
+check "tokens and EDL login unchanged" [ "$before_tokens" = "$(on "$LEADER" 'furnace token list; furnace edl-user list')" ]
+check "the old token still works" grep -q ' 200$' <<< "$(api GET "/api/v1/ips/$TEST_IP")"
 check "the leader still owns the shared IP (no failover during upgrade)" on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 check "the IP is still blocked" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
 check "furnace stats works" on "$LEADER" "furnace stats | grep -q 'active ips *2'"
@@ -236,6 +272,22 @@ for _ in $(seq 1 90); do
 done
 check "replication now runs the other way" [ "$ok" = 1 ]
 
+step "No IP limits: XSOAR_IP=any and FIREWALL_IP=any (token and login only)"
+for box in "$LEADER" "$FOLLOWER"; do
+    on "$box" "sed -i -e 's/^XSOAR_IP=.*/XSOAR_IP=any/' -e 's/^FIREWALL_IP=.*/FIREWALL_IP=any/' /etc/furnace/setup.conf"
+    out="$(on "$box" "furnace setup --upgrade 2>&1")" && rc=0 || rc=$?
+    check "$box: setup with 'any' passed its self-test" [ "$rc" = 0 ]
+done
+lab_allow_test_ranges
+check "ufw opens the web port to everyone" on "$FOLLOWER" "ufw status | grep -E '^443/tcp +ALLOW +Anywhere' | grep -q 'furnace web'"
+check "the old per-IP web rules are gone" on "$FOLLOWER" "! ufw status | grep -q '$XSOAR_IP .*furnace web'"
+check "XSOAR may read the EDL now, with the login" [ "$(docker exec "$XSOAR" curl -s -o /dev/null -w '%{http_code}' --cacert /root/furnace.crt -u "paloalto:$EDL_PW" "https://$SHARED_IP/edl/blocklist.txt")" = "200" ]
+check "but not without the login (401)" [ "$(code_from "$XSOAR" "https://$SHARED_IP/edl/blocklist.txt")" = "401" ]
+r="$(docker exec "$FW" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $TOKEN" -w ' %{http_code}' "https://$SHARED_IP/api/v1/ips/$TEST_IP" | tr -d '\n')"
+check "the firewall box may use the API now, with the token" grep -q ' 200$' <<< "$r"
+check "but not without a token (401)" [ "$(code_from "$FW" "https://$SHARED_IP/api/v1/ips/$TEST_IP")" = "401" ]
+check "/health stays closed (403)" [ "$(code_from "$FW" "https://$SHARED_IP/health")" = "403" ]
+
 step "Failover: break the web service on the new leader (health check)"
 on "$FOLLOWER" "furnace failover-test --web" && pass "failover test (web service down)" || fail "failover test (web service down)"
 check "the shared IP is back on the first server" on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
@@ -245,9 +297,9 @@ on "$FOLLOWER" "apt-get remove -y -qq furnace >/dev/null 2>&1"
 check "program removed" on "$FOLLOWER" "! test -e /usr/lib/furnace && ! command -v furnace"
 check "services stopped" on "$FOLLOWER" "! systemctl is-active --quiet furnace-api && ! systemctl is-active --quiet keepalived"
 check "nginx site removed" on "$FOLLOWER" "! test -e /etc/nginx/sites-enabled/furnace"
-check "database and tokens kept" on "$FOLLOWER" "test -f /var/lib/furnace/furnace.db && test -f /etc/furnace/tokens.env"
+check "database and EDL logins kept" on "$FOLLOWER" "test -f /var/lib/furnace/furnace.db && test -f /var/lib/furnace-auth/edl-users"
 on "$FOLLOWER" "apt-get purge -y -qq furnace >/dev/null 2>&1"
-check "purge deleted the data and the users" on "$FOLLOWER" "! test -e /var/lib/furnace && ! test -e /etc/furnace && ! id furnace >/dev/null 2>&1"
+check "purge deleted the data and the users" on "$FOLLOWER" "! test -e /var/lib/furnace && ! test -e /var/lib/furnace-auth && ! test -e /etc/furnace && ! id furnace >/dev/null 2>&1"
 check "the leader keeps working" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
 
 printf '\n%s passed, %s failed (Ubuntu %s)\n' "$PASSED" "$FAILED" "$UBUNTU"

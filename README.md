@@ -46,6 +46,10 @@ The firewall keeps downloading the lists from Furnace.
 - A file lock makes sure two changes at the same time cannot clash.
 - Every change is one database transaction. Every action is written to an audit log, also refused requests.
 - Two servers share one IP address. If the leader fails, the follower takes over the shared IP.
+- **Security:** every API call needs a token. The lists need a login (user and password). Both work from any
+  address, so no IP rules are needed. You can still limit the addresses if you want (section 4).
+  Furnace stores only hashes of tokens and passwords. An address that sends 10 wrong tokens is locked for
+  15 minutes.
 
 Technology: Ubuntu 22.04 or 24.04, Python 3 with Flask, gunicorn, SQLite in WAL mode (Write-Ahead Logging) with
 `synchronous=FULL`, nginx, systemd and keepalived.
@@ -56,28 +60,29 @@ Technology: Ubuntu 22.04 or 24.04, Python 3 with Flask, gunicorn, SQLite in WAL 
 - Three IP addresses in that segment: one per server and one **shared IP** (VIP, virtual IP).
 - The servers need the Ubuntu package mirror (directly, through a proxy, or a local mirror). apt installs
   nginx, keepalived, Flask and gunicorn from there. PyPI (the Python Package Index) is not needed.
-- The IP address the firewall uses to download EDLs, and the IP address of XSOAR.
+- Optional: the IP address the firewall uses to download EDLs, and the IP address of XSOAR, if you want to limit
+  access to them. By default every address may connect, and the token and the login protect Furnace.
 
 ## 3. Install
 
 You need one file: `furnace_<version>_all.deb`. The same file works on Ubuntu 22.04 and 24.04.
-The examples below use version 0.2.0.
+The examples below use version 0.3.0.
 
 ### 3.1 Get the package
 
 - **Download it** from the GitHub releases page: <https://github.com/MahammadRahimov/furnace/releases>.
   The repository is private, so log in to GitHub first. Or, with the GitHub command line tool:
   ```bash
-  gh release download v0.2.0 -R MahammadRahimov/furnace -p '*.deb'
+  gh release download v0.3.0 -R MahammadRahimov/furnace -p '*.deb'
   ```
 - **Or build it yourself** on Ubuntu or WSL: `packaging/build-deb.sh`. The file lands in `dist/`.
-- Copy it to both servers, for example: `scp furnace_0.2.0_all.deb you@SERVER_IP:~/`
+- Copy it to both servers, for example: `scp furnace_0.3.0_all.deb you@SERVER_IP:~/`
 
 ### 3.2 Leader
 
 1. Install the package:
    ```bash
-   sudo apt install ./furnace_0.2.0_all.deb
+   sudo apt install ./furnace_0.3.0_all.deb
    ```
    apt also installs what Furnace needs from Ubuntu: nginx, keepalived, Flask, gunicorn and a few tools.
    Nothing starts yet.
@@ -90,13 +95,13 @@ The examples below use version 0.2.0.
    Example (fake addresses):
    ```
    Is this server the leader or the follower? [leader]:
-   Network card [eth0]:
+   Network card name [eth0]:
    This server's IP [192.0.2.11]:
    The other Furnace server's IP: 192.0.2.12
    Shared IP: 192.0.2.10
    Network prefix of the shared IP (24 = 255.255.255.0) [24]:
-   XSOAR IP that may call the API: 198.51.100.20
-   Firewall IP that downloads the lists (often the management IP): 198.51.100.1
+   Who may call the API (XSOAR) [any]:
+   Who may download the lists (the firewall) [any]:
    Most entries per list [50000]:
    Days an IP stays blocked before it moves to the archive [30]:
    VRRP router ID (1-255) [51]:
@@ -105,9 +110,12 @@ The examples below use version 0.2.0.
    Set up Furnace with these settings? [yes]:
    ```
 3. Setup configures and starts everything, then runs a self-test.
-4. It shows the two **API tokens once** at the end. Store them in the XSOAR credentials store.
-   They are not written to the log. You can read them later with `sudo cat /etc/furnace/tokens.env`.
-5. It writes `/root/furnace-peer-bundle.tar.gz` for the follower. It holds the tokens, the certificate, the
+4. At the end it shows the **new secrets once**: two API tokens (`xsoar` for blocking, `xsoar-whitelist` for
+   the whitelist) and the EDL login for the firewall (user `paloalto` and a password). Store them now:
+   the tokens in the XSOAR credentials store, the login in the firewall's EDL objects. They are not written to
+   the log, and Furnace keeps only hashes, so it cannot show them again. Lost one? Make a new one
+   ([section 7.1](#71-api-tokens-edl-logins-and-the-lockout)).
+5. It writes `/root/furnace-peer-bundle.tar.gz` for the follower. It holds the certificate, the
    replication key and the leader's settings. It is secret.
 
 ### 3.3 Follower
@@ -119,7 +127,7 @@ The examples below use version 0.2.0.
    ```
 2. On the follower, install the package and run setup:
    ```bash
-   sudo apt install ./furnace_0.2.0_all.deb
+   sudo apt install ./furnace_0.3.0_all.deb
    sudo furnace setup
    ```
 3. Answer `follower`. Setup finds the bundle in your home folder, in `/root` or in `/tmp`, or asks where it is.
@@ -147,17 +155,20 @@ For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is 
 - Checks that it runs as root on Ubuntu 22.04 or 24.04, and checks every answer.
 - Saves the answers in `/etc/furnace/setup.conf` (readable by root only, it holds the keepalived password).
 - Creates the user `furnace` (no login) and the user `furnace-sync` (can only receive replication snapshots).
-- Leader: creates both API tokens, a self-signed certificate (10 years, names the shared IP and both server IPs),
-  the replication SSH key and the keepalived password. Follower: copies them from the bundle.
+- Leader: creates a self-signed certificate (10 years, names the shared IP and both server IPs), the replication
+  SSH key and the keepalived password. Follower: copies them from the bundle.
+- On the server that owns the shared IP: creates the first API tokens and the EDL login, if there are none yet.
+  They are in the database, so the follower gets them with the replication.
 - Writes the nginx and keepalived files from the templates in `/usr/lib/furnace/templates`.
 - Opens only the needed ports on the host firewall (ufw): HTTPS, SSH, and VRRP (protocol 112) between the servers.
 - Starts everything and runs a **self-test**: it adds the fake IP `192.0.2.123`, checks that nginx serves it in
   `blocklist.txt`, removes it, and checks that it is gone. It also checks that the archive and the database are
-  not served, and that the API refuses calls without a token.
+  not served, that the API refuses calls without a token, and that the lists refuse a missing or wrong login.
+  The self-test uses its own short-lived token, so it never needs your tokens.
 - Prints a summary of what worked and what you still must do by hand.
 
 **Safe to run again.** Run `sudo furnace setup` again to change an answer. The brackets show the current answers.
-It never wipes the database and never changes the tokens or the certificate.
+It never wipes the database and never changes the tokens, the EDL logins or the certificate.
 The log is in `/var/log/furnace-setup.log`. It never contains secrets.
 
 ## 4. Setup questions and settings
@@ -168,13 +179,13 @@ Each question saves one setting in `/etc/furnace/setup.conf`. The same names are
 | Question | Setting | Default | Meaning |
 |---|---|---|---|
 | Leader or follower? | `ROLE` | `leader` | `leader` (preferred leader, keepalived priority 150) or `follower` (priority 100). |
-| Network card | `INTERFACE` | card of the default route | Card that carries this server's IP and the shared IP. See `ip -br addr`. |
+| Network card name | `INTERFACE` | card of the default route | Name (not IP) of the card that carries this server's IP and the shared IP, for example `ens192`. See `ip -br addr`. |
 | This server's IP | `THIS_IP` | first IP of the card | It must be set on that card. |
 | The other server's IP | `PEER_IP` | | The other Furnace server. |
 | Shared IP | `SHARED_IP` | | The shared IP (VIP, virtual IP). The firewall and XSOAR always use this address. |
 | Network prefix | `SHARED_IP_PREFIX` | prefix of this server's IP | For example 24 for 255.255.255.0. |
-| XSOAR IP | `XSOAR_IP` | | XSOAR address(es) that may call the API. Comma-separated list allowed. |
-| Firewall IP | `FIREWALL_IP` | | Address(es) the firewall downloads from. For a firewall HA pair, list both. |
+| Who may call the API | `XSOAR_IP` | `any` | `any` = every address (a token is always needed). Or IPs and ranges, comma-separated, for example XSOAR and its engines. |
+| Who may download the lists | `FIREWALL_IP` | `any` | `any` = every address (the EDL login is always needed). Or the firewall's IPs; for a firewall HA pair, list both. |
 | Most entries per list | `MAX_IPS`, `MAX_DOMAINS` | `50000` | The firewall's EDL limit. Adds beyond it are refused. 0 = no limit. The question sets both; a settings file can set them apart. |
 | Days before the archive | `ARCHIVE_AFTER_DAYS` | `30` | Days an IP stays active before the nightly job archives it. |
 | VRRP router ID | `VRRP_ROUTER_ID` | `51` | 1-255. Same on both servers. Must be unique in the network segment. |
@@ -193,9 +204,10 @@ The program settings live in `/etc/furnace/furnace.env` (written by setup). They
 During the setup self-test, test ranges are allowed for a few minutes by a file only root can create,
 `/run/furnace-state/selftest`. This avoids restarting the API. A restart could make keepalived move the shared IP.
 The file is removed after the test and is ignored when it is older than 10 minutes.
-The tokens `FURNACE_BLOCK_TOKEN` and `FURNACE_WHITELIST_TOKEN` are in `/etc/furnace/tokens.env`.
-If `FURNACE_WHITELIST_TOKEN` is empty, the block token is used for the whitelist too.
-Tokens must be at least 20 characters. The API does not start without a block token.
+`FURNACE_LOCKOUT_FAILURES` (10) and `FURNACE_LOCKOUT_MINUTES` (15): an address that sends that many wrong tokens
+within that time is locked for that time.
+API tokens and EDL logins are not settings. They are in the database, as hashes only
+([section 7.1](#71-api-tokens-edl-logins-and-the-lockout)).
 
 ## 5. Checklist of manual work
 
@@ -210,7 +222,7 @@ Setup cannot do these things for you.
 - [ ] The network must allow the shared IP to move between the two servers (ARP updates). In a virtual
       environment (VMware, Hyper-V, cloud), check that MAC spoofing / IP moves are allowed for these VMs.
 - [ ] Find out which source IP the firewall uses for EDL downloads. By default it is the management interface.
-      If you use a **service route**, it is that interface. Put that IP in `FIREWALL_IP`.
+      If you use a **service route**, it is that interface. You need it only if you limit `FIREWALL_IP`.
 
 ### 5.2 Certificate on the firewall
 
@@ -230,11 +242,12 @@ Menu names can differ a little between PAN-OS versions.
    - Type: **IP List**
    - Source: `https://SHARED_IP/edl/blocklist.txt`
    - Certificate Profile: the profile from 5.2
+   - Client Authentication: the EDL login from setup (user `paloalto` and its password)
    - Check for updates: **Every five minutes**
 2. Add a second EDL:
    - Type: **Domain List**
    - Source: `https://SHARED_IP/edl/domains.txt`
-   - Same certificate profile and update interval.
+   - Same certificate profile, EDL login and update interval.
    - Furnace stores exact domains. Decide whether you want the firewall to also match sub-domains.
 3. Use the IP list in security policy rules (deny, source and/or destination).
    Use the domain list in an Anti-Spyware profile (DNS policies) or as your design requires.
@@ -247,7 +260,8 @@ If both Furnace servers are down, the firewall keeps using the last list it down
 
 ### 5.4 XSOAR
 
-- [ ] Store the block token (and the whitelist token, if used) in the XSOAR credentials store.
+- [ ] Store the API tokens (`xsoar`, and `xsoar-whitelist` if you use the whitelist) in the XSOAR credentials
+      store.
 - [ ] Make XSOAR trust `furnace.crt` (see [6.10](#610-trusting-the-self-signed-certificate)).
 - [ ] Build the HTTP calls with the API guide below. Always call the **shared IP**.
 - [ ] Test with an IP from `203.0.113.0/24` first only if `FURNACE_ALLOW_TEST_RANGES=true`. In production, this is
@@ -269,18 +283,21 @@ Furnace does not need an XSOAR integration or pack. XSOAR calls the API with pla
 
 - Base address: `https://SHARED_IP` (always the shared IP, never a server's own IP).
 - Format: JSON (JavaScript Object Notation) in and out. Send `Content-Type: application/json`.
-- Authentication: the header `Authorization: Bearer <token>`.
-  - **Block token** for `/api/v1/ips` and `/api/v1/domains`.
-  - **Whitelist token** for `/api/v1/whitelist/...`. If no whitelist token is set, use the block token.
-- Only the XSOAR IP(s) may call `/api/`. Others get `403` from nginx.
+- Authentication: the header `Authorization: Bearer <token>`. Every `/api/` call needs it.
+  - A token with the scope **block** (setup makes `xsoar`) for `/api/v1/ips` and `/api/v1/domains`.
+  - A token with the scope **whitelist** (setup makes `xsoar-whitelist`) for `/api/v1/whitelist/...`.
+  - A token with the scope **all** may do both (make one with `sudo furnace token add NAME --scope all`).
+- Wrong tokens: after 10 wrong tokens in 15 minutes, the calling address is locked for 15 minutes (`429`
+  `locked`), even with a good token. A missing token does not count.
+- By default every address may call the API. If `XSOAR_IP` is limited, other addresses get `403` from nginx.
 - Rate limit: 10 requests per second per caller (burst 50). Above that: `429`. Wait and try again.
 
 The curl examples below use these shell variables:
 
 ```bash
 FURNACE=https://192.0.2.10          # the shared IP
-TOKEN='paste-the-block-token-here'
-WL_TOKEN='paste-the-whitelist-token-here'
+TOKEN='paste-the-xsoar-token-here'
+WL_TOKEN='paste-the-xsoar-whitelist-token-here'
 CA=furnace.crt                       # the Furnace certificate file
 ```
 
@@ -309,12 +326,13 @@ Every answer is JSON with `status` and a plain English `message`. Show `message`
 | 200 | `ok` | List or bulk result. |
 | 400 | `bad_request` | The body is not valid JSON, or a field has the wrong type. |
 | 401 | `unauthorized` | The token is missing or wrong for this endpoint. |
-| 403 | (nginx page) | The caller's IP may not use this address. |
+| 403 | (nginx page) | `XSOAR_IP` or `FIREWALL_IP` is limited, and the caller's IP is not on it. |
 | 404 | `not_found` | The entry is not in the list (or the address does not exist). |
 | 405 | `method_not_allowed` | Wrong HTTP method. |
 | 413 | `too_large` | The body is larger than 20 MB. |
 | 422 | `rejected` | Refused. `reason_code` says why (table below). |
 | 429 | (nginx page) | Too many requests. Slow down. |
+| 429 | `locked` | Too many wrong tokens from this address. `Retry-After` says how many seconds to wait. |
 | 503 | `rejected` + `not_leader` | You reached the standby server. Use the shared IP. |
 | 503 | `busy` | Another change is running. Try again in a few seconds. |
 | 500 | `error` | Unexpected server error. The details are only in the server log. |
@@ -344,7 +362,8 @@ How XSOAR should read an answer:
 - `200` with `already_exists` -> tell the analyst "already blocked since <date>" (it is in `message` and `entry.added_at`).
 - `422` -> show `message`. Do not retry. The input must change.
 - `503`, `429` or a network error -> retry a few times with a pause. If it still fails, tell the analyst.
-- `401` -> the token in XSOAR is wrong. Alert the XSOAR admin.
+- `401` -> the token in XSOAR is wrong. Alert the XSOAR admin. Do not retry: wrong tokens lead to a lockout.
+- `429` with `locked` -> fix the token, then ask the Furnace admin for `sudo furnace unlock <XSOAR IP>`.
 
 ### 6.4 Add an IP
 
@@ -509,7 +528,7 @@ The certificate is valid for 10 years.
 IPs). XSOAR cannot reach it. It is for keepalived and the admins.
 
 ```json
-{"status": "ok", "version": "0.1.0", "role": "leader", "ips": 1234, "domains": 56}
+{"status": "ok", "version": "0.3.0", "role": "leader", "ips": 1234, "domains": 56}
 ```
 
 ---
@@ -531,12 +550,40 @@ sudo furnace backup [--keep N]           # SQLite backup, keeps the newest N (de
 sudo furnace cleanup --dry-run           # what the nightly job would archive
 sudo furnace cleanup [--force]           # run it now (--force skips the safety stop)
 sudo furnace export ips -o /tmp/ips.csv  # also: archive, domains, whitelist-ips, whitelist-domains, audit
-sudo furnace check-config                # show the settings (never the tokens)
+sudo furnace check-config                # show the settings (no secrets)
 ```
+
+### 7.1 API tokens, EDL logins and the lockout
+
+API tokens and EDL logins are in the database. Furnace keeps only a hash (SHA-256 for tokens, SHA-512 crypt for
+passwords). A new token or password is shown **once**. Lost one? Make a new one with `rotate`.
+Changes run on the leader. The follower gets them with the next replication (within a minute).
+Every change is in the audit log, with the admin's name, never with the secret.
+
+```bash
+sudo furnace token list                       # names, scopes and a short id, never the tokens
+sudo furnace token add ui --scope all         # a new token: scope block (default), whitelist or all
+sudo furnace token rotate xsoar               # a new value; the old one stops working at once
+sudo furnace token remove ui                  # it stops working at once
+
+sudo furnace edl-user list                    # the EDL logins (names only)
+sudo furnace edl-user add paloalto-2          # a new login with a random password
+sudo furnace edl-user rotate paloalto         # a new password; put it in the firewall's EDL objects
+sudo furnace edl-user remove paloalto-2
+
+sudo furnace lockouts                         # addresses locked after too many wrong tokens
+sudo furnace unlock 198.51.100.20             # unlock one address (or: --all)
+```
+
+Give every program its own token (for example `xsoar` and, later, `ui`). Then you can replace or delete one
+without touching the others. The audit log shows which token made each change (`source` = `api:NAME@IP`).
+
+The lockout is kept on each server and is not replicated. `furnace unlock` works on the server where you run it,
+so run it on the server that owns the shared IP.
 
 A database backup also runs every day at 01:30 (`furnace-backup.timer`).
 
-### 7.1 Import IPs
+### 7.2 Import IPs
 
 ```bash
 sudo furnace import-ips /tmp/old-list.csv --dry-run     # check first, change nothing
@@ -562,7 +609,7 @@ sudo furnace import-ips /tmp/old-list.csv
 - If the result would be larger than `MAX_IPS`, the import stops and changes nothing.
 - 30,000 lines take about 2 seconds.
 
-### 7.2 Import domains and whitelists
+### 7.3 Import domains and whitelists
 
 ```bash
 sudo furnace import-domains /tmp/domains.txt [--dry-run]            # domain or domain,reason
@@ -655,17 +702,19 @@ shared IP as the leader, and then starts the service again. Afterwards the other
 | `/lib/systemd/system/furnace-*` | The systemd units. |
 | `/etc/furnace/setup.conf` | Your setup answers. Readable by root only. |
 | `/etc/furnace/furnace.env` | Program settings (no secrets). |
-| `/etc/furnace/tokens.env` | API tokens. Readable only by `furnace`. |
 | `/etc/furnace/tls/` | Certificate and private key. |
 | `/etc/furnace/ssh/` | Replication key. |
-| `/var/lib/furnace/furnace.db` | The database (master record). |
+| `/var/lib/furnace/furnace.db` | The database (master record), with the API tokens and EDL logins as hashes. |
+| `/var/lib/furnace/lockout.db` | Addresses locked after wrong tokens (this server only). |
+| `/var/lib/furnace-auth/edl-users` | EDL logins for nginx (name and hash), written from the database. Never served. |
 | `/var/lib/furnace/archive/archive.csv` | Archive storage. Never served. |
 | `/var/lib/furnace/backups/` | Database backups. |
 | `/var/lib/furnace/reports/` | Import reports. |
 | `/var/lib/furnace-edl/` | `blocklist.txt` and `domains.txt` (served by nginx). |
 | `/var/lib/furnace-incoming/` | Snapshots received from the other server. |
 | `/run/furnace-state/role` | `leader` or `follower` (written by keepalived). |
-| `/var/log/furnace-setup.log` | Setup log. |
+| `/var/log/furnace-setup.log` | Setup log. No secrets. |
+| `/root/furnace-new-secrets.txt` | Only when setup made new secrets without a person at the terminal (package upgrade). Read it, then delete it. |
 
 Services: `furnace-api` (gunicorn), `nginx`, `keepalived`. Timers: `furnace-cleanup`, `furnace-backup`,
 `furnace-replicate`. Path unit: `furnace-apply-replica`.
@@ -684,14 +733,23 @@ Data, tokens and the certificate are kept. The API is reloaded without downtime,
 if its settings changed, so an upgrade does not move the shared IP. If you change answers that affect keepalived
 (for example the VRRP router ID), the restart can move the shared IP to the other server. That is safe.
 
+**From 0.2 to 0.3:** do the **leader first**, then the follower.
+- The API tokens of 0.2 keep working. They move from `/etc/furnace/tokens.env` into the database (names `xsoar`
+  and `xsoar-whitelist`), and the file is deleted.
+- The lists now need a login. The upgrade makes the login `paloalto` and writes its password to
+  `/root/furnace-new-secrets.txt`. Until you add it to the firewall's EDL objects, the firewall cannot download new
+  lists and keeps the last one it has. Delete the file afterwards.
+- Your saved `XSOAR_IP` and `FIREWALL_IP` stay. To open them to every address, run `sudo furnace setup` on both
+  servers and answer `any`.
+
 If the upgrade step reports a problem, the package stays installed. Fix the problem and run
 `sudo furnace setup --upgrade`. The details are in `/var/log/furnace-setup.log`.
 
 **Uninstall:**
 
 ```bash
-sudo apt remove furnace    # removes the program and stops the services, keeps the data and the tokens
-sudo apt purge furnace     # also deletes the database, backups, tokens, certificate and users
+sudo apt remove furnace    # removes the program and stops the services, keeps the data, tokens and logins
+sudo apt purge furnace     # also deletes the database, backups, tokens, logins, certificate and users
 ```
 
 `apt remove` also removes the Furnace nginx site, the keepalived configuration (the shared IP is released) and the
@@ -708,7 +766,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 They cover validation, the duplicate rule, restore from the archive, the cleanup with fake dates and the
 `ARCHIVE_AFTER_DAYS` setting, the safety stop, the whitelist, imports (dated and undated, dry-run, formats), the
-API (tokens, separate whitelist token, errors), many requests at the same time (threads and processes), and that
+API (token scopes, rotate and remove, the lockout, the setup self-test token, errors), EDL logins (checked with
+openssl), the token migration from 0.2, a snapshot from an older leader, the token commands, many requests at the same time (threads and processes), and that
 no temporary files are left behind.
 
 Integration test with Docker (two servers, a fake firewall and a fake XSOAR; only test addresses).
@@ -722,12 +781,14 @@ tests/integration/run.sh 22.04
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
-The integration test passed 65 of 65 checks on Ubuntu 22.04 and on Ubuntu 24.04 (v0.2.0). It covers:
+The integration test passed 91 of 91 checks on Ubuntu 22.04 and on Ubuntu 24.04 (v0.3.0). It covers:
 building the package, `apt install` with its dependencies, nothing running before setup, `setup --check`, refusing
 bad settings, a follower without a bundle, the leader setup by answering the questions (including a wrong answer
 that is asked again, the card and IP found automatically, the keepalived password created), the follower setup with
-only two questions, tokens, certificate and settings copied through the bundle, the self-test, API and EDL access
-through the shared IP, nginx access rules (firewall only for EDLs, XSOAR only for the API, archive not served),
+only two questions, certificate and settings copied through the bundle, the secrets shown once and never in the
+log or the database, the self-test, API and EDL access through the shared IP, the EDL login (no login or a wrong
+password is refused), token scopes, the token commands, the wrong-token lockout and unlock, tokens and logins
+replicated to the follower, nginx and ufw rules with limited IPs and with `any` (archive and /health never served),
 replication both ways, the follower refusing changes, `furnace status`, an import from a file only root can read,
 a package upgrade that keeps data and tokens without moving the shared IP, both failover modes, the cleanup timer
 moving with the shared IP, `apt remove` (data kept) and `apt purge` (data deleted).
@@ -738,8 +799,8 @@ The unit tests also pass with Ubuntu's own Flask packages: Flask 2.0.1 on 22.04 
 
 Be aware of these limits before you go live:
 
-- **A real Palo Alto firewall.** The EDL download was tested with curl from a container. The PAN-OS menus in
-  this README come from documentation and may differ in your version.
+- **A real Palo Alto firewall.** The EDL download, also with the EDL login, was tested with curl from a container.
+  The PAN-OS menus in this README come from documentation and may differ in your version.
 - **A real XSOAR server.** The API calls were tested with curl. XSOAR's own way to trust a certificate was not
   tested.
 - **keepalived on real servers or VMs.** It was tested only in Docker containers on one host. Real switches,
@@ -752,5 +813,7 @@ Be aware of these limits before you go live:
   dependencies. An install without any of them was not tested.
 - **`furnace setup` over a real SSH session.** The questions were answered through a terminal in a container,
   not by a person over SSH.
-- **`USE_HTTPS=no`** (HTTP test mode), `HOST_FIREWALL=none` and `furnace setup --config` for a follower were
+- **An upgrade from 0.2 on real servers.** The token migration was tested in unit tests, not with a real 0.2
+  install.
+- **`USE_HTTPS=no`** (HTTP test mode; the EDL password would travel in clear text), `HOST_FIREWALL=none` and `furnace setup --config` for a follower were
   not run in the integration test.

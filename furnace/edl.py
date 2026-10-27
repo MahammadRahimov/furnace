@@ -75,16 +75,30 @@ def write_archive_csv(conn: sqlite3.Connection, settings: Settings) -> int:
     return count
 
 
+def write_edl_users(conn: sqlite3.Connection, settings: Settings) -> int:
+    """The nginx users file for the EDL login (name:hash lines). Never served."""
+    try:
+        rows = conn.execute("SELECT name, password_hash FROM edl_users ORDER BY name").fetchall()
+    except sqlite3.OperationalError:  # a snapshot from an older version without the table
+        rows = []
+    atomic_write(settings.edl_users_path, "".join(f"{r[0]}:{r[1]}\n" for r in rows), mode=0o640)
+    return len(rows)
+
+
 def rebuild_all(conn: sqlite3.Connection, settings: Settings) -> dict[str, int]:
     return {
         "ips": write_blocklist(conn, settings),
         "domains": write_domains(conn, settings),
         "archived": write_archive_csv(conn, settings),
+        "edl_users": write_edl_users(conn, settings),
     }
 
 
 def ensure_files(settings: Settings) -> None:
-    """A fresh server must never return an error page: create empty files."""
+    """A fresh server must never return an error page: create empty files.
+    An empty users file means that nobody may download the EDL yet."""
     for path in (settings.blocklist_path, settings.domains_path):
         if not path.exists():
             atomic_write(path, "")
+    if not settings.edl_users_path.exists():
+        atomic_write(settings.edl_users_path, "", mode=0o640)

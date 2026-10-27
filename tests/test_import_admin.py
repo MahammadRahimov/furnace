@@ -236,7 +236,7 @@ def test_replica_roundtrip(furnace, settings, tmp_path):
 
     from furnace.config import Settings
     follower = Settings(data_dir=tmp_path / "f", edl_dir=tmp_path / "f/edl", archive_dir=tmp_path / "f/arch",
-                        backup_dir=tmp_path / "f/bk", role_file=tmp_path / "role", block_token="x" * 20)
+                        backup_dir=tmp_path / "f/bk", auth_dir=tmp_path / "f/auth", role_file=tmp_path / "role")
     (tmp_path / "role").write_text("follower")
     Furnace(follower).startup()
     counts = apply_snapshot(follower, snap)
@@ -256,7 +256,7 @@ def test_replica_roundtrip(furnace, settings, tmp_path):
 def test_admin_cli(furnace, settings, tmp_path, monkeypatch, capsys):
     env = {"FURNACE_DATA_DIR": str(settings.data_dir), "FURNACE_EDL_DIR": str(settings.edl_dir),
            "FURNACE_ARCHIVE_DIR": str(settings.archive_dir), "FURNACE_BACKUP_DIR": str(settings.backup_dir),
-           "FURNACE_ALLOW_TEST_RANGES": "true", "FURNACE_BLOCK_TOKEN": "y" * 24}
+           "FURNACE_AUTH_DIR": str(settings.auth_dir), "FURNACE_ALLOW_TEST_RANGES": "true"}
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("FURNACE_CONFIG", str(tmp_path / "none.env"))
@@ -276,5 +276,4 @@ def test_admin_cli(furnace, settings, tmp_path, monkeypatch, capsys):
     assert admin.main(["cleanup", "--dry-run"]) == 0
     assert admin.main(["backup", "--keep", "2"]) == 0
     assert admin.main(["check-config"]) == 0
-    assert "y" * 24 not in capsys.readouterr().out  # never print secrets
     assert admin.main(["import-ips", str(tmp_path / "missing.txt")]) == 2

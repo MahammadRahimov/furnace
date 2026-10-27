@@ -13,4 +13,4 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/furnace /var/lib/furnace-edl
+ReadWritePaths=/var/lib/furnace /var/lib/furnace-edl /var/lib/furnace-auth

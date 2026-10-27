@@ -55,11 +55,11 @@ class Furnace:
         self.settings.ensure_dirs()
         db.init_db(self.settings.db_path)
         edl.ensure_files(self.settings)
-        with self._locked() as conn:
+        with self.locked() as conn:
             edl.rebuild_all(conn, self.settings)
 
     @contextmanager
-    def _locked(self) -> Iterator[sqlite3.Connection]:
+    def locked(self) -> Iterator[sqlite3.Connection]:
         with FileLock(self.settings.lock_path, self.settings.lock_timeout):
             conn = db.connect(self.settings.db_path)
             try:
@@ -137,7 +137,7 @@ class Furnace:
         if refused:
             return refused
         now = now or db.utcnow()
-        with self._locked() as conn:
+        with self.locked() as conn:
             try:
                 reason_t, actor, incident = self._texts(reason, added_by, incident_id)
             except Rejected as error:
@@ -190,7 +190,7 @@ class Furnace:
         if refused:
             return refused
         now = now or db.utcnow()
-        with self._locked() as conn:
+        with self.locked() as conn:
             try:
                 actor = clean_text(removed_by, "removed_by", NAME_MAX)
                 ip = validate_ip(value, allow_test_ranges=True)
@@ -239,7 +239,7 @@ class Furnace:
         if refused:
             return refused
         now = now or db.utcnow()
-        with self._locked() as conn:
+        with self.locked() as conn:
             try:
                 reason_t, actor, incident = self._texts(reason, added_by, incident_id)
             except Rejected as error:
@@ -280,7 +280,7 @@ class Furnace:
         if refused:
             return refused
         now = now or db.utcnow()
-        with self._locked() as conn:
+        with self.locked() as conn:
             try:
                 actor = clean_text(removed_by, "removed_by", NAME_MAX)
                 domain = normalize_domain(value)
@@ -329,7 +329,7 @@ class Furnace:
         if refused:
             return refused
         now = now or db.utcnow()
-        with self._locked() as conn:
+        with self.locked() as conn:
             try:
                 reason_t, actor, _ = self._texts(reason, added_by, "")
                 net = validate_whitelist_cidr(value)
@@ -366,7 +366,7 @@ class Furnace:
         if refused:
             return refused
         now = now or db.utcnow()
-        with self._locked() as conn:
+        with self.locked() as conn:
             try:
                 actor = clean_text(removed_by, "removed_by", NAME_MAX)
                 cidr = str(validate_whitelist_cidr(value))
@@ -408,7 +408,7 @@ class Furnace:
             except Rejected as error:
                 rejected.append({"value": self._raw(value), "reason_code": error.code, "message": error.message})
 
-        with (self._reader() if dry_run else self._locked()) as conn:
+        with (self._reader() if dry_run else self.locked()) as conn:
             existing = {row[0] for row in conn.execute("SELECT cidr FROM whitelist_ips")}
             new = {c: n for c, n in nets.items() if c not in existing}
             ranges = RangeSet(new.values())
@@ -447,7 +447,7 @@ class Furnace:
         if refused:
             return refused
         now = now or db.utcnow()
-        with self._locked() as conn:
+        with self.locked() as conn:
             try:
                 reason_t, actor, _ = self._texts(reason, added_by, "")
                 domain = normalize_domain(value)
@@ -483,7 +483,7 @@ class Furnace:
         if refused:
             return refused
         now = now or db.utcnow()
-        with self._locked() as conn:
+        with self.locked() as conn:
             try:
                 actor = clean_text(removed_by, "removed_by", NAME_MAX)
                 domain = normalize_domain(value)
@@ -524,7 +524,7 @@ class Furnace:
             except Rejected as error:
                 rejected.append({"value": self._raw(value), "reason_code": error.code, "message": error.message})
 
-        with (self._reader() if dry_run else self._locked()) as conn:
+        with (self._reader() if dry_run else self.locked()) as conn:
             existing = {row[0] for row in conn.execute("SELECT domain FROM whitelist_domains")}
             new = sorted(domains - existing)
             if dry_run:

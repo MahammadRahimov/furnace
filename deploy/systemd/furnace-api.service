@@ -10,7 +10,6 @@ Group=furnace
 UMask=0027
 EnvironmentFile=/etc/furnace/furnace.env
 Environment=PYTHONPATH=/usr/lib/furnace PYTHONDONTWRITEBYTECODE=1
-EnvironmentFile=/etc/furnace/tokens.env
 ExecStart=/usr/bin/python3 -m gunicorn --workers 3 --bind 127.0.0.1:8081 \
     --forwarded-allow-ips 127.0.0.1 --access-logfile - --timeout 120 --graceful-timeout 5 furnace.wsgi:app
 # Reload = new workers with the new code, while the main process keeps serving (no downtime).
@@ -24,7 +23,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
-ReadWritePaths=/var/lib/furnace /var/lib/furnace-edl
+ReadWritePaths=/var/lib/furnace /var/lib/furnace-edl /var/lib/furnace-auth
 
 [Install]
 WantedBy=multi-user.target

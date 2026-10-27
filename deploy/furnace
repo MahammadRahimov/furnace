@@ -40,7 +40,7 @@ from furnace.admin import build_parser
 parser = build_parser()
 for action in parser._subparsers._group_actions:
     for choice in action._choices_actions:
-        if not choice.help.startswith("(replication"):
+        if not choice.help.startswith(("(replication", "(setup")):
             print(f"  {choice.dest:<23}{choice.help}")
 PY
     echo
@@ -71,8 +71,8 @@ run_data_command() {
         done
     fi
     local code=0
-    runuser -u furnace -- env FURNACE_CONFIG="$ETC/furnace.env" PYTHONPATH="$LIB" PYTHONDONTWRITEBYTECODE=1 \
-        python3 -m furnace "${args[@]}" || code=$?
+    runuser -u furnace -- env FURNACE_CONFIG="$ETC/furnace.env" FURNACE_ACTOR="${SUDO_USER:-root}" \
+        PYTHONPATH="$LIB" PYTHONDONTWRITEBYTECODE=1 python3 -m furnace "${args[@]}" || code=$?
     [ -n "$tmp" ] && rm -rf "$tmp"
     return "$code"
 }
@@ -122,6 +122,6 @@ case "${1:-help}" in
     setup) shift; need_root setup; exec "$LIB/setup.sh" "$@" ;;
     status) status ;;
     failover-test) shift; need_root failover-test; need_setup; exec "$LIB/bin/furnace-failover-test" "$@" ;;
-    snapshot|apply-replica) echo "'$1' is used by the replication only." >&2; exit 2 ;;
+    snapshot|apply-replica|init-secrets) echo "'$1' is used by Furnace itself only." >&2; exit 2 ;;
     *) run_data_command "$@" ;;
 esac

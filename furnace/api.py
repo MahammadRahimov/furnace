@@ -1,13 +1,13 @@
 """The Furnace HTTP API (Flask, JSON).
 
-Blocklist calls need the block token. Whitelist calls need the whitelist
-token (or the block token when no whitelist token is set).
+Every /api/ call needs a token (Authorization: Bearer ...). Blocklist calls need a
+token with the scope block or all, whitelist calls the scope whitelist or all.
+An IP that sends too many wrong tokens is locked for a while (429).
 Internal errors are logged on the server and never shown to the caller.
 """
 
 from __future__ import annotations
 
-import hmac
 import logging
 from functools import wraps
 from typing import Any, Callable
@@ -16,7 +16,7 @@ from flask import Flask, Response, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import __version__, db
+from . import __version__, auth, db
 from .config import Settings
 from .locking import LockTimeout
 from .service import Furnace, Result
@@ -39,13 +39,8 @@ def _error(status: str, message: str, http: int) -> tuple[Response, int]:
     return jsonify({"status": status, "message": message}), http
 
 
-def _token_ok(given: str, expected: str) -> bool:
-    return bool(expected) and hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
-
-
 def create_app(settings: Settings | None = None) -> Flask:
     settings = settings or Settings.load()
-    settings.check_tokens()           # refuse to start without a good block token
     furnace = Furnace(settings)
     furnace.startup()
 
@@ -58,19 +53,31 @@ def create_app(settings: Settings | None = None) -> Flask:
     app.extensions["furnace"] = furnace
 
     def require(kind: str) -> Callable:
+        """kind is block or whitelist. A token with the scope 'all' may do both."""
         def decorator(view: Callable) -> Callable:
             @wraps(view)
             def wrapper(*args: Any, **kwargs: Any):
+                caller = request.remote_addr or "unknown"
+                wait = auth.locked_for(settings, caller)
+                if wait:
+                    resp, code = _error("locked", "Too many wrong tokens from this address. "
+                                        f"Try again in {wait} seconds.", 429)
+                    resp.headers["Retry-After"] = str(wait)
+                    return resp, code
                 header = request.headers.get("Authorization", "")
                 given = header[7:].strip() if header[:7].lower() == "bearer " else ""
-                expected = settings.block_token if kind == "block" else settings.effective_whitelist_token
-                if not _token_ok(given, expected):
-                    log.warning("Refused %s %s from %s: missing or wrong token.",
-                                request.method, request.path, request.remote_addr)
+                client = auth.find_client(settings, given)
+                if client is None or not client.may(kind):
+                    if given and client is None and auth.record_failure(settings, caller):
+                        log.warning("Locked %s for %s minutes after %s wrong tokens.",
+                                    caller, settings.lockout_minutes, settings.lockout_failures)
+                    log.warning("Refused %s %s from %s: %s.", request.method, request.path, caller,
+                                "missing token" if not given else "wrong token" if client is None
+                                else f"token '{client.name}' may not use {kind} calls")
                     resp, code = _error("unauthorized", "The token is missing or wrong for this endpoint.", 401)
                     resp.headers["WWW-Authenticate"] = "Bearer"
                     return resp, code
-                g.source = f"api:{request.remote_addr}"
+                g.source = f"api:{client.name}@{caller}"
                 return view(*args, **kwargs)
             return wrapper
         return decorator

@@ -65,7 +65,7 @@ def test_rebuild_writes_sorted_files_and_no_temp_files(settings, conn):
         conn.execute("INSERT INTO blocked_domains(domain, added_at) VALUES ('b.example.com','t')")
         conn.execute("INSERT INTO blocked_domains(domain, added_at) VALUES ('a.example.com','t')")
     counts = edl.rebuild_all(conn, settings)
-    assert counts == {"ips": 3, "domains": 2, "archived": 0}
+    assert counts == {"ips": 3, "domains": 2, "archived": 0, "edl_users": 0}
     assert settings.blocklist_path.read_text() == "198.51.100.30\n198.51.100.200\n203.0.113.9\n"
     assert settings.domains_path.read_text() == "a.example.com\nb.example.com\n"
     assert settings.archive_csv_path.read_text().startswith("ip,added_at,archived_at")
@@ -107,17 +107,16 @@ def test_lock_timeout(settings):
             pass
 
 
-def test_settings_from_env_and_tokens():
+def test_settings_from_env():
     s = Settings.from_env({"FURNACE_DATA_DIR": "/srv/f", "FURNACE_ARCHIVE_AFTER_DAYS": "45",
-                           "FURNACE_BLOCK_TOKEN": "a" * 20})
+                           "FURNACE_LOCKOUT_FAILURES": "5"})
     assert s.archive_after_days == 45
     assert str(s.edl_dir) == "/srv/f/edl"
-    assert s.effective_whitelist_token == "a" * 20
-    s.check_tokens()
-    for env in ({}, {"FURNACE_BLOCK_TOKEN": "short"},
-                {"FURNACE_BLOCK_TOKEN": "a" * 20, "FURNACE_WHITELIST_TOKEN": "short"}):
+    assert str(s.edl_users_path) == "/srv/f/auth/edl-users"
+    assert s.lockout_failures == 5 and s.lockout_minutes == 15
+    for env in ({"FURNACE_LOCKOUT_FAILURES": "0"}, {"FURNACE_LOCKOUT_MINUTES": "x"}):
         try:
-            Settings.from_env(env).check_tokens()
+            Settings.from_env(env)
             raise AssertionError("must refuse")
         except ConfigError:
             pass

@@ -4,13 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from furnace.api import create_app
-from furnace.config import ConfigError, Settings
 from furnace.service import Furnace
 
-from conftest import BLOCK_TOKEN, WHITELIST_TOKEN, leftover_temp_files
+from conftest import ALL_TOKEN, BLOCK_TOKEN, WHITELIST_TOKEN, leftover_temp_files
 
 BLOCK = {"Authorization": f"Bearer {BLOCK_TOKEN}"}
 WL = {"Authorization": f"Bearer {WHITELIST_TOKEN}"}
+ALL = {"Authorization": f"Bearer {ALL_TOKEN}"}
 
 
 @pytest.fixture
@@ -19,18 +19,19 @@ def client(settings):
 
 
 @pytest.fixture
-def split_client(settings):
-    settings.whitelist_token = WHITELIST_TOKEN
-    return create_app(settings).test_client()
+def split_client(client):
+    return client
 
 
-def test_refuses_to_start_without_block_token(settings):
-    settings.block_token = ""
-    with pytest.raises(ConfigError):
-        create_app(settings)
-    settings.block_token = "too-short"
-    with pytest.raises(ConfigError):
-        create_app(settings)
+def test_without_tokens_every_call_is_refused(settings):
+    from furnace import db
+    conn = db.connect(settings.db_path)
+    conn.execute("DELETE FROM api_tokens")
+    conn.close()
+    c = create_app(settings).test_client()
+    assert c.get("/health").status_code == 200
+    for headers in (BLOCK, WL, ALL, {}):
+        assert c.post("/api/v1/ips", json={"ip": "198.51.100.1"}, headers=headers).status_code == 401
 
 
 def test_health_needs_no_token(client):
@@ -115,9 +116,9 @@ def test_domains_api(client, settings):
     assert client.delete("/api/v1/domains/bad.example.com", headers=BLOCK).status_code == 404
 
 
-def test_shared_token_when_no_whitelist_token(client):
-    r = client.post("/api/v1/whitelist/ips", json={"entry": "198.51.100.0/24"}, headers=BLOCK)
-    assert r.status_code == 201
+def test_scope_all_may_do_both(client):
+    assert client.post("/api/v1/whitelist/ips", json={"entry": "198.51.100.0/24"}, headers=ALL).status_code == 201
+    assert client.post("/api/v1/ips", json={"ip": "203.0.113.1"}, headers=ALL).status_code == 201
 
 
 def test_separate_whitelist_token(split_client):
