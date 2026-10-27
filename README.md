@@ -33,6 +33,8 @@ HTTPS requests, and any list reader that can download a text file over HTTPS wit
 14. [What was not tested](#14-what-was-not-tested)
 15. [Examples: Palo Alto and Cortex XSOAR](#15-examples-palo-alto-and-cortex-xsoar)
 
+The plan for the next versions (SUSE, a generic `.tar.gz`) is in [docs/ROADMAP.md](docs/ROADMAP.md).
+
 ---
 
 ## 1. How it works
