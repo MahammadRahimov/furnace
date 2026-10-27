@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Furnace setup for Ubuntu 22.04 and 24.04, Debian 12 and 13. Run it as: sudo furnace setup
+# Furnace setup for the supported Linux systems (see SUPPORTED below). Run it as: sudo furnace setup
 #
 #   sudo furnace setup                 ask the questions, then configure and start everything
 #   sudo furnace setup --config FILE   take the answers from a settings file (no questions)
@@ -80,14 +80,41 @@ done
 
 [ "$(id -u)" -eq 0 ] || die "Run setup as root: sudo furnace setup"
 
-SUPPORTED="Ubuntu 22.04 and 24.04, Debian 12 and 13"
+SUPPORTED="Ubuntu 22.04 and 24.04, Debian 12 and 13, RHEL / Rocky / AlmaLinux / Oracle Linux / CentOS Stream 8, 9
+  and 10, Fedora 41 and newer, Amazon Linux 2023"
 [ -r /etc/os-release ] || die "Cannot read /etc/os-release. Supported: $SUPPORTED."
 # shellcheck source=/dev/null
 . /etc/os-release
-case "${ID:-}:${VERSION_ID:-}" in
-    ubuntu:22.04|ubuntu:24.04|debian:12|debian:13) ;;
-    *) die "This is ${PRETTY_NAME:-an unknown system}. Supported: $SUPPORTED." ;;
+MAJOR="${VERSION_ID%%.*}"
+FAMILY=""
+case "${ID:-}" in
+    ubuntu) case "${VERSION_ID:-}" in 22.04|24.04) FAMILY=debian ;; esac ;;
+    debian) case "$MAJOR" in 12|13) FAMILY=debian ;; esac ;;
+    rhel|rocky|almalinux|ol|centos) case "$MAJOR" in 8|9|10) FAMILY=redhat ;; esac ;;
+    fedora) [[ "$MAJOR" =~ ^[0-9]+$ ]] && [ "$MAJOR" -ge 41 ] && FAMILY=redhat ;;
+    amzn) [ "$MAJOR" = "2023" ] && FAMILY=redhat ;;
 esac
+[ -n "$FAMILY" ] || die "This is ${PRETTY_NAME:-an unknown system}. Supported: $SUPPORTED."
+
+# Where the systems differ. Everything below uses these names.
+if [ "$FAMILY" = "debian" ]; then
+    NGINX_CONF=/etc/nginx/sites-available/furnace   # linked into sites-enabled
+    NGINX_GROUP=www-data
+    SSH_UNIT=ssh
+else
+    NGINX_CONF=/etc/nginx/conf.d/furnace.conf
+    NGINX_GROUP=nginx
+    SSH_UNIT=sshd
+fi
+# The host firewall tool on this server: ufw (Debian family), firewalld (Red Hat family), or none.
+if [ "$FAMILY" = "debian" ] && command -v ufw >/dev/null 2>&1; then
+    HOST_FW_TOOL=ufw
+elif command -v firewall-cmd >/dev/null 2>&1; then
+    HOST_FW_TOOL=firewalld
+else
+    HOST_FW_TOOL=none
+fi
+FW_RULES="/etc/furnace/firewalld.rules"   # the firewalld rules Furnace added, so it can remove them again
 
 if [ -d /opt/furnace/venv ]; then
     die "An old Furnace (installed with install.sh) is on this server.
@@ -153,6 +180,8 @@ import ipaddress, sys
 ipaddress.ip_network(sys.argv[1], strict=True)
 PY
 }
+
+selinux_on() { command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; }
 
 web_sources_text() {
     if [ "$CFG_LISTS_ALLOW_FROM" = "any" ] || [ "$CFG_API_ALLOW_FROM" = "any" ]; then
@@ -222,7 +251,11 @@ check_SSH_ALLOW_FROM() {
         is_ip_or_cidr "$item" || { echo "SSH_ALLOW_FROM contains '$item'. Use 'any' or IP addresses."; return 1; }
     done
 }
-check_HOST_FIREWALL() { [[ "$1" =~ ^(ufw|none)$ ]] || { echo "HOST_FIREWALL must be 'ufw' or 'none'."; return 1; }; }
+check_HOST_FIREWALL() {
+    [[ "$1" =~ ^(ufw|firewalld|none)$ ]] || { echo "HOST_FIREWALL must be 'ufw', 'firewalld' or 'none'."; return 1; }
+    [ "$1" = "none" ] || [ "$1" = "$HOST_FW_TOOL" ] \
+        || { echo "HOST_FIREWALL is '$1', but this server has $HOST_FW_TOOL. Use '$HOST_FW_TOOL' or 'none'."; return 1; }
+}
 
 validate_all() {
     local k var msg
@@ -241,7 +274,7 @@ new_password() {
 fill_defaults() {
     : "${CFG_SHARED_IP_PREFIX:=24}" "${CFG_VRRP_ROUTER_ID:=51}" "${CFG_USE_HTTPS:=yes}"
     : "${CFG_MAX_IPS:=50000}" "${CFG_MAX_DOMAINS:=50000}" "${CFG_SSH_ALLOW_FROM:=any}"
-    : "${CFG_HOST_FIREWALL:=ufw}" "${CFG_ARCHIVE_AFTER_DAYS:=30}" "${CFG_API_ALLOW_FROM:=any}" "${CFG_LISTS_ALLOW_FROM:=any}"
+    : "${CFG_HOST_FIREWALL:=$HOST_FW_TOOL}" "${CFG_ARCHIVE_AFTER_DAYS:=30}" "${CFG_API_ALLOW_FROM:=any}" "${CFG_LISTS_ALLOW_FROM:=any}"
     if [ -z "$CFG_INTERFACE" ]; then
         if [ -n "$CFG_THIS_IP" ]; then CFG_INTERFACE="$(card_of_ip "$CFG_THIS_IP")"; else CFG_INTERFACE="$(default_card)"; fi
     fi
@@ -305,7 +338,11 @@ apply_bundle() {
     fi
     CFG_THIS_IP="$B_PEER_IP"
     CFG_PEER_IP="$B_THIS_IP"
-    : "${CFG_SSH_ALLOW_FROM:=$B_SSH_ALLOW_FROM}" "${CFG_HOST_FIREWALL:=$B_HOST_FIREWALL}"
+    : "${CFG_SSH_ALLOW_FROM:=$B_SSH_ALLOW_FROM}"
+    # The leader may run another Linux with another firewall tool: use the one on this server.
+    if [ -z "$CFG_HOST_FIREWALL" ]; then
+        if [ "$B_HOST_FIREWALL" = "none" ]; then CFG_HOST_FIREWALL=none; else CFG_HOST_FIREWALL="$HOST_FW_TOOL"; fi
+    fi
     if [ -z "$CFG_INTERFACE" ]; then
         CFG_INTERFACE="$(card_of_ip "$CFG_THIS_IP")"
         [ -n "$CFG_INTERFACE" ] || die "The leader expects this server at $CFG_THIS_IP, but no network card here has that IP.
@@ -408,10 +445,15 @@ ask_all() {
     ask VRRP_ROUTER_ID "VRRP router ID (1-255)" "${CFG_VRRP_ROUTER_ID:-51}"
     note "Who may log in with SSH: 'any', or IPs separated by commas. The other server is always allowed."
     ask SSH_ALLOW_FROM "SSH allowed from" "${CFG_SSH_ALLOW_FROM:-any}"
+    if [ "$HOST_FW_TOOL" = "none" ]; then
+        note "No host firewall tool (ufw or firewalld) is installed. Furnace leaves the host firewall alone."
+        CFG_HOST_FIREWALL=none
+        return
+    fi
     local fw_default=yes
-    [ "${CFG_HOST_FIREWALL:-ufw}" = "none" ] && fw_default=no
-    if ask_yes_no "Let Furnace set up this server's own firewall (ufw)?" "$fw_default"; then
-        CFG_HOST_FIREWALL=ufw
+    [ "${CFG_HOST_FIREWALL:-$HOST_FW_TOOL}" = "none" ] && fw_default=no
+    if ask_yes_no "Let Furnace set up this server's own firewall ($HOST_FW_TOOL)?" "$fw_default"; then
+        CFG_HOST_FIREWALL="$HOST_FW_TOOL"
     else
         CFG_HOST_FIREWALL=none
     fi
@@ -502,15 +544,17 @@ if [ "$CHECK" -eq 1 ]; then
     if [ "$CFG_ROLE" = "follower" ] && ! have_secrets; then
         info "Follower: secrets come from the leader bundle $BUNDLE"
     fi
-    info "Files written: $SETUP_CONF, $ETC/furnace.env, $ETC/install.env, /etc/nginx/sites-available/furnace,"
+    info "System: ${PRETTY_NAME:-unknown} ($FAMILY family)"
+    info "Files written: $SETUP_CONF, $ETC/furnace.env, $ETC/install.env, $NGINX_CONF,"
     info "  /etc/keepalived/keepalived.conf (priority $PRIORITY)"
-    if [ "$CFG_HOST_FIREWALL" = "ufw" ]; then
-        info "Host firewall (ufw): allow SSH port $SSH_PORT from $CFG_SSH_ALLOW_FROM and $CFG_PEER_IP,"
+    if [ "$CFG_HOST_FIREWALL" != "none" ]; then
+        info "Host firewall ($CFG_HOST_FIREWALL): allow SSH port $SSH_PORT from $CFG_SSH_ALLOW_FROM and $CFG_PEER_IP,"
         info "  port $WEB_PORT from $(web_sources_text),"
         info "  VRRP (protocol 112) from $CFG_PEER_IP. Deny everything else coming in."
     else
         info "Host firewall: not touched (HOST_FIREWALL=none)."
     fi
+    selinux_on && info "SELinux is on: setup labels the Furnace folders and scripts and lets nginx reach the API."
     info "Services: furnace-api, nginx, keepalived, timers furnace-replicate, furnace-backup,"
     info "  furnace-cleanup (started by keepalived on the leader only)"
     info "Self-test: add 192.0.2.123, check it in the served EDL, remove it (leader only)"
@@ -524,12 +568,13 @@ exec > >(tee -a "$LOG") 2>&1
 LOGGING=1
 printf '\n----- Furnace setup started %s (%s) -----\n' "$(date -u +%FT%TZ)" "$MODE"
 
-# Replication needs the SSH server. Ubuntu 24.04 starts it through ssh.socket, the others through ssh.service.
-if ! systemctl is-active --quiet ssh.service && ! systemctl is-active --quiet ssh.socket; then
-    if systemctl cat ssh.socket >/dev/null 2>&1 && [ "${ID}:${VERSION_ID}" = "ubuntu:24.04" ]; then
-        systemctl enable --quiet --now ssh.socket
+# Replication needs the SSH server. Ubuntu 24.04 starts it through ssh.socket, the others through
+# ssh.service (Debian family) or sshd.service (Red Hat family).
+if ! systemctl is-active --quiet "$SSH_UNIT.service" && ! systemctl is-active --quiet "$SSH_UNIT.socket"; then
+    if systemctl cat "$SSH_UNIT.socket" >/dev/null 2>&1 && [ "${ID}:${VERSION_ID}" = "ubuntu:24.04" ]; then
+        systemctl enable --quiet --now "$SSH_UNIT.socket"
     else
-        systemctl enable --quiet --now ssh.service
+        systemctl enable --quiet --now "$SSH_UNIT.service"
     fi
     ok "SSH server started (needed for replication)"
 fi
@@ -547,7 +592,7 @@ install -d -m 0700 -o root -g root "$ETC/tls"
 install -d -m 0750 -o root -g furnace "$ETC/ssh"
 install -d -m 0750 -o furnace -g furnace "$DATA" "$DATA/archive" "$DATA/backups" "$DATA/reports" "$DATA/replica"
 install -d -m 0755 -o furnace -g furnace "$EDL"
-install -d -m 2750 -o furnace -g www-data "$AUTH"   # the EDL users file: nginx (www-data) reads it
+install -d -m 2750 -o furnace -g "$NGINX_GROUP" "$AUTH"   # the list users file: nginx reads it
 install -d -m 2750 -o furnace-sync -g furnace "$INCOMING"
 install -d -m 0700 -o furnace-sync -g furnace-sync "$SYNC_HOME" "$SYNC_HOME/.ssh"
 install -d -m 0755 "$STATE_DIR"
@@ -685,11 +730,13 @@ chown furnace-sync:furnace-sync "$SYNC_HOME/.ssh/authorized_keys"
 chmod 0600 "$SYNC_HOME/.ssh/authorized_keys"
 ok "Replication login prepared (furnace-sync may only receive snapshots)"
 
-render "$LIB/templates/nginx-furnace.conf.tmpl" /etc/nginx/sites-available/furnace
-ln -sf /etc/nginx/sites-available/furnace /etc/nginx/sites-enabled/furnace
-if [ -L /etc/nginx/sites-enabled/default ]; then
-    rm -f /etc/nginx/sites-enabled/default
-    info "Disabled the nginx default site"
+render "$LIB/templates/nginx-furnace.conf.tmpl" "$NGINX_CONF"
+if [ "$FAMILY" = "debian" ]; then
+    ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/furnace
+    if [ -L /etc/nginx/sites-enabled/default ]; then
+        rm -f /etc/nginx/sites-enabled/default
+        info "Disabled the nginx default site"
+    fi
 fi
 nginx -t -q || die "The nginx configuration test failed. See the messages above."
 ok "nginx configured (lists with a login, from $CFG_LISTS_ALLOW_FROM; API with a token, from $CFG_API_ALLOW_FROM; rate limits on)"
@@ -715,7 +762,7 @@ ok "keepalived configured (unicast VRRP to $CFG_PEER_IP, priority $PRIORITY, nop
 
 # The package brings the systemd units. If the API unit changed (for example in an
 # upgrade), a reload is not enough: the API needs a restart.
-API_UNIT_SUM="$(sha256sum /lib/systemd/system/furnace-api.service | cut -d' ' -f1)"
+API_UNIT_SUM="$(sha256sum "$(systemctl show -p FragmentPath --value furnace-api.service)" | cut -d' ' -f1)"   # not -P: RHEL 8 has systemd 239
 [ "$API_UNIT_SUM" = "$(cat "$ETC/.api-unit.sha256" 2>/dev/null || true)" ] || ENV_CHANGED=1
 systemctl daemon-reload
 ok "systemd units ready"
@@ -755,8 +802,80 @@ if [ "$CFG_HOST_FIREWALL" = "ufw" ]; then
     fi
     ufw --force enable >/dev/null
     ok "Host firewall on: SSH ($SSH_PORT), port $WEB_PORT from $(web_sources_text), VRRP from $CFG_PEER_IP"
+elif [ "$CFG_HOST_FIREWALL" = "firewalld" ]; then
+    say "Configuring the host firewall (firewalld)"
+    systemctl enable --quiet --now firewalld
+    ZONE="$(firewall-cmd --get-default-zone)"
+    fwc() { firewall-cmd --permanent --zone="$ZONE" "$@" >/dev/null; }
+    # Remove the rules of the last run first, so a changed answer leaves nothing behind.
+    if [ -f "$FW_RULES" ]; then
+        while IFS= read -r rule; do
+            case "$rule" in
+                rich:*) fwc --remove-rich-rule="${rule#rich:}" 2>/dev/null || true ;;
+                removed-service:*) fwc --add-service="${rule#removed-service:}" ;;
+            esac
+        done < "$FW_RULES"
+    fi
+    family_of() { case "$1" in *:*) echo ipv6 ;; *) echo ipv4 ;; esac; }
+    RULES=()
+    allow_port() {  # allow_port PORT SOURCE|any
+        if [ "$2" = "any" ]; then
+            RULES+=("rich:rule port port=\"$1\" protocol=\"tcp\" accept")
+        else
+            RULES+=("rich:rule family=\"$(family_of "$2")\" source address=\"$2\" port port=\"$1\" protocol=\"tcp\" accept")
+        fi
+    }
+    if [ "$CFG_SSH_ALLOW_FROM" = "any" ]; then
+        allow_port "$SSH_PORT" any
+    else
+        for src in $(split_list "$CFG_SSH_ALLOW_FROM"); do allow_port "$SSH_PORT" "$src"; done
+    fi
+    allow_port "$SSH_PORT" "$CFG_PEER_IP"
+    if [ "$CFG_LISTS_ALLOW_FROM" = "any" ] || [ "$CFG_API_ALLOW_FROM" = "any" ]; then
+        allow_port "$WEB_PORT" any
+    else
+        for src in $(split_list "$CFG_LISTS_ALLOW_FROM") $(split_list "$CFG_API_ALLOW_FROM") "$CFG_PEER_IP"; do
+            allow_port "$WEB_PORT" "$src"
+        done
+    fi
+    RULES+=("rich:rule family=\"ipv4\" source address=\"$CFG_PEER_IP\" protocol value=\"vrrp\" accept")
+    for rule in "${RULES[@]}"; do fwc --add-rich-rule="${rule#rich:}"; done
+    # SSH limited to some addresses: the zone's open "ssh" service must go, like ufw's default deny.
+    if [ "$CFG_SSH_ALLOW_FROM" != "any" ] && firewall-cmd --permanent --zone="$ZONE" --query-service=ssh >/dev/null 2>&1; then
+        fwc --remove-service=ssh
+        RULES+=("removed-service:ssh")
+    fi
+    printf '%s\n' "${RULES[@]}" > "$FW_RULES"
+    chmod 0600 "$FW_RULES"
+    firewall-cmd --reload >/dev/null
+    ok "Host firewall (firewalld, zone $ZONE): SSH ($SSH_PORT), port $WEB_PORT from $(web_sources_text), VRRP from $CFG_PEER_IP"
 else
     TODO+=("Host firewall was not configured (HOST_FIREWALL=none). Open port $WEB_PORT, SSH and VRRP (protocol 112) yourself.")
+fi
+
+# --------------------------------------------------------------------------- SELinux
+
+# Red Hat family systems run SELinux. Without these labels nginx cannot read the lists or reach the API,
+# keepalived cannot run the health check, and sshd cannot read the replication key.
+if selinux_on; then
+    say "Configuring SELinux"
+    command -v semanage >/dev/null 2>&1 \
+        || die "SELinux is on, but the semanage command is missing. Install the package policycoreutils-python-utils."
+    label() {  # label TYPE PATH_REGEX: add the rule, or change it if it is there already
+        semanage fcontext -a -t "$1" "$2" 2>/dev/null || semanage fcontext -m -t "$1" "$2"
+    }
+    label httpd_sys_content_t "$EDL(/.*)?"
+    label httpd_sys_content_t "$AUTH(/.*)?"
+    label ssh_home_t "$SYNC_HOME/\.ssh(/.*)?"
+    # The scripts are programs: as bin_t, systemd runs them in the normal service domain
+    # (unconfined_service_t). As lib_t they would stay in init_t, which may not run ssh.
+    label bin_t "$LIB/bin(/.*)?"
+    label keepalived_unconfined_script_exec_t "$LIB/bin/furnace-(health-check|notify)"
+    restorecon -RF "$EDL" "$AUTH" "$SYNC_HOME/.ssh" "$LIB/bin"
+    if [ "$(getsebool httpd_can_network_connect 2>/dev/null | awk '{print $3}')" != "on" ]; then
+        setsebool -P httpd_can_network_connect on   # nginx -> the API on 127.0.0.1:8081
+    fi
+    ok "SELinux labels set (lists, logins, replication key, Furnace scripts); nginx may reach the API"
 fi
 
 # --------------------------------------------------------------------------- start
@@ -949,7 +1068,12 @@ fi
 
 if [ "$MODE" != "upgrade" ]; then
     if [ "$CFG_ROLE" = "leader" ]; then
-        TODO+=("Follower ($CFG_PEER_IP): copy /root/$BUNDLE_NAME and the .deb file there, then run: sudo apt install ./furnace_${VERSION}_all.deb && sudo furnace setup")
+        if [ "$FAMILY" = "debian" ]; then
+            PKG_HINT="the .deb file there, then run: sudo apt install ./furnace_${VERSION}_all.deb"
+        else
+            PKG_HINT="the .rpm file there, then run: sudo dnf install ./furnace-${VERSION}-1.noarch.rpm"
+        fi
+        TODO+=("Follower ($CFG_PEER_IP): copy /root/$BUNDLE_NAME and $PKG_HINT && sudo furnace setup")
     fi
     TODO+=("Allow on the network: list readers and API callers -> $CFG_SHARED_IP:$WEB_PORT, VRRP and SSH between $CFG_THIS_IP and $CFG_PEER_IP.")
     TODO+=("Device that downloads the lists (for example a firewall): trust $ETC/tls/furnace.crt and add the two lists with the list login. See the README.")

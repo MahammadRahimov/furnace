@@ -66,8 +66,18 @@ WAL mode (Write-Ahead Logging) with `synchronous=FULL`, nginx, keepalived and Op
 |---|---|---|
 | Ubuntu | 22.04, 24.04 | `.deb` |
 | Debian | 12, 13 | `.deb` |
+| RHEL, Rocky Linux, AlmaLinux, Oracle Linux, CentOS Stream | 8, 9, 10 | `.rpm` |
+| Fedora | 41 and newer | `.rpm` |
+| Amazon Linux | 2023 | `.rpm` |
 
-More systems are planned: the Red Hat family (RHEL, Rocky, AlmaLinux, Oracle Linux), Fedora, Amazon Linux and SUSE.
+SUSE is planned. Both servers should run the same system.
+
+| | Debian family (`.deb`) | Red Hat family (`.rpm`) |
+|---|---|---|
+| Host firewall | ufw | firewalld |
+| nginx site | `/etc/nginx/sites-available/furnace` | `/etc/nginx/conf.d/furnace.conf` |
+| Security layer | AppArmor (nothing to do) | SELinux: setup sets the labels (section 3.5) |
+| Python | the system's `python3` | `python3` (3.9+), or `python3.11` / `python3.12` on RHEL 8 (installed by dnf) |
 
 **Bundled libraries.** Flask, gunicorn and the small libraries they need are inside the package
 (`/usr/lib/furnace/vendor`), with exact versions checked by SHA-256 (`packaging/vendor.lock`). So Furnace runs the
@@ -86,26 +96,31 @@ a security fix in Flask or gunicorn reaches you with a new Furnace release, not 
 
 ## 3. Install
 
-You need one file: `furnace_<version>_all.deb`. The same file works on every supported Ubuntu and Debian.
-The examples below use version 0.4.0.
+You need one file:
+- **Ubuntu and Debian:** `furnace_<version>_all.deb`, installed with `sudo apt install ./FILE`.
+- **Red Hat family, Fedora, Amazon Linux:** `furnace-<version>-1.noarch.rpm`, installed with `sudo dnf install ./FILE`.
+
+The examples below use version 0.5.0 and the `.deb`. With the `.rpm`, use `dnf` where they say `apt`.
+Everything else (setup, questions, the `furnace` command) is the same on every system.
 
 ### 3.1 Get the package
 
 - **Download it** from the GitHub releases page: <https://github.com/MahammadRahimov/furnace/releases>.
   The repository is private, so log in to GitHub first. Or, with the GitHub command line tool:
   ```bash
-  gh release download v0.4.0 -R MahammadRahimov/furnace -p '*.deb'
+  gh release download v0.5.0 -R MahammadRahimov/furnace -p '*.deb'    # or -p '*.rpm'
   ```
-- **Or build it yourself** on Ubuntu, Debian or WSL: `packaging/build-deb.sh`. The file lands in `dist/`.
+- **Or build it yourself:** `packaging/build-deb.sh` on Ubuntu, Debian or WSL, or `packaging/build-rpm.sh` on a
+  Red Hat family system (needs `rpm-build`). The file lands in `dist/`.
   The build needs `curl` and `python3`. The first build downloads the bundled libraries once (into
   `build/vendor-cache/`) and stops if one does not match its SHA-256 hash.
-- Copy it to both servers, for example: `scp furnace_0.4.0_all.deb you@SERVER_IP:~/`
+- Copy it to both servers, for example: `scp furnace_0.5.0_all.deb you@SERVER_IP:~/`
 
 ### 3.2 Leader
 
 1. Install the package:
    ```bash
-   sudo apt install ./furnace_0.4.0_all.deb
+   sudo apt install ./furnace_0.5.0_all.deb
    ```
    apt also installs what Furnace needs from the system: nginx, keepalived, Python and a few tools.
    Nothing starts yet.
@@ -129,7 +144,7 @@ The examples below use version 0.4.0.
    Days an IP stays blocked before it moves to the archive [30]:
    VRRP router ID (1-255) [51]:
    SSH allowed from [any]:
-   Let Furnace set up this server's own firewall (ufw)? [yes]:
+   Let Furnace set up this server's own firewall (ufw)? [yes]:      (firewalld on the Red Hat family)
    Set up Furnace with these settings? [yes]:
    ```
 3. Setup configures and starts everything, then runs a self-test.
@@ -150,7 +165,7 @@ The examples below use version 0.4.0.
    ```
 2. On the follower, install the package and run setup:
    ```bash
-   sudo apt install ./furnace_0.4.0_all.deb
+   sudo apt install ./furnace_0.5.0_all.deb
    sudo furnace setup
    ```
 3. Answer `follower`. Setup finds the bundle in your home folder, in `/root` or in `/tmp`, or asks where it is.
@@ -183,7 +198,12 @@ For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is 
 - On the server that owns the shared IP: creates the first API tokens and the list login, if there are none yet.
   They are in the database, so the follower gets them with the replication.
 - Writes the nginx and keepalived files from the templates in `/usr/lib/furnace/templates`.
-- Opens only the needed ports on the host firewall (ufw): HTTPS, SSH, and VRRP (protocol 112) between the servers.
+- Opens only the needed ports on the host firewall (ufw or firewalld): HTTPS, SSH, and VRRP (protocol 112) between
+  the servers. With firewalld it adds rich rules to the default zone and remembers them in
+  `/etc/furnace/firewalld.rules`, so it can remove them again.
+- With SELinux on (Red Hat family): labels the list folders for nginx (`httpd_sys_content_t`), the replication key
+  folder for sshd (`ssh_home_t`) and the two keepalived scripts (`keepalived_unconfined_script_exec_t`), and turns on
+  `httpd_can_network_connect` so nginx may pass API calls to Furnace on `127.0.0.1:8081`.
 - Starts everything and runs a **self-test**: it adds the fake IP `192.0.2.123`, checks that nginx serves it in
   `blocklist.txt`, removes it, and checks that it is gone. It also checks that the archive and the database are
   not served, that the API refuses calls without a token, and that the lists refuse a missing or wrong login.
@@ -213,7 +233,7 @@ Each question saves one setting in `/etc/furnace/setup.conf`. The same names are
 | Days before the archive | `ARCHIVE_AFTER_DAYS` | `30` | Days an IP stays active before the nightly job archives it. |
 | VRRP router ID | `VRRP_ROUTER_ID` | `51` | 1-255. Same on both servers. Must be unique in the network segment. |
 | SSH allowed from | `SSH_ALLOW_FROM` | `any` | Who may use SSH. `any` or a list of IPs. The other server is always allowed. |
-| Set up ufw? | `HOST_FIREWALL` | `ufw` | `ufw` = configure the host firewall. `none` = leave it alone. |
+| Set up the host firewall? | `HOST_FIREWALL` | `ufw` or `firewalld` | The tool on this server (`ufw` on the Debian family, `firewalld` on the Red Hat family) = configure it. `none` = leave it alone. |
 | (not asked) | `KEEPALIVED_PASSWORD` | random | VRRP (Virtual Router Redundancy Protocol) password, 6-8 characters. Created on the leader. The follower gets it from the bundle. |
 | (not asked) | `USE_HTTPS` | `yes` | `yes` = HTTPS. `no` = plain HTTP, for a test lab only (settings file only). |
 
@@ -534,7 +554,7 @@ The certificate is valid for 10 years.
 IPs). Callers and list readers cannot reach it. It is for keepalived and the admins.
 
 ```json
-{"status": "ok", "version": "0.4.0", "role": "leader", "ips": 1234, "domains": 56}
+{"status": "ok", "version": "0.5.0", "role": "leader", "ips": 1234, "domains": 56}
 ```
 
 ---
@@ -733,13 +753,15 @@ Logs: `journalctl -u furnace-api`, `/var/log/nginx/furnace-access.log`.
 **Upgrade:** install the new package. Do the follower first, then the leader.
 
 ```bash
-sudo apt install ./furnace_0.4.0_all.deb
+sudo apt install ./furnace_0.5.0_all.deb
 ```
 
 The package runs `furnace setup --upgrade` by itself. It uses the saved answers and asks no questions.
 Data, tokens and the certificate are kept. The API is reloaded without downtime, and keepalived is restarted only
 if its settings changed, so an upgrade does not move the shared IP. If you change answers that affect keepalived
 (for example the VRRP router ID), the restart can move the shared IP to the other server. That is safe.
+
+**From 0.4 to 0.5:** nothing to do.
 
 **From 0.3 to 0.4:** nothing to do. Flask and gunicorn now come with Furnace. The system's
 `python3-flask` and `python3-gunicorn` are no longer needed; remove them with `sudo apt autoremove` if nothing else
@@ -763,12 +785,32 @@ If the upgrade step reports a problem, the package stays installed. Fix the prob
 **Uninstall:**
 
 ```bash
+# Debian family
 sudo apt remove furnace    # removes the program and stops the services, keeps the data, tokens and logins
 sudo apt purge furnace     # also deletes the database, backups, tokens, logins, certificate and users
+
+# Red Hat family
+sudo dnf remove furnace    # removes the program and stops the services, keeps the data, tokens and logins
 ```
 
-`apt remove` also removes the Furnace nginx site, the keepalived configuration (the shared IP is released) and the
-Furnace ufw rules. ufw itself stays on. Installing the package again later uses the kept data.
+Removing the package also removes the Furnace nginx site, the keepalived configuration (the shared IP is released),
+the Furnace firewall rules (ufw or firewalld; the firewall itself stays on) and the Furnace SELinux labels.
+Installing the package again later uses the kept data.
+
+`dnf remove furnace` also removes the packages that only Furnace needed and dnf installed for it (for example nginx,
+keepalived, or a `python3.12` on RHEL 8). If the SSH server (`openssh-server`) came in only with Furnace, it goes
+too: check the list dnf shows before you answer yes, or keep it with `sudo dnf mark install openssh-server` first.
+
+RPM has no "purge". To delete all Furnace data after `dnf remove furnace`:
+
+```bash
+sudo rm -rf /var/lib/furnace /var/lib/furnace-edl /var/lib/furnace-auth /var/lib/furnace-incoming \
+    /var/lib/furnace-sync /etc/furnace /root/furnace-peer-bundle.tar.gz /var/log/furnace-setup.log
+sudo userdel furnace-sync; sudo userdel furnace
+```
+
+SELinux: setup turns on `httpd_can_network_connect`. Removing Furnace leaves it on, because other programs may need
+it. Turn it off with `sudo setsebool -P httpd_can_network_connect off` if nothing else uses it.
 
 ## 13. Tests
 
@@ -793,12 +835,20 @@ tests/integration/run.sh ubuntu:24.04
 tests/integration/run.sh ubuntu:22.04
 tests/integration/run.sh debian:12
 tests/integration/run.sh debian:13
+tests/integration/run.sh almalinux:9        # also: almalinux:8, almalinux:10, rockylinux:9, oraclelinux:9,
+                                            #       fedora:42, amazonlinux:2023
 ```
 
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
-The integration test passed 92 of 92 checks on Ubuntu 22.04, Ubuntu 24.04, Debian 12 and Debian 13 (v0.4.0).
+Results for v0.5.0 (every system with the same final package):
+
+| System | Checks |
+|---|---|
+| Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13 (`.deb`) | 93 of 93 each (one more: `apt purge`) |
+| AlmaLinux 8, 9, 10, Rocky Linux 9, Oracle Linux 9, Fedora 42, Amazon Linux 2023 (`.rpm`) | 92 of 92 each |
+
 It covers:
 building the package, `apt install` with its dependencies, Flask and gunicorn from the bundle (not the system), nothing running before setup, `setup --check`, refusing
 bad settings, a follower without a bundle, the leader setup by answering the questions (including a wrong answer
@@ -811,8 +861,19 @@ replication both ways, the follower refusing changes, `furnace status`, an impor
 a package upgrade that keeps data and tokens without moving the shared IP, both failover modes, the cleanup timer
 moving with the shared IP, `apt remove` (data kept) and `apt purge` (data deleted).
 
+On the Red Hat family the same test installs the `.rpm` with dnf, uses firewalld, and checks that `dnf remove`
+keeps the data and removes the firewall rules.
+
 The unit tests also pass with the bundled libraries on Python 3.9 (the oldest supported) and Python 3.13
 (Debian 13).
+
+**SELinux test** on a real AlmaLinux 9.8 VM with SELinux enforcing (26 of 26 checks, v0.5.0): install with dnf,
+setup without questions (secrets written to the root-only file), the SELinux labels, keepalived making the server
+leader and running its scripts, nginx serving the lists with the login and passing API calls to Furnace through the
+shared IP, the health check, the replication login through sshd, the replication timer running ssh, the firewalld
+rules, and **no SELinux denials** (counted in the raw audit log after the timers had run). `dnf remove` then left no
+Furnace firewall rules or SELinux labels behind. This test found one problem that containers cannot show (the
+replication timer was not allowed to run ssh); it is fixed.
 
 ## 14. What was not tested
 
@@ -822,7 +883,8 @@ Be aware of these limits before you go live:
   The PAN-OS menus in this README come from documentation and may differ in your version.
 - **A real XSOAR server.** The API calls were tested with curl. XSOAR's own way to trust a certificate was not
   tested.
-- **Debian on real servers.** Debian 12 and 13 were tested in Docker containers only.
+- **Debian, the Red Hat family, Fedora and Amazon Linux on real servers.** They were tested in Docker containers,
+  where SELinux is off. SELinux was tested on one AlmaLinux VM only (see section 13).
 - **keepalived on real servers or VMs.** It was tested only in Docker containers on one host. Real switches,
   VMware/Hyper-V port security, ARP behaviour and a real network outage (split brain) were not tested.
 - **A real power cut.** SQLite `synchronous=FULL` and atomic renames are designed for this, but it was not tested.

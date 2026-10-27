@@ -6,10 +6,11 @@
 #   tests/integration/run.sh [SYSTEM]     run the test on SYSTEM (default ubuntu:24.04)
 #   KEEP=1 tests/integration/run.sh       leave the containers running afterwards
 #
-# SYSTEM is a Docker image name: ubuntu:22.04, ubuntu:24.04, debian:12, debian:13.
+# SYSTEM is a Docker image name: ubuntu:22.04, ubuntu:24.04, debian:12, debian:13 (.deb), or
+# almalinux:8, almalinux:9, almalinux:10, rockylinux:9, oraclelinux:9, fedora:42, amazonlinux:2023 (.rpm).
 # A plain version like 22.04 means ubuntu:22.04.
 #
-# Needs: docker, privileged containers (systemd, keepalived and ufw need them),
+# Needs: docker, privileged containers (systemd, keepalived, ufw and firewalld need them),
 # and internet access from the containers (apt).
 set -Eeuo pipefail
 export MSYS_NO_PATHCONV=1   # Git Bash on Windows: do not rewrite /paths
@@ -29,7 +30,28 @@ SHARED_IP=192.0.2.10
 FW_IP=192.0.2.50
 XSOAR_IP=192.0.2.60
 TEST_IP=198.51.100.77
-DEB="$ROOT/dist/furnace-test.deb"
+case "$SYSTEM" in
+    ubuntu:*|debian:*) KIND=deb; DOCKERFILE=Dockerfile; FWTOOL=ufw; NGINX_CONF=/etc/nginx/sites-enabled/furnace; NGINX_GROUP=www-data ;;
+    *) KIND=rpm; DOCKERFILE=Dockerfile.rpm; FWTOOL=firewalld; NGINX_CONF=/etc/nginx/conf.d/furnace.conf; NGINX_GROUP=nginx ;;
+esac
+PKG="$ROOT/dist/furnace-test.$KIND"
+FPY=/usr/lib/furnace/bin/furnace-python   # Python 3.9+, also where python3 is older (RHEL 8)
+
+# The package tools of each family.
+pkg_install()   { if [ "$KIND" = deb ]; then on "$1" "apt-get update -qq >/dev/null && apt-get install -y -qq /root/furnace.$KIND 2>&1";
+                  else on "$1" "dnf install -y /root/furnace.$KIND 2>&1 || { sleep 15; dnf install -y /root/furnace.$KIND 2>&1; }"; fi; }  # one retry: mirrors can time out
+pkg_reinstall() { if [ "$KIND" = deb ]; then on "$1" "apt-get install -y -qq --reinstall /root/furnace.$KIND 2>&1";
+                  else on "$1" "dnf reinstall -y /root/furnace.$KIND 2>&1"; fi; }
+pkg_has()       { if [ "$KIND" = deb ]; then echo "dpkg -s $1 2>/dev/null | grep -q '^Status: install ok installed'";
+                  else echo "rpm -q $1 >/dev/null 2>&1"; fi; }
+pkg_remove()    { if [ "$KIND" = deb ]; then on "$1" "apt-get remove -y -qq furnace >/dev/null 2>&1";
+                  else on "$1" "dnf remove -y furnace 2>&1 | grep -v '^  ' | tail -n 12"; fi; }
+# The host firewall rules, one per line (ufw status or firewalld rich rules).
+fw_rules() { if [ "$FWTOOL" = ufw ]; then on "$1" "ufw status"; else on "$1" "firewall-cmd --list-rich-rules"; fi; }
+fw_web_open_to_all() {
+    if [ "$FWTOOL" = ufw ]; then grep -E '^443/tcp +ALLOW +Anywhere' <<< "$1" | grep -q 'furnace web'
+    else grep -qx 'rule port port="443" protocol="tcp" accept' <<< "$1"; fi
+}
 PASSED=0
 FAILED=0
 
@@ -56,12 +78,18 @@ trap teardown EXIT
 
 step "Build the test image ($SYSTEM with systemd) and the .deb package"
 BUILD_DIR="$(cd "$ROOT/tests/integration" && (pwd -W 2>/dev/null || pwd))"  # pwd -W: Windows path in Git Bash
-docker build -q --load --build-arg "BASE=$SYSTEM" -t "$IMAGE" "$BUILD_DIR" >/dev/null
+docker build -q --load --build-arg "BASE=$SYSTEM" -f "$BUILD_DIR/$DOCKERFILE" -t "$IMAGE" "$BUILD_DIR" >/dev/null
 mkdir -p "$ROOT/dist"
-tar -C "$ROOT" --exclude=.git --exclude=__pycache__ --exclude=.pytest_cache --exclude=dist --exclude=build/vendor-test -cf - . \
-    | docker run -i --rm "$IMAGE" bash -c \
-        'mkdir /src && tar -xf - -C /src && /src/packaging/build-deb.sh /out >/dev/null && cat /out/*.deb' > "$DEB"
-check "the package was built" test -s "$DEB"
+if [ "$KIND" = deb ]; then
+    tar -C "$ROOT" --exclude=.git --exclude=__pycache__ --exclude=.pytest_cache --exclude=dist --exclude=build/vendor-test -cf - . \
+        | docker run -i --rm "$IMAGE" bash -c \
+            'mkdir /src && tar -xf - -C /src && /src/packaging/build-deb.sh /out >/dev/null && cat /out/*.deb' > "$PKG"
+else
+    tar -C "$ROOT" --exclude=.git --exclude=__pycache__ --exclude=.pytest_cache --exclude=dist --exclude=build/vendor-test -cf - . \
+        | docker run -i --rm almalinux:9 bash -c \
+            'dnf install -y -q rpm-build python3 >/dev/null 2>&1; mkdir /src && tar -xf - -C /src && /src/packaging/build-rpm.sh /out >/dev/null && cat /out/*.rpm' > "$PKG"
+fi
+check "the package was built" test -s "$PKG"
 remove_lab
 docker network create --subnet 192.0.2.0/24 --gateway 192.0.2.1 "$NET" >/dev/null
 
@@ -81,17 +109,17 @@ for box in "$LEADER" "$FOLLOWER" "$FW" "$XSOAR"; do
     done
 done
 
-step "Install the package on both servers (apt install ./furnace.deb)"
+step "Install the package on both servers (apt or dnf install ./furnace.$KIND)"
 for box in "$LEADER" "$FOLLOWER"; do
-    put "$box" /root/furnace.deb < "$DEB"
+    put "$box" "/root/furnace.$KIND" < "$PKG"
     put "$box" /root/answer.py < "$ROOT/tests/integration/answer.py"
-    out="$(on "$box" "apt-get update -qq >/dev/null && apt-get install -y -qq /root/furnace.deb 2>&1")"
-    check "$box: apt installed the package and its dependencies" on "$box" "dpkg -s furnace | grep -q '^Status: install ok installed'"
+    out="$(pkg_install "$box")" || printf '%s\n' "$out" | tail -n 20   # show why, then the check below fails
+    check "$box: the package and its dependencies are installed" on "$box" "$(pkg_has furnace)"
     check "$box: the install tells the user to run setup" grep -q "sudo furnace setup" <<< "$out"
 done
 check "the furnace command works" on "$LEADER" "furnace version | grep -qx '[0-9.]*'"
 check "Flask and gunicorn come from the package, not from the system" \
-    on "$LEADER" "! dpkg -s python3-flask >/dev/null 2>&1 && ! dpkg -s python3-gunicorn >/dev/null 2>&1 && test -d /usr/lib/furnace/vendor/flask"
+    on "$LEADER" "! $(pkg_has python3-flask) && ! $(pkg_has python3-gunicorn) && test -d /usr/lib/furnace/vendor/flask"
 check "the install starts nothing before setup" on "$LEADER" "! systemctl is-active --quiet furnace-api && ! test -e /etc/furnace/setup.conf"
 out="$(on "$LEADER" "furnace status 2>&1" || true)"
 check "status says that setup is still needed" grep -q "not set up yet" <<< "$out"
@@ -131,10 +159,10 @@ Most entries per list${TAB}
 Days an IP stays${TAB}
 VRRP router ID (1-255)${TAB}
 SSH allowed from${TAB}
-own firewall (ufw)?${TAB}
+own firewall ($FWTOOL)?${TAB}
 Set up Furnace with these settings?${TAB}y
 EOF
-out="$(on "$LEADER" "python3 /root/answer.py /root/answers.txt -- furnace setup" 2>&1)" && rc=0 || rc=$?
+out="$(on "$LEADER" "$FPY /root/answer.py /root/answers.txt -- furnace setup" 2>&1)" && rc=0 || rc=$?
 printf '%s\n' "$out"
 check "leader setup finished with the self-test passed" [ "$rc" = 0 ]
 check "a wrong answer is explained and asked again" grep -q "PEER_IP '999.1.1.1' is not a valid IPv4 address" <<< "$out"
@@ -154,7 +182,7 @@ check "no tokens file any more" on "$LEADER" "! test -e /etc/furnace/tokens.env"
 check "no secret in the setup log" on "$LEADER" "! grep -qF -e '$TOKEN' -e '$WL_TOKEN' -e '$EDL_PW' /var/log/furnace-setup.log"
 check "no secret in the database" on "$LEADER" "! sqlite3 /var/lib/furnace/furnace.db .dump | grep -qF -e '$TOKEN' -e '$EDL_PW'"
 check "the EDL users file has a SHA-512 hash, readable by nginx only" \
-    on "$LEADER" "grep -q '^lists:\\\$6\\\$' /var/lib/furnace-auth/edl-users && [ \"\$(stat -c '%U %G %a' /var/lib/furnace-auth/edl-users)\" = 'furnace www-data 640' ]"
+    on "$LEADER" "grep -q '^lists:\\\$6\\\$' /var/lib/furnace-auth/edl-users && [ \"\$(stat -c '%U %G %a' /var/lib/furnace-auth/edl-users)\" = 'furnace $NGINX_GROUP 640' ]"
 check "cleanup timer runs on the leader" on "$LEADER" "systemctl is-active --quiet furnace-cleanup.timer"
 
 step "Set up the follower (bundle copied from the leader, only two questions)"
@@ -164,7 +192,7 @@ leader or the follower?${TAB}follower
 Network card name [${TAB}
 Set up Furnace with these settings?${TAB}y
 EOF
-out="$(on "$FOLLOWER" "python3 /root/answer.py /root/answers.txt -- furnace setup" 2>&1)" && rc=0 || rc=$?
+out="$(on "$FOLLOWER" "$FPY /root/answer.py /root/answers.txt -- furnace setup" 2>&1)" && rc=0 || rc=$?
 printf '%s\n' "$out"
 check "follower setup finished with the self-test passed" [ "$rc" = 0 ]
 check "follower took its settings from the bundle" on "$FOLLOWER" "grep -qx 'THIS_IP=$FOLLOWER_IP' /etc/furnace/setup.conf && grep -qx 'PEER_IP=$LEADER_IP' /etc/furnace/setup.conf && grep -qx 'API_ALLOW_FROM=$XSOAR_IP' /etc/furnace/setup.conf"
@@ -251,7 +279,7 @@ check "the imported IP is served" grep -qx "198.51.100.90" <<< "$(edl blocklist.
 
 step "Package upgrade (apt install --reinstall) keeps data and tokens"
 before_tokens="$(on "$LEADER" 'furnace token list; furnace edl-user list')"
-out="$(on "$LEADER" "apt-get install -y -qq --reinstall /root/furnace.deb 2>&1")"
+out="$(pkg_reinstall "$LEADER")"
 printf '%s\n' "$out" | tail -n 5
 lab_allow_test_ranges
 check "the upgrade ran setup with the saved settings" grep -q "self-test passed" <<< "$out"
@@ -286,8 +314,9 @@ for box in "$LEADER" "$FOLLOWER"; do
     check "$box: setup with 'any' passed its self-test" [ "$rc" = 0 ]
 done
 lab_allow_test_ranges
-check "ufw opens the web port to everyone" on "$FOLLOWER" "ufw status | grep -E '^443/tcp +ALLOW +Anywhere' | grep -q 'furnace web'"
-check "the old per-IP web rules are gone" on "$FOLLOWER" "! ufw status | grep -q '$XSOAR_IP .*furnace web'"
+rules="$(fw_rules "$FOLLOWER")"
+check "$FWTOOL opens the web port to everyone" fw_web_open_to_all "$rules"
+check "the old per-IP web rules are gone" bash -c '! grep -q "$1" <<< "$2"' _ "$XSOAR_IP" "$rules"
 check "XSOAR may read the EDL now, with the login" [ "$(docker exec "$XSOAR" curl -s -o /dev/null -w '%{http_code}' --cacert /root/furnace.crt -u "lists:$EDL_PW" "https://$SHARED_IP/edl/blocklist.txt")" = "200" ]
 check "but not without the login (401)" [ "$(code_from "$XSOAR" "https://$SHARED_IP/edl/blocklist.txt")" = "401" ]
 r="$(docker exec "$FW" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $TOKEN" -w ' %{http_code}' "https://$SHARED_IP/api/v1/ips/$TEST_IP" | tr -d '\n')"
@@ -299,14 +328,17 @@ step "Failover: break the web service on the new leader (health check)"
 on "$FOLLOWER" "furnace failover-test --web" && pass "failover test (web service down)" || fail "failover test (web service down)"
 check "the shared IP is back on the first server" on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 
-step "Uninstall on the follower: apt remove keeps the data, apt purge deletes it"
-on "$FOLLOWER" "apt-get remove -y -qq furnace >/dev/null 2>&1"
+step "Uninstall on the follower: removing the package keeps the data"
+pkg_remove "$FOLLOWER"
 check "program removed" on "$FOLLOWER" "! test -e /usr/lib/furnace && ! command -v furnace"
 check "services stopped" on "$FOLLOWER" "! systemctl is-active --quiet furnace-api && ! systemctl is-active --quiet keepalived"
-check "nginx site removed" on "$FOLLOWER" "! test -e /etc/nginx/sites-enabled/furnace"
+check "nginx site removed" on "$FOLLOWER" "! test -e $NGINX_CONF"
+check "the Furnace firewall rules are removed" bash -c '! grep -qiE "furnace|vrrp|port=\"443\"" <<< "$1"' _ "$(fw_rules "$FOLLOWER")"
 check "database and EDL logins kept" on "$FOLLOWER" "test -f /var/lib/furnace/furnace.db && test -f /var/lib/furnace-auth/edl-users"
-on "$FOLLOWER" "apt-get purge -y -qq furnace >/dev/null 2>&1"
-check "purge deleted the data and the users" on "$FOLLOWER" "! test -e /var/lib/furnace && ! test -e /var/lib/furnace-auth && ! test -e /etc/furnace && ! id furnace >/dev/null 2>&1"
+if [ "$KIND" = deb ]; then
+    on "$FOLLOWER" "apt-get purge -y -qq furnace >/dev/null 2>&1"
+    check "purge deleted the data and the users" on "$FOLLOWER" "! test -e /var/lib/furnace && ! test -e /var/lib/furnace-auth && ! test -e /etc/furnace && ! id furnace >/dev/null 2>&1"
+fi
 check "the leader keeps working" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
 
 printf '\n%s passed, %s failed (%s)\n' "$PASSED" "$FAILED" "$SYSTEM"

@@ -1,0 +1,58 @@
+#!/bin/sh
+# Undo what "furnace setup" changed on the system. The package runs this before it removes
+# the program (.deb prerm, .rpm %preun). It never deletes the data, the tokens or the certificate.
+set -u
+
+UNITS="furnace-api.service furnace-cleanup.timer furnace-cleanup.service furnace-backup.timer
+furnace-backup.service furnace-replicate.timer furnace-replicate.service furnace-apply-replica.path
+furnace-apply-replica.service"
+
+echo "Furnace: stopping the services..."
+for unit in $UNITS; do
+    systemctl disable --now "$unit" >/dev/null 2>&1 || true
+done
+
+if [ -f /etc/keepalived/keepalived.conf ] && grep -q "^# Furnace" /etc/keepalived/keepalived.conf; then
+    systemctl disable --now keepalived >/dev/null 2>&1 || true
+    rm -f /etc/keepalived/keepalived.conf
+    echo "Furnace: removed its keepalived configuration and stopped keepalived (the shared IP is released)."
+fi
+
+rm -f /etc/nginx/sites-enabled/furnace /etc/nginx/sites-available/furnace /etc/nginx/conf.d/furnace.conf
+if nginx -t -q >/dev/null 2>&1; then systemctl reload nginx >/dev/null 2>&1 || true; fi
+
+# ufw (Debian family)
+if command -v ufw >/dev/null 2>&1; then
+    while true; do
+        num="$( (ufw status numbered 2>/dev/null || true) | grep -E '# furnace' | head -n1 \
+                | sed -E 's/^\[ *([0-9]+)\].*/\1/' || true)"
+        [ -n "$num" ] || break
+        ufw --force delete "$num" >/dev/null
+    done
+    sed -i '/furnace-vrrp/d' /etc/ufw/before.rules 2>/dev/null || true
+    echo "Furnace: removed its ufw rules. ufw stays on. Check the rest with: sudo ufw status"
+fi
+
+# firewalld (Red Hat family): the rules setup wrote down in firewalld.rules
+RULES=/etc/furnace/firewalld.rules
+if [ -f "$RULES" ] && command -v firewall-cmd >/dev/null 2>&1; then
+    zone="$(firewall-cmd --get-default-zone 2>/dev/null || echo public)"
+    while IFS= read -r rule; do
+        case "$rule" in
+            rich:*) firewall-cmd --permanent --zone="$zone" --remove-rich-rule="${rule#rich:}" >/dev/null 2>&1 || true ;;
+            removed-service:*) firewall-cmd --permanent --zone="$zone" --add-service="${rule#removed-service:}" >/dev/null 2>&1 || true ;;
+        esac
+    done < "$RULES"
+    rm -f "$RULES"
+    firewall-cmd --reload >/dev/null 2>&1 || true
+    echo "Furnace: removed its firewalld rules. firewalld stays on. Check the rest with: sudo firewall-cmd --list-all"
+fi
+
+# SELinux labels that setup added
+if command -v semanage >/dev/null 2>&1; then
+    for path in '/var/lib/furnace-edl(/.*)?' '/var/lib/furnace-auth(/.*)?' '/var/lib/furnace-sync/\.ssh(/.*)?' \
+                '/usr/lib/furnace/bin(/.*)?' '/usr/lib/furnace/bin/furnace-(health-check|notify)'; do
+        semanage fcontext -d "$path" >/dev/null 2>&1 || true
+    done
+fi
+exit 0

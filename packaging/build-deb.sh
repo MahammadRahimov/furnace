@@ -42,7 +42,7 @@ sed -e "s/@VERSION@/$VERSION/" -e "s/@SIZE@/$SIZE/" "$ROOT/packaging/debian/cont
 chmod 0644 "$PKG/DEBIAN/control"
 
 # Same file dates every build, so the same source gives the same package.
-STAMP="$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || date +%s)"
+STAMP="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || date +%s)}"
 find "$PKG" -exec touch -h -d "@$STAMP" {} +
 
 install -d "$OUT"
