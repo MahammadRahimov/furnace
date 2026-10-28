@@ -1,6 +1,6 @@
 # Furnace roadmap
 
-State on 2026-10-27: **v0.5.0 is released** (`.deb` and `.rpm`). This file holds the plan for the next steps,
+State on 2026-10-28: **v0.5.0 is released** (`.deb` and `.rpm`). This file holds the plan for the next steps,
 so the work can continue later exactly where it stopped.
 
 ## Decisions so far
@@ -12,6 +12,8 @@ so the work can continue later exactly where it stopped.
 | 2026-10-27 | No IP rules needed: the API is protected by tokens (hashed, with scopes, lockout), the lists by a login. IP limits are optional (`any` is the default). A UI will come later and needs its own user logins. |
 | 2026-10-27 | Vendor-neutral: no XSOAR or Palo Alto in the product. They are only examples in the README (section 15). |
 | 2026-10-27 | Run on "every Linux that companies use". **Option A:** Flask and gunicorn are bundled in the package (`packaging/vendor.lock`), not taken from the system. EPEL is allowed but not needed. |
+| 2026-10-28 | **The released systems are enough** (Ubuntu, Debian, Red Hat family, Fedora, Amazon Linux). No more systems: the SUSE work is parked on the branch `suse` (coded, Leap 15.6 and 16.0 tests passed, not released). The generic tarball is dropped. |
+| 2026-10-28 | **Token permissions instead of fixed scopes.** One token per program, with four check boxes in a grid: rows Blocklist and Whitelist, columns Read and Write. Each token gets its **own expiry**, chosen when the token is made. |
 
 ## Done
 
@@ -20,35 +22,24 @@ so the work can continue later exactly where it stopped.
 | 1 | v0.4.0 | Debian 12 and 13. Flask and gunicorn bundled. Python 3.9+. |
 | 2 | v0.5.0 | `.rpm` for RHEL / Rocky / AlmaLinux / Oracle Linux / CentOS Stream 8, 9, 10, Fedora 41+, Amazon Linux 2023. firewalld. SELinux (tested on a real AlmaLinux 9.8 VM). |
 
-## Next: step 3, SUSE (about 2.5 hours)
+## Next: v0.6.0, token permissions and expiry
 
-Goal: openSUSE Leap 15.6 and 16.0, and SLES 15 / 16.
+```
+               Read    Write
+  Blocklist    [x]     [x]
+  Whitelist    [x]     [ ]
+```
 
-- A SUSE `.rpm`: other package names (for example `python311`, `openssh-clients` vs `openssh`), `zypper`.
-  Either `%if 0%{?suse_version}` blocks in `packaging/rpm/furnace.spec`, or a second spec. Build it in an
-  `opensuse/leap` container.
-- `deploy/setup.sh`: a `suse` family. Check the nginx paths and user on SUSE (`/etc/nginx/vhosts.d/`? user and group
-  `nginx`?), the SSH unit (`sshd`), firewalld (SUSE's default firewall).
-- Security layer: Leap 15.6 / SLES 15 use **AppArmor**, Leap 16 / SLES 16 use **SELinux**. Check that nginx may read
-  `/var/lib/furnace-edl` and `/var/lib/furnace-auth` under AppArmor, and that the SELinux part works there too.
-- Tests: `tests/integration/run.sh opensuse/leap:15.6` and `opensuse/leap:16.0` (a third Dockerfile, or a zypper
-  branch in `Dockerfile.rpm`).
-- Limits to write in the README:
-  - SLES itself cannot be tested without a paid subscription. Leap is built from the same packages.
-  - On SLES, keepalived is only in the paid High Availability extension. Without it: one server, no shared IP.
-
-## Then: step 4, generic `.tar.gz` (about 2 hours)
-
-Goal: any other Linux with systemd (for example Arch Linux).
-
-- `packaging/build-tarball.sh`: the same files as the packages, plus `install.sh` and `uninstall.sh`.
-- `install.sh` checks that nginx, keepalived, Python 3.9+, openssl, curl, ssh, sqlite3 and systemd are there and
-  says what is missing (it installs nothing itself). Then it copies the files and tells the user to run
-  `sudo furnace setup`.
-- `deploy/setup.sh`: a generic family (nginx `conf.d` or `sites-available`, whichever exists; nginx user from
-  `nginx -V` or the config; firewall: firewalld, ufw or none).
-- Tests: Arch Linux in Docker, and the tarball on one Debian system.
-- Not covered: systems without systemd (Alpine, Devuan). Furnace uses systemd services and timers.
+- Permissions: `blocklist:read`, `blocklist:write`, `whitelist:read`, `whitelist:write`.
+- `furnace token add NAME` asks with this grid and asks for the expiry in days (0 = never). Each token has its
+  own expiry. The same as flags for scripts (`--allow ...`, `--expires-days N`).
+- An expired token gets `401` with a clear message. `token list` shows permissions, expiry date and last use.
+  Furnace warns before a token expires.
+- Setup makes one token and asks for its permissions and expiry (not two tokens).
+- Old tokens keep working and never expire: block = blocklist read+write, whitelist = whitelist read+write,
+  all = all four.
+- The future UI uses the same grid for its users.
+- Open question for the user: does ticking Write also tick Read?
 
 ## How to test
 

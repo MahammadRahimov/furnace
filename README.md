@@ -307,6 +307,7 @@ Cortex XSOAR notes: [section 15.2](#152-cortex-xsoar-caller).
 ## 6. API guide
 
 Furnace does not need a plugin, integration or pack. The caller sends plain HTTPS requests with JSON.
+The full reference, with every endpoint, limit and answer, is in [docs/API.md](docs/API.md).
 
 ### 6.1 Basics
 
