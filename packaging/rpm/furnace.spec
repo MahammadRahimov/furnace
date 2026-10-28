@@ -1,5 +1,7 @@
 # Furnace RPM for the Red Hat family (RHEL, Rocky, AlmaLinux, Oracle Linux, CentOS Stream 8/9/10),
-# Fedora and Amazon Linux 2023. Build it with packaging/build-rpm.sh, not by hand.
+# Fedora, Amazon Linux 2023 and SUSE (openSUSE Leap and SLES 15.6+ and 16). One package fits all:
+# where the package names differ, a Requires line names both, for example (shadow-utils or shadow).
+# Build it with packaging/build-rpm.sh, not by hand.
 #
 # build-rpm.sh passes: furnace_version, furnace_stage (the files, already in place).
 
@@ -20,9 +22,9 @@ URL:            https://github.com/MahammadRahimov/furnace
 BuildArch:      noarch
 AutoReqProv:    no
 
-# Python 3.9 or newer: the system python3 (RHEL 9/10, Fedora, Amazon Linux), or a newer
-# python3.X package where python3 is older (RHEL 8: python3.6).
-Requires:       (python3 >= 3.9 or python3.12 or python3.11 or python39)
+# Python 3.9 or newer: the system python3 (RHEL 9/10, Fedora, Amazon Linux, SUSE 16), or a newer
+# Python package where python3 is older (python3.6 on RHEL 8 and SUSE 15: python3.12 / python311).
+Requires:       (python3 >= 3.9 or python3.12 or python3.11 or python39 or python312 or python311)
 Requires:       nginx
 Requires:       keepalived
 Requires:       openssl
@@ -34,9 +36,10 @@ Requires:       iproute
 Requires:       gzip
 Requires:       tar
 Requires:       util-linux
-Requires:       shadow-utils
+Requires:       (shadow-utils or shadow)
 Requires:       systemd
-Requires:       policycoreutils-python-utils
+# semanage, only where SELinux is installed (not on SUSE 15 with AppArmor)
+Requires:       (policycoreutils-python-utils if selinux-policy)
 Recommends:     firewalld
 
 %description
@@ -70,11 +73,11 @@ cp -a %{furnace_stage}/. %{buildroot}/
 %post
 systemd-tmpfiles --create furnace.conf >/dev/null 2>&1 || :
 # No compiled .pyc files: Furnace runs with PYTHONDONTWRITEBYTECODE, and files the package
-# does not own would stay behind after "dnf remove".
+# does not own would stay behind after "dnf remove" or "zypper remove".
 systemctl daemon-reload >/dev/null 2>&1 || :
 if [ -f /etc/furnace/setup.conf ]; then
     # Already set up: apply the new version with the saved answers. A problem here must not
-    # break dnf, so it is reported and the package stays installed.
+    # break dnf or zypper, so it is reported and the package stays installed.
     echo "Furnace: updating this server with the saved settings (furnace setup --upgrade)..."
     if ! /usr/lib/furnace/setup.sh --upgrade; then
         echo "" >&2
@@ -96,7 +99,7 @@ fi
 if [ "$1" -eq 0 ]; then
     /usr/lib/furnace/bin/furnace-uninstall || :
 fi
-# Only rm here: dnf may already have removed findutils or python in the same transaction.
+# Only rm here: dnf or zypper may already have removed findutils or python in the same transaction.
 for d in /usr/lib/furnace/furnace/__pycache__ /usr/lib/furnace/vendor/*/__pycache__ \
          /usr/lib/furnace/vendor/*/*/__pycache__ /usr/lib/furnace/vendor/*/*/*/__pycache__; do
     rm -rf "$d"

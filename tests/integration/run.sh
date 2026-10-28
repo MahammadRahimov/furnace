@@ -7,7 +7,8 @@
 #   KEEP=1 tests/integration/run.sh       leave the containers running afterwards
 #
 # SYSTEM is a Docker image name: ubuntu:22.04, ubuntu:24.04, debian:12, debian:13 (.deb), or
-# almalinux:8, almalinux:9, almalinux:10, rockylinux:9, oraclelinux:9, fedora:42, amazonlinux:2023 (.rpm).
+# almalinux:8, almalinux:9, almalinux:10, rockylinux:9, oraclelinux:9, fedora:42, amazonlinux:2023,
+# opensuse/leap:15.6, opensuse/leap:16.0 (.rpm, the same file for all).
 # A plain version like 22.04 means ubuntu:22.04.
 #
 # Needs: docker, privileged containers (systemd, keepalived, ufw and firewalld need them),
@@ -19,7 +20,7 @@ SYSTEM="${1:-ubuntu:24.04}"
 [[ "$SYSTEM" == *:* ]] || SYSTEM="ubuntu:$SYSTEM"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NET=furnace-test
-IMAGE="furnace-test-${SYSTEM/:/-}"
+IMAGE="furnace-test-${SYSTEM//[:\/]/-}"
 LEADER=furnace-leader
 FOLLOWER=furnace-follower
 FW=furnace-fw
@@ -34,18 +35,33 @@ case "$SYSTEM" in
     ubuntu:*|debian:*) KIND=deb; DOCKERFILE=Dockerfile; FWTOOL=ufw; NGINX_CONF=/etc/nginx/sites-enabled/furnace; NGINX_GROUP=www-data ;;
     *) KIND=rpm; DOCKERFILE=Dockerfile.rpm; FWTOOL=firewalld; NGINX_CONF=/etc/nginx/conf.d/furnace.conf; NGINX_GROUP=nginx ;;
 esac
+case "$SYSTEM" in
+    ubuntu:*|debian:*) PKGTOOL=apt ;;
+    opensuse/*|*suse*) PKGTOOL=zypper ;;   # the .rpm is not signed: zypper must be told
+    *) PKGTOOL=dnf ;;
+esac
 PKG="$ROOT/dist/furnace-test.$KIND"
 FPY=/usr/lib/furnace/bin/furnace-python   # Python 3.9+, also where python3 is older (RHEL 8)
 
 # The package tools of each family.
-pkg_install()   { if [ "$KIND" = deb ]; then on "$1" "apt-get update -qq >/dev/null && apt-get install -y -qq /root/furnace.$KIND 2>&1";
-                  else on "$1" "dnf install -y /root/furnace.$KIND 2>&1 || { sleep 15; dnf install -y /root/furnace.$KIND 2>&1; }"; fi; }  # one retry: mirrors can time out
-pkg_reinstall() { if [ "$KIND" = deb ]; then on "$1" "apt-get install -y -qq --reinstall /root/furnace.$KIND 2>&1";
-                  else on "$1" "dnf reinstall -y /root/furnace.$KIND 2>&1"; fi; }
+ZYPPER="zypper -n --no-refresh install --allow-unsigned-rpm"
+pkg_install()   { case "$PKGTOOL" in
+                      apt) on "$1" "apt-get update -o DPkg::Lock::Timeout=300 -qq >/dev/null && apt-get install -o DPkg::Lock::Timeout=300 -y -qq /root/furnace.$KIND 2>&1" ;;
+                      zypper) on "$1" "zypper -n -q refresh >/dev/null 2>&1; $ZYPPER /root/furnace.$KIND 2>&1 || { sleep 15; zypper -n -q refresh >/dev/null 2>&1; $ZYPPER /root/furnace.$KIND 2>&1; }" ;;
+                      *) on "$1" "dnf install -y /root/furnace.$KIND 2>&1 || { sleep 15; dnf install -y /root/furnace.$KIND 2>&1; }" ;;  # one retry: mirrors can time out
+                  esac; }
+pkg_reinstall() { case "$PKGTOOL" in
+                      apt) on "$1" "apt-get install -o DPkg::Lock::Timeout=300 -y -qq --reinstall /root/furnace.$KIND 2>&1" ;;
+                      zypper) on "$1" "$ZYPPER --force /root/furnace.$KIND 2>&1" ;;
+                      *) on "$1" "dnf reinstall -y /root/furnace.$KIND 2>&1" ;;
+                  esac; }
 pkg_has()       { if [ "$KIND" = deb ]; then echo "dpkg -s $1 2>/dev/null | grep -q '^Status: install ok installed'";
                   else echo "rpm -q $1 >/dev/null 2>&1"; fi; }
-pkg_remove()    { if [ "$KIND" = deb ]; then on "$1" "apt-get remove -y -qq furnace >/dev/null 2>&1";
-                  else on "$1" "dnf remove -y furnace 2>&1 | grep -v '^  ' | tail -n 12"; fi; }
+pkg_remove()    { case "$PKGTOOL" in
+                      apt) on "$1" "apt-get remove -o DPkg::Lock::Timeout=300 -y -qq furnace >/dev/null 2>&1" ;;
+                      zypper) on "$1" "zypper -n remove furnace 2>&1 | tail -n 12" ;;
+                      *) on "$1" "dnf remove -y furnace 2>&1 | grep -v '^  ' | tail -n 12" ;;
+                  esac; }
 # The host firewall rules, one per line (ufw status or firewalld rich rules).
 fw_rules() { if [ "$FWTOOL" = ufw ]; then on "$1" "ufw status"; else on "$1" "firewall-cmd --list-rich-rules"; fi; }
 fw_web_open_to_all() {
@@ -76,7 +92,7 @@ teardown() {
 }
 trap teardown EXIT
 
-step "Build the test image ($SYSTEM with systemd) and the .deb package"
+step "Build the test image ($SYSTEM with systemd) and the .$KIND package"
 BUILD_DIR="$(cd "$ROOT/tests/integration" && (pwd -W 2>/dev/null || pwd))"  # pwd -W: Windows path in Git Bash
 docker build -q --load --build-arg "BASE=$SYSTEM" -f "$BUILD_DIR/$DOCKERFILE" -t "$IMAGE" "$BUILD_DIR" >/dev/null
 mkdir -p "$ROOT/dist"
@@ -107,9 +123,15 @@ for box in "$LEADER" "$FOLLOWER" "$FW" "$XSOAR"; do
         case "$state" in running|degraded) break ;; esac
         sleep 1
     done
+    # openSUSE Leap 16 drops Docker's DNS redirect (the nat rules for 127.0.0.11) while it boots.
+    # Then use the upstream DNS server that Docker names in resolv.conf. Only a container problem.
+    on "$box" '
+        getent hosts github.com >/dev/null 2>&1 && exit 0
+        ext="$(sed -n "s/^# ExtServers: \[host(\([0-9.]*\)).*/\1/p" /etc/resolv.conf)"
+        [ -n "$ext" ] && printf "nameserver %s\n" "$ext" > /etc/resolv.conf' || true
 done
 
-step "Install the package on both servers (apt or dnf install ./furnace.$KIND)"
+step "Install the package on both servers ($PKGTOOL install ./furnace.$KIND)"
 for box in "$LEADER" "$FOLLOWER"; do
     put "$box" "/root/furnace.$KIND" < "$PKG"
     put "$box" /root/answer.py < "$ROOT/tests/integration/answer.py"
@@ -277,7 +299,7 @@ on "$LEADER" "printf '198.51.100.90\n' > /root/import.txt && chmod 600 /root/imp
 check "import from a file only root can read" on "$LEADER" "furnace import-ips /root/import.txt"
 check "the imported IP is served" grep -qx "198.51.100.90" <<< "$(edl blocklist.txt)"
 
-step "Package upgrade (apt install --reinstall) keeps data and tokens"
+step "Package upgrade ($PKGTOOL reinstall) keeps data and tokens"
 before_tokens="$(on "$LEADER" 'furnace token list; furnace edl-user list')"
 out="$(pkg_reinstall "$LEADER")"
 printf '%s\n' "$out" | tail -n 5
@@ -336,7 +358,7 @@ check "nginx site removed" on "$FOLLOWER" "! test -e $NGINX_CONF"
 check "the Furnace firewall rules are removed" bash -c '! grep -qiE "furnace|vrrp|port=\"443\"" <<< "$1"' _ "$(fw_rules "$FOLLOWER")"
 check "database and EDL logins kept" on "$FOLLOWER" "test -f /var/lib/furnace/furnace.db && test -f /var/lib/furnace-auth/edl-users"
 if [ "$KIND" = deb ]; then
-    on "$FOLLOWER" "apt-get purge -y -qq furnace >/dev/null 2>&1"
+    on "$FOLLOWER" "apt-get purge -o DPkg::Lock::Timeout=300 -y -qq furnace >/dev/null 2>&1"
     check "purge deleted the data and the users" on "$FOLLOWER" "! test -e /var/lib/furnace && ! test -e /var/lib/furnace-auth && ! test -e /etc/furnace && ! id furnace >/dev/null 2>&1"
 fi
 check "the leader keeps working" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"

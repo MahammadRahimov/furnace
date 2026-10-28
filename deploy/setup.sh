@@ -81,7 +81,7 @@ done
 [ "$(id -u)" -eq 0 ] || die "Run setup as root: sudo furnace setup"
 
 SUPPORTED="Ubuntu 22.04 and 24.04, Debian 12 and 13, RHEL / Rocky / AlmaLinux / Oracle Linux / CentOS Stream 8, 9
-  and 10, Fedora 41 and newer, Amazon Linux 2023"
+  and 10, Fedora 41 and newer, Amazon Linux 2023, openSUSE Leap and SLES 15.6 and newer, and 16"
 [ -r /etc/os-release ] || die "Cannot read /etc/os-release. Supported: $SUPPORTED."
 # shellcheck source=/dev/null
 . /etc/os-release
@@ -93,10 +93,13 @@ case "${ID:-}" in
     rhel|rocky|almalinux|ol|centos) case "$MAJOR" in 8|9|10) FAMILY=redhat ;; esac ;;
     fedora) [[ "$MAJOR" =~ ^[0-9]+$ ]] && [ "$MAJOR" -ge 41 ] && FAMILY=redhat ;;
     amzn) [ "$MAJOR" = "2023" ] && FAMILY=redhat ;;
+    # SUSE 15 from service pack 6 on (15.6, 15.7): older ones have no Python 3.11 package.
+    opensuse-leap|sles) case "$VERSION_ID" in 15.[6-9]|16|16.*) FAMILY=suse ;; esac ;;
 esac
 [ -n "$FAMILY" ] || die "This is ${PRETTY_NAME:-an unknown system}. Supported: $SUPPORTED."
 
-# Where the systems differ. Everything below uses these names.
+# Where the systems differ. Everything below uses these names. SUSE lays out nginx and SSH like
+# the Red Hat family (conf.d is included in the http block, user and group nginx, sshd.service).
 if [ "$FAMILY" = "debian" ]; then
     NGINX_CONF=/etc/nginx/sites-available/furnace   # linked into sites-enabled
     NGINX_GROUP=www-data
@@ -106,7 +109,7 @@ else
     NGINX_GROUP=nginx
     SSH_UNIT=sshd
 fi
-# The host firewall tool on this server: ufw (Debian family), firewalld (Red Hat family), or none.
+# The host firewall tool on this server: ufw (Debian family), firewalld (Red Hat family, SUSE), or none.
 if [ "$FAMILY" = "debian" ] && command -v ufw >/dev/null 2>&1; then
     HOST_FW_TOOL=ufw
 elif command -v firewall-cmd >/dev/null 2>&1; then
@@ -569,7 +572,7 @@ LOGGING=1
 printf '\n----- Furnace setup started %s (%s) -----\n' "$(date -u +%FT%TZ)" "$MODE"
 
 # Replication needs the SSH server. Ubuntu 24.04 starts it through ssh.socket, the others through
-# ssh.service (Debian family) or sshd.service (Red Hat family).
+# ssh.service (Debian family) or sshd.service (Red Hat family, SUSE).
 if ! systemctl is-active --quiet "$SSH_UNIT.service" && ! systemctl is-active --quiet "$SSH_UNIT.socket"; then
     if systemctl cat "$SSH_UNIT.socket" >/dev/null 2>&1 && [ "${ID}:${VERSION_ID}" = "ubuntu:24.04" ]; then
         systemctl enable --quiet --now "$SSH_UNIT.socket"
@@ -855,7 +858,8 @@ fi
 
 # --------------------------------------------------------------------------- SELinux
 
-# Red Hat family systems run SELinux. Without these labels nginx cannot read the lists or reach the API,
+# The Red Hat family and SUSE 16 run SELinux (SUSE 15 runs AppArmor, which does not confine nginx,
+# keepalived or sshd by default, so it needs nothing here). Without these labels nginx cannot read the lists or reach the API,
 # keepalived cannot run the health check, and sshd cannot read the replication key.
 if selinux_on; then
     say "Configuring SELinux"
@@ -1070,6 +1074,8 @@ if [ "$MODE" != "upgrade" ]; then
     if [ "$CFG_ROLE" = "leader" ]; then
         if [ "$FAMILY" = "debian" ]; then
             PKG_HINT="the .deb file there, then run: sudo apt install ./furnace_${VERSION}_all.deb"
+        elif [ "$FAMILY" = "suse" ]; then
+            PKG_HINT="the .rpm file there, then run: sudo zypper install --allow-unsigned-rpm ./furnace-${VERSION}-1.noarch.rpm"
         else
             PKG_HINT="the .rpm file there, then run: sudo dnf install ./furnace-${VERSION}-1.noarch.rpm"
         fi

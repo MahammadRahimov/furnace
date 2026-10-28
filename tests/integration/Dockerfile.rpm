@@ -1,13 +1,18 @@
-# A clean Red Hat family system, Fedora or Amazon Linux with systemd and firewalld.
-# BASE is the image, for example almalinux:9.
+# A clean Red Hat family system, Fedora, Amazon Linux or SUSE with systemd and firewalld.
+# BASE is the image, for example almalinux:9 or opensuse/leap:15.6.
 #
 # firewalld is installed but off at boot: some systems (Amazon Linux) would start it, and in a
 # container it drops Docker's DNS rule, so dnf could not reach its mirrors. furnace setup turns
 # it on, which is what the test checks.
 ARG BASE=almalinux:9
 FROM ${BASE}
-RUN dnf install -y -q systemd iproute sudo procps-ng firewalld >/dev/null \
- && dnf clean all \
+RUN if command -v zypper >/dev/null; then \
+        zypper -q -n install -y systemd iproute2 sudo procps firewalld >/dev/null \
+        && { test -e /usr/sbin/init || zypper -q -n install -y systemd-sysvinit >/dev/null; } \
+        && zypper -q clean -a; \
+    else \
+        dnf install -y -q systemd iproute sudo procps-ng firewalld >/dev/null && dnf clean all; \
+    fi \
  && systemctl disable firewalld \
  && rm -f /usr/lib/systemd/system/multi-user.target.wants/getty* /etc/systemd/system/getty.target.wants/* \
  && echo "furnace-test" > /etc/hostname

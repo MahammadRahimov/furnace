@@ -71,15 +71,22 @@ WAL mode (Write-Ahead Logging) with `synchronous=FULL`, nginx, keepalived and Op
 | RHEL, Rocky Linux, AlmaLinux, Oracle Linux, CentOS Stream | 8, 9, 10 | `.rpm` |
 | Fedora | 41 and newer | `.rpm` |
 | Amazon Linux | 2023 | `.rpm` |
+| openSUSE Leap, SUSE Linux Enterprise Server (SLES) | 15.6 and newer, 16 | `.rpm` (the same file) |
 
-SUSE is planned. Both servers should run the same system.
+Both servers should run the same system.
 
-| | Debian family (`.deb`) | Red Hat family (`.rpm`) |
-|---|---|---|
-| Host firewall | ufw | firewalld |
-| nginx site | `/etc/nginx/sites-available/furnace` | `/etc/nginx/conf.d/furnace.conf` |
-| Security layer | AppArmor (nothing to do) | SELinux: setup sets the labels (section 3.5) |
-| Python | the system's `python3` | `python3` (3.9+), or `python3.11` / `python3.12` on RHEL 8 (installed by dnf) |
+| | Debian family (`.deb`) | Red Hat family (`.rpm`) | SUSE (`.rpm`) |
+|---|---|---|---|
+| Package tool | apt | dnf | zypper |
+| Host firewall | ufw | firewalld | firewalld |
+| nginx site | `/etc/nginx/sites-available/furnace` | `/etc/nginx/conf.d/furnace.conf` | `/etc/nginx/conf.d/furnace.conf` |
+| Security layer | AppArmor (nothing to do) | SELinux: setup sets the labels (section 3.5) | 15: AppArmor (nothing to do). 16: SELinux, like the Red Hat family |
+| Python | the system's `python3` | `python3` (3.9+), or `python3.11` / `python3.12` on RHEL 8 (installed by dnf) | 15: `python311` (installed by zypper). 16: the system's `python3` |
+
+**SLES** (the paid SUSE) has the same packages as openSUSE Leap, but some sit in modules that you turn on with
+`SUSEConnect`: Python 3.11 is in the *Python 3* module. **keepalived is only in the paid *High Availability*
+extension.** Without it, zypper cannot install Furnace, because Furnace needs keepalived for the shared IP. SLES
+itself was not tested (see section 14); openSUSE Leap was.
 
 **Bundled libraries.** Flask, gunicorn and the small libraries they need are inside the package
 (`/usr/lib/furnace/vendor`), with exact versions checked by SHA-256 (`packaging/vendor.lock`). So Furnace runs the
@@ -91,7 +98,7 @@ a security fix in Flask or gunicorn reaches you with a new Furnace release, not 
 - Two Linux servers from the supported list (above), in the same network segment. One is enough for a lab.
   Both should run the same system.
 - Three IP addresses in that segment: one per server and one **shared IP** (VIP, virtual IP).
-- The servers need their system's package mirror (directly, through a proxy, or a local mirror). apt installs
+- The servers need their system's package mirror (directly, through a proxy, or a local mirror). apt, dnf or zypper installs
   nginx, keepalived, Python and a few tools from there. Flask and gunicorn are already in the Furnace package.
 - Optional: the IP addresses of the list reader and of the caller, if you want to limit access to them.
   By default every address may connect, and the token and the login protect Furnace.
@@ -101,8 +108,11 @@ a security fix in Flask or gunicorn reaches you with a new Furnace release, not 
 You need one file:
 - **Ubuntu and Debian:** `furnace_<version>_all.deb`, installed with `sudo apt install ./FILE`.
 - **Red Hat family, Fedora, Amazon Linux:** `furnace-<version>-1.noarch.rpm`, installed with `sudo dnf install ./FILE`.
+- **openSUSE Leap and SLES:** the same `.rpm`, installed with `sudo zypper install --allow-unsigned-rpm ./FILE`.
+  The package is not signed, so zypper needs `--allow-unsigned-rpm`. Check the file's SHA-256 against the release
+  page instead.
 
-The examples below use version 0.5.0 and the `.deb`. With the `.rpm`, use `dnf` where they say `apt`.
+The examples below use version 0.6.0 and the `.deb`. With the `.rpm`, use `dnf` or `zypper` where they say `apt`.
 Everything else (setup, questions, the `furnace` command) is the same on every system.
 
 ### 3.1 Get the package
@@ -110,19 +120,19 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
 - **Download it** from the GitHub releases page: <https://github.com/MahammadRahimov/furnace/releases>.
   The repository is private, so log in to GitHub first. Or, with the GitHub command line tool:
   ```bash
-  gh release download v0.5.0 -R MahammadRahimov/furnace -p '*.deb'    # or -p '*.rpm'
+  gh release download v0.6.0 -R MahammadRahimov/furnace -p '*.deb'    # or -p '*.rpm'
   ```
 - **Or build it yourself:** `packaging/build-deb.sh` on Ubuntu, Debian or WSL, or `packaging/build-rpm.sh` on a
   Red Hat family system (needs `rpm-build`). The file lands in `dist/`.
   The build needs `curl` and `python3`. The first build downloads the bundled libraries once (into
   `build/vendor-cache/`) and stops if one does not match its SHA-256 hash.
-- Copy it to both servers, for example: `scp furnace_0.5.0_all.deb you@SERVER_IP:~/`
+- Copy it to both servers, for example: `scp furnace_0.6.0_all.deb you@SERVER_IP:~/`
 
 ### 3.2 Leader
 
 1. Install the package:
    ```bash
-   sudo apt install ./furnace_0.5.0_all.deb
+   sudo apt install ./furnace_0.6.0_all.deb
    ```
    apt also installs what Furnace needs from the system: nginx, keepalived, Python and a few tools.
    Nothing starts yet.
@@ -167,7 +177,7 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    ```
 2. On the follower, install the package and run setup:
    ```bash
-   sudo apt install ./furnace_0.5.0_all.deb
+   sudo apt install ./furnace_0.6.0_all.deb
    sudo furnace setup
    ```
 3. Answer `follower`. Setup finds the bundle in your home folder, in `/root` or in `/tmp`, or asks where it is.
@@ -203,7 +213,7 @@ For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is 
 - Opens only the needed ports on the host firewall (ufw or firewalld): HTTPS, SSH, and VRRP (protocol 112) between
   the servers. With firewalld it adds rich rules to the default zone and remembers them in
   `/etc/furnace/firewalld.rules`, so it can remove them again.
-- With SELinux on (Red Hat family): labels the list folders for nginx (`httpd_sys_content_t`), the replication key
+- With SELinux on (Red Hat family, SUSE 16): labels the list folders for nginx (`httpd_sys_content_t`), the replication key
   folder for sshd (`ssh_home_t`) and the two keepalived scripts (`keepalived_unconfined_script_exec_t`), and turns on
   `httpd_can_network_connect` so nginx may pass API calls to Furnace on `127.0.0.1:8081`.
 - Starts everything and runs a **self-test**: it adds the fake IP `192.0.2.123`, checks that nginx serves it in
@@ -556,7 +566,7 @@ The certificate is valid for 10 years.
 IPs). Callers and list readers cannot reach it. It is for keepalived and the admins.
 
 ```json
-{"status": "ok", "version": "0.5.0", "role": "leader", "ips": 1234, "domains": 56}
+{"status": "ok", "version": "0.6.0", "role": "leader", "ips": 1234, "domains": 56}
 ```
 
 ---
@@ -755,13 +765,15 @@ Logs: `journalctl -u furnace-api`, `/var/log/nginx/furnace-access.log`.
 **Upgrade:** install the new package. Do the follower first, then the leader.
 
 ```bash
-sudo apt install ./furnace_0.5.0_all.deb
+sudo apt install ./furnace_0.6.0_all.deb
 ```
 
 The package runs `furnace setup --upgrade` by itself. It uses the saved answers and asks no questions.
 Data, tokens and the certificate are kept. The API is reloaded without downtime, and keepalived is restarted only
 if its settings changed, so an upgrade does not move the shared IP. If you change answers that affect keepalived
 (for example the VRRP router ID), the restart can move the shared IP to the other server. That is safe.
+
+**From 0.5 to 0.6:** nothing to do.
 
 **From 0.4 to 0.5:** nothing to do.
 
@@ -793,6 +805,9 @@ sudo apt purge furnace     # also deletes the database, backups, tokens, logins,
 
 # Red Hat family
 sudo dnf remove furnace    # removes the program and stops the services, keeps the data, tokens and logins
+
+# SUSE
+sudo zypper remove furnace # the same as dnf remove
 ```
 
 Removing the package also removes the Furnace nginx site, the keepalived configuration (the shared IP is released),
@@ -803,7 +818,10 @@ Installing the package again later uses the kept data.
 keepalived, or a `python3.12` on RHEL 8). If the SSH server (`openssh-server`) came in only with Furnace, it goes
 too: check the list dnf shows before you answer yes, or keep it with `sudo dnf mark install openssh-server` first.
 
-RPM has no "purge". To delete all Furnace data after `dnf remove furnace`:
+`zypper remove furnace` removes only Furnace. The packages zypper installed for it stay; `zypper remove
+--clean-deps furnace` removes them too (check the list first, as with dnf).
+
+RPM has no "purge". To delete all Furnace data after `dnf remove furnace` or `zypper remove furnace`:
 
 ```bash
 sudo rm -rf /var/lib/furnace /var/lib/furnace-edl /var/lib/furnace-auth /var/lib/furnace-incoming \
@@ -838,18 +856,20 @@ tests/integration/run.sh ubuntu:22.04
 tests/integration/run.sh debian:12
 tests/integration/run.sh debian:13
 tests/integration/run.sh almalinux:9        # also: almalinux:8, almalinux:10, rockylinux:9, oraclelinux:9,
-                                            #       fedora:42, amazonlinux:2023
+                                            #       fedora:42, amazonlinux:2023,
+                                            #       opensuse/leap:15.6, opensuse/leap:16.0
 ```
 
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
-Results for v0.5.0 (every system with the same final package):
+Results for v0.6.0 (every system with the same final package):
 
 | System | Checks |
 |---|---|
 | Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13 (`.deb`) | 93 of 93 each (one more: `apt purge`) |
 | AlmaLinux 8, 9, 10, Rocky Linux 9, Oracle Linux 9, Fedora 42, Amazon Linux 2023 (`.rpm`) | 92 of 92 each |
+| openSUSE Leap 15.6 and 16.0 (the same `.rpm`, with zypper) | 92 of 92 each |
 
 It covers:
 building the package, `apt install` with its dependencies, Flask and gunicorn from the bundle (not the system), nothing running before setup, `setup --check`, refusing
@@ -863,8 +883,8 @@ replication both ways, the follower refusing changes, `furnace status`, an impor
 a package upgrade that keeps data and tokens without moving the shared IP, both failover modes, the cleanup timer
 moving with the shared IP, `apt remove` (data kept) and `apt purge` (data deleted).
 
-On the Red Hat family the same test installs the `.rpm` with dnf, uses firewalld, and checks that `dnf remove`
-keeps the data and removes the firewall rules.
+On the Red Hat family and SUSE the same test installs the `.rpm` with dnf or zypper, uses firewalld, and checks
+that `dnf remove` or `zypper remove` keeps the data and removes the firewall rules.
 
 The unit tests also pass with the bundled libraries on Python 3.9 (the oldest supported) and Python 3.13
 (Debian 13).
@@ -885,8 +905,12 @@ Be aware of these limits before you go live:
   The PAN-OS menus in this README come from documentation and may differ in your version.
 - **A real XSOAR server.** The API calls were tested with curl. XSOAR's own way to trust a certificate was not
   tested.
-- **Debian, the Red Hat family, Fedora and Amazon Linux on real servers.** They were tested in Docker containers,
-  where SELinux is off. SELinux was tested on one AlmaLinux VM only (see section 13).
+- **Debian, the Red Hat family, Fedora, Amazon Linux and openSUSE on real servers.** They were tested in Docker
+  containers, where SELinux and AppArmor are off. SELinux was tested on one AlmaLinux VM only (see section 13).
+  On openSUSE Leap 16 (SELinux) the policy was checked to have the same labels and rules as on AlmaLinux, but not
+  run in enforcing mode. On SUSE 15 (AppArmor) the shipped profiles were checked: none of them covers nginx,
+  keepalived or sshd.
+- **SLES** (the paid SUSE). It needs a subscription. openSUSE Leap is built from the same packages.
 - **keepalived on real servers or VMs.** It was tested only in Docker containers on one host. Real switches,
   VMware/Hyper-V port security, ARP behaviour and a real network outage (split brain) were not tested.
 - **A real power cut.** SQLite `synchronous=FULL` and atomic renames are designed for this, but it was not tested.

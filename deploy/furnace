@@ -44,7 +44,13 @@ for action in parser._subparsers._group_actions:
             print(f"  {choice.dest:<23}{choice.help}")
 PY
     echo
-    echo "Uninstall: sudo apt remove furnace (keeps the data), sudo apt purge furnace (deletes all data)."
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "Uninstall: sudo apt remove furnace (keeps the data), sudo apt purge furnace (deletes all data)."
+    elif command -v zypper >/dev/null 2>&1; then
+        echo "Uninstall: sudo zypper remove furnace (keeps the data). To delete all data, see the README."
+    else
+        echo "Uninstall: sudo dnf remove furnace (keeps the data). To delete all data, see the README."
+    fi
 }
 
 # The data commands run as the furnace user. A file to import that this user cannot
