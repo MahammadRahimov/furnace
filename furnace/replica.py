@@ -39,6 +39,7 @@ def apply_snapshot(settings: Settings, source: Path) -> dict[str, int]:
                 src.backup(live)
                 live.execute("PRAGMA journal_mode=WAL")
                 live.executescript(db.SCHEMA)  # a leader with an older version has fewer tables
+                db.migrate(live)  # ... and fewer columns
                 return edl.rebuild_all(live, settings)
             finally:
                 live.close()

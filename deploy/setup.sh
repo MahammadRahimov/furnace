@@ -132,8 +132,10 @@ KEEPALIVED_PASSWORD VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS SSH_ALLOW_FROM 
 # Settings the follower takes from the leader. They must be the same on both servers.
 SHARED_KEYS="SHARED_IP SHARED_IP_PREFIX API_ALLOW_FROM LISTS_ALLOW_FROM ARCHIVE_AFTER_DAYS KEEPALIVED_PASSWORD
 VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS"
+# The first API token. Used only while the leader has no token yet, so they are not saved in setup.conf.
+TOKEN_KEYS="TOKEN_NAME TOKEN_ALLOW TOKEN_EXPIRES_DAYS"
 
-for k in $KEYS; do printf -v "CFG_$k" '%s' ""; done
+for k in $KEYS $TOKEN_KEYS; do printf -v "CFG_$k" '%s' ""; done
 
 trim() {
     local s="${1%$'\r'}"
@@ -159,7 +161,7 @@ load_file() {
             XSOAR_IP) key=API_ALLOW_FROM ;;
             FIREWALL_IP) key=LISTS_ALLOW_FROM ;;
         esac
-        case " $(echo $KEYS) " in
+        case " $(echo $KEYS $TOKEN_KEYS) " in
             *" $key "*) printf -v "${prefix}_$key" '%s' "$value" ;;
             *) die "Unknown setting '$key' in $file." ;;
         esac
@@ -257,9 +259,28 @@ check_HOST_FIREWALL() {
         || { echo "HOST_FIREWALL is '$1', but this server has $HOST_FW_TOOL. Use '$HOST_FW_TOOL' or 'none'."; return 1; }
 }
 
+check_TOKEN_NAME() {
+    [[ "${1,,}" =~ ^[a-z0-9][a-z0-9._-]{0,39}$ ]] \
+        || { echo "The token name has 1 to 40 characters: letters, numbers, dot, dash or underscore."; return 1; }
+}
+check_TOKEN_ALLOW() {
+    local p
+    [ -n "$(split_list "$1" | tr -d ' ')" ] || { echo "TOKEN_ALLOW needs at least one permission."; return 1; }
+    for p in $(split_list "$1"); do
+        case "${p,,}" in
+            all|blocklist:read|blocklist:write|whitelist:read|whitelist:write) ;;
+            *) echo "TOKEN_ALLOW: unknown permission '$p'. Use blocklist:read, blocklist:write, whitelist:read, whitelist:write or all."
+               return 1 ;;
+        esac
+    done
+}
+check_TOKEN_EXPIRES_DAYS() {
+    is_int_between "$1" 0 3650 || { echo "The token expiry must be a number of days from 0 to 3650 (0 = never)."; return 1; }
+}
+
 validate_all() {
     local k var msg
-    for k in $CHECK_ORDER; do
+    for k in $CHECK_ORDER $TOKEN_KEYS; do
         var="CFG_$k"
         [ -n "${!var}" ] || die "The setting $k is empty."
         msg="$("check_$k" "${!var}")" || die "$msg"
@@ -275,6 +296,7 @@ fill_defaults() {
     : "${CFG_SHARED_IP_PREFIX:=24}" "${CFG_VRRP_ROUTER_ID:=51}" "${CFG_USE_HTTPS:=yes}"
     : "${CFG_MAX_IPS:=50000}" "${CFG_MAX_DOMAINS:=50000}" "${CFG_SSH_ALLOW_FROM:=any}"
     : "${CFG_HOST_FIREWALL:=$HOST_FW_TOOL}" "${CFG_ARCHIVE_AFTER_DAYS:=30}" "${CFG_API_ALLOW_FROM:=any}" "${CFG_LISTS_ALLOW_FROM:=any}"
+    : "${CFG_TOKEN_NAME:=api}" "${CFG_TOKEN_ALLOW:=all}" "${CFG_TOKEN_EXPIRES_DAYS:=0}"
     if [ -z "$CFG_INTERFACE" ]; then
         if [ -n "$CFG_THIS_IP" ]; then CFG_INTERFACE="$(card_of_ip "$CFG_THIS_IP")"; else CFG_INTERFACE="$(default_card)"; fi
     fi
@@ -285,6 +307,11 @@ fill_defaults() {
 
 # API tokens and EDL logins are in the database (replicated), so they are not part of these.
 have_secrets() { [ -f "$ETC/tls/furnace.crt" ] && [ -f "$ETC/ssh/replica_key" ]; }
+
+token_count() { sqlite3 -readonly "$DATA/furnace.db" "SELECT COUNT(*) FROM api_tokens" 2>/dev/null || echo 0; }
+
+# Setup makes the first API token only on a leader that has none yet.
+needs_first_token() { [ "$CFG_ROLE" = "leader" ] && [ "$(token_count)" -eq 0 ]; }
 
 # --------------------------------------------------------------------------- follower bundle
 
@@ -459,6 +486,53 @@ ask_all() {
     fi
 }
 
+# The permission grid, the same as in "furnace token add". A number switches a box.
+# Write ticks read; switching read off also switches write off. Sets CFG_TOKEN_ALLOW.
+ask_token_grid() {
+    local names=(blocklist:read blocklist:write whitelist:read whitelist:write) on=(1 1 1 1) answer n i
+    mark() { if [ "$1" = 1 ]; then printf 'x'; else printf ' '; fi; }
+    while true; do
+        printf '\n  What may this token do? Type a box number to switch it (or several: 2 4).\n\n'
+        printf '                   Read       Write\n'
+        printf '    Blocklist     1 [%s]    2 [%s]\n' "$(mark "${on[0]}")" "$(mark "${on[1]}")"
+        printf '    Whitelist     3 [%s]    4 [%s]\n' "$(mark "${on[2]}")" "$(mark "${on[3]}")"
+        read -r -p $'\n  Box number, or Enter when done: ' answer < /dev/tty || die "No answer (the input was closed)."
+        answer="$(trim "${answer//,/ }")"
+        if [ -z "$answer" ]; then
+            CFG_TOKEN_ALLOW=""
+            for i in 0 1 2 3; do
+                if [ "${on[i]}" = 1 ]; then CFG_TOKEN_ALLOW="${CFG_TOKEN_ALLOW:+$CFG_TOKEN_ALLOW,}${names[i]}"; fi
+            done
+            [ -n "$CFG_TOKEN_ALLOW" ] && return 0
+            echo "    Tick at least one box."
+            continue
+        fi
+        if [[ ! "$answer" =~ ^[1-4]([[:space:]]+[1-4])*$ ]]; then
+            echo "    Type 1, 2, 3 or 4, or press Enter when done."
+            continue
+        fi
+        for n in $answer; do
+            i=$((n - 1))
+            if [ "${on[i]}" = 1 ]; then
+                on[i]=0
+                if [ $((i % 2)) -eq 0 ]; then on[i + 1]=0; fi   # no read, no write
+            else
+                on[i]=1
+                if [ $((i % 2)) -eq 1 ]; then on[i - 1]=1; fi   # write ticks read
+            fi
+        done
+    done
+}
+
+ask_first_token() {
+    note "The first API token, for the system that calls the API (for example a SOAR or a script)."
+    info "  More tokens later: sudo furnace token add NAME"
+    ask TOKEN_NAME "Token name" "${CFG_TOKEN_NAME:-api}"
+    ask_token_grid
+    note "Each token has its own expiry. Furnace warns 14 days before. 0 = never."
+    ask TOKEN_EXPIRES_DAYS "Token expires after how many days" "$CFG_TOKEN_EXPIRES_DAYS"
+}
+
 show_settings() {
     printf '\n  Settings:\n'
     printf '    %-22s %s\n' "Role" "$CFG_ROLE" "Network card" "$CFG_INTERFACE" "This server" "$CFG_THIS_IP" \
@@ -466,6 +540,11 @@ show_settings() {
         "Lists from" "$CFG_LISTS_ALLOW_FROM" "Most IPs / domains" "$CFG_MAX_IPS / $CFG_MAX_DOMAINS" \
         "Archive after" "$CFG_ARCHIVE_AFTER_DAYS days" "VRRP router ID" "$CFG_VRRP_ROUTER_ID" \
         "SSH allowed from" "$CFG_SSH_ALLOW_FROM" "Host firewall" "$CFG_HOST_FIREWALL" "HTTPS" "$CFG_USE_HTTPS"
+    if needs_first_token; then
+        local expiry="never"
+        [ "$CFG_TOKEN_EXPIRES_DAYS" = 0 ] || expiry="after $CFG_TOKEN_EXPIRES_DAYS days"
+        printf '    %-22s %s\n' "First API token" "$CFG_TOKEN_NAME (${CFG_TOKEN_ALLOW//,/, }; expires $expiry)"
+    fi
 }
 
 write_setup_conf() {
@@ -508,6 +587,7 @@ case "$MODE" in
             printf 'Furnace is already set up here. The brackets show the current answers.\n'
         fi
         ask_all
+        if needs_first_token; then ask_first_token; fi
         ;;
 esac
 fill_defaults
@@ -928,26 +1008,25 @@ start_selftest() {
 
 current_role() { cat "$STATE_DIR/role" 2>/dev/null || echo unknown; }
 
-token_count() { sqlite3 -readonly "$DATA/furnace.db" "SELECT COUNT(*) FROM api_tokens" 2>/dev/null || echo 0; }
-
-# On the server that owns the shared IP: make the first API tokens and the EDL login if there are
+# On the server that owns the shared IP: make the first API token and the EDL login if there are
 # none, and keep the tokens of version 0.2 working. New secrets are shown once at the end, never logged.
 init_secrets() {
     local legacy=() out kind name a b
     [ -f "$ETC/tokens.env" ] && legacy=(--legacy-tokens "$ETC/tokens.env")
-    if ! out="$(as_furnace init-secrets "${legacy[@]}")"; then
-        fail "could not make the API tokens and the list login"
+    if ! out="$(as_furnace init-secrets "${legacy[@]}" --token-name "$CFG_TOKEN_NAME" \
+                --allow "$CFG_TOKEN_ALLOW" --expires-days "$CFG_TOKEN_EXPIRES_DAYS")"; then
+        fail "could not make the API token and the list login"
         return
     fi
     while IFS=$'\t' read -r kind name a b; do
         case "$kind" in
             migrated) ok "The API token of version 0.2 keeps working, now named '$name'" ;;
-            token) NEW_SECRETS+=("API token '$name' (scope $a):" "    $b") ;;
+            token) NEW_SECRETS+=("API token '$name'. $a Token:" "    $b") ;;
             edl) NEW_SECRETS+=("List login (for the device that downloads the lists): user '$name', password:" "    $a")
                  EDL_TEST_LOGIN="$name:$a" ;;
         esac
     done <<< "$out"
-    ok "API tokens and list login ready (see: sudo furnace token list, sudo furnace edl-user list)"
+    ok "API token and list login ready (see: sudo furnace token list, sudo furnace edl-user list)"
 }
 EDL_TEST_LOGIN=""
 

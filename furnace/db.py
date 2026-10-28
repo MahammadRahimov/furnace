@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -85,13 +85,20 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 
--- API tokens. Only the SHA-256 hash of a token is stored. scope: block, whitelist or all.
+-- API tokens. Only the SHA-256 hash of a token is stored.
+-- permissions: comma list of blocklist:read, blocklist:write, whitelist:read, whitelist:write.
+-- scope: the same as in version 0.5 (block, whitelist, all or custom), for an older follower.
+-- expires_at: '' = never. expires_days: the length, used again by "token rotate".
 CREATE TABLE IF NOT EXISTS api_tokens (
-    name       TEXT PRIMARY KEY,
-    token_hash TEXT NOT NULL UNIQUE,
-    scope      TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    created_by TEXT NOT NULL DEFAULT ''
+    name         TEXT PRIMARY KEY,
+    token_hash   TEXT NOT NULL UNIQUE,
+    scope        TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    created_by   TEXT NOT NULL DEFAULT '',
+    permissions  TEXT NOT NULL DEFAULT '',
+    expires_days INTEGER NOT NULL DEFAULT 0,
+    expires_at   TEXT NOT NULL DEFAULT '',
+    last_used_at TEXT NOT NULL DEFAULT ''
 );
 
 -- Logins for the EDL download (nginx basic auth). password_hash is SHA-512 crypt.
@@ -131,10 +138,38 @@ def init_db(path: Path) -> None:
     conn = connect(path)
     try:
         conn.executescript(SCHEMA)
-        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
-                     (str(SCHEMA_VERSION),))
+        migrate(conn)
     finally:
         conn.close()
+
+
+# Columns added after the first release of a table: (table, column, definition).
+ADDED_COLUMNS = (
+    ("api_tokens", "permissions", "TEXT NOT NULL DEFAULT ''"),
+    ("api_tokens", "expires_days", "INTEGER NOT NULL DEFAULT 0"),
+    ("api_tokens", "expires_at", "TEXT NOT NULL DEFAULT ''"),
+    ("api_tokens", "last_used_at", "TEXT NOT NULL DEFAULT ''"),
+)
+SCOPE_PERMISSIONS = {  # version 0.5 scopes -> permissions
+    "block": "blocklist:read,blocklist:write",
+    "whitelist": "whitelist:read,whitelist:write",
+    "all": "blocklist:read,blocklist:write,whitelist:read,whitelist:write",
+}
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """Bring a database from an older version (or a snapshot from an older leader) up to date.
+
+    Old tokens keep their rights and never expire.
+    """
+    for table, column, definition in ADDED_COLUMNS:
+        have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    for scope, permissions in SCOPE_PERMISSIONS.items():
+        conn.execute("UPDATE api_tokens SET permissions = ? WHERE permissions = '' AND scope = ?",
+                     (permissions, scope))
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
 
 
 @contextmanager

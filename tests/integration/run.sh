@@ -160,6 +160,13 @@ Days an IP stays${TAB}
 VRRP router ID (1-255)${TAB}
 SSH allowed from${TAB}
 own firewall ($FWTOOL)?${TAB}
+Token name [api]:${TAB}soar
+Box number, or Enter when done:${TAB}5
+Box number, or Enter when done:${TAB}4
+Box number, or Enter when done:${TAB}
+Token expires after how many days${TAB}
+Token expires after how many days${TAB}abc
+Token expires after how many days${TAB}365
 Set up Furnace with these settings?${TAB}y
 EOF
 out="$(on "$LEADER" "$FPY /root/answer.py /root/answers.txt -- furnace setup" 2>&1)" && rc=0 || rc=$?
@@ -167,13 +174,22 @@ printf '%s\n' "$out"
 check "leader setup finished with the self-test passed" [ "$rc" = 0 ]
 check "a wrong answer is explained and asked again" grep -q "PEER_IP '999.1.1.1' is not a valid IPv4 address" <<< "$out"
 check "an IP as the network card is explained" grep -q "is an IP address, not a network card name" <<< "$out"
+check "a wrong box number is explained" grep -q "Type 1, 2, 3 or 4" <<< "$out"
+check "the token expiry has no default and is checked" grep -q "from 0 to 3650 (0 = never)" <<< "$out"
+check "the settings show the first token" grep -q "First API token *soar (blocklist:read, blocklist:write, whitelist:read; expires after 365 days)" <<< "$out"
 check "the new secrets were shown once" grep -q "NEW SECRETS (shown only once" <<< "$out"
 secret_after() { grep -A1 -F "$1" <<< "$out" | tail -n1 | tr -d ' \r'; }
-TOKEN="$(secret_after "API token 'block' (scope block):")"
-WL_TOKEN="$(secret_after "API token 'whitelist' (scope whitelist):")"
+TOKEN="$(secret_after "API token 'soar'.")"
 EDL_PW="$(secret_after "List login (for the device that downloads the lists): user 'lists', password:")"
-check "a block token, a whitelist token and an EDL password were made" \
-    bash -c '[[ "$1" == fur_* && "$2" == fur_* && ${#3} -ge 32 ]]' _ "$TOKEN" "$WL_TOKEN" "$EDL_PW"
+check "one API token and an EDL password were made" \
+    bash -c '[[ "$1" == fur_* && ${#2} -ge 32 ]]' _ "$TOKEN" "$EDL_PW"
+check "the token has the chosen permissions and expiry" \
+    on "$LEADER" "furnace token list | grep -Eq '^soar +read\+write +read +20[0-9-]{8} \(in 365 days\) +never '"
+check "setup made only this one token" [ "$(on "$LEADER" "furnace token list | tail -n +2 | wc -l")" = 1 ]
+out_wl="$(on "$LEADER" "furnace token add wl-admin --allow whitelist:write --expires-days 0")"
+WL_TOKEN="$(grep -o 'fur_[A-Za-z0-9_-]*' <<< "$out_wl")"
+check "a whitelist token from the command line (write brings read)" \
+    grep -q "Permissions: blocklist -, whitelist read+write. Expires: never." <<< "$out_wl"
 check "the network card and IP were found automatically" on "$LEADER" "grep -qx 'INTERFACE=eth0' /etc/furnace/setup.conf && grep -qx 'THIS_IP=$LEADER_IP' /etc/furnace/setup.conf"
 check "a keepalived password was created" on "$LEADER" "grep -Eqx 'KEEPALIVED_PASSWORD=[A-Za-z0-9]{8}' /etc/furnace/setup.conf"
 check "the saved settings are readable by root only" on "$LEADER" "[ \"\$(stat -c '%U %a' /etc/furnace/setup.conf)\" = 'root 600' ]"
@@ -237,12 +253,31 @@ check "a wrong EDL password is refused (401)" \
     [ "$(docker exec "$FW" curl -s -o /dev/null -w '%{http_code}' --cacert /root/furnace.crt -u lists:wrong "https://$SHARED_IP/edl/blocklist.txt")" = "401" ]
 r="$(docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $WL_TOKEN" -w ' %{http_code}' "https://$SHARED_IP/api/v1/ips/$TEST_IP" | tr -d '\n')"
 check "the whitelist token may not use block calls (401)" grep -q ' 401$' <<< "$r"
+r="$(api GET /api/v1/whitelist/ips)"
+check "the soar token may read the whitelist (200)" grep -q ' 200$' <<< "$r"
+r="$(api POST /api/v1/whitelist/ips '{"entry":"198.51.100.200"}')"
+check "but not change it (401, names the permission)" grep -q 'whitelist write permission.* 401$' <<< "$r"
+check "the last use of the token is shown" on "$LEADER" "furnace token list | grep -Eq '^soar .* 20[0-9-]{8} [0-9:]{5} +[0-9a-f]{8}$'"
 
-step "API tokens and the wrong-token lockout"
-out="$(on "$LEADER" "furnace token add lab --scope all")"
+step "API tokens, expiry and the wrong-token lockout"
+out="$(on "$LEADER" "furnace token add lab 2>&1" || true)"
+check "token add without a terminal needs the options" grep -q "Give --allow and --expires-days" <<< "$out"
+out="$(on "$LEADER" "furnace token add lab --allow all --expires-days 30")"
 LAB_TOKEN="$(grep -o 'fur_[A-Za-z0-9_-]*' <<< "$out")"
 check "furnace token add shows a new token" [ -n "$LAB_TOKEN" ]
 check "furnace token list never shows a token" on "$LEADER" "furnace token list | grep -q '^lab ' && ! furnace token list | grep -q fur_"
+lab_code() {
+    docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $LAB_TOKEN" -w ' %{http_code}' \
+        "https://$SHARED_IP/api/v1/ips/$TEST_IP" | tr -d '\n'
+}
+check "the lab token works" grep -q ' 200$' <<< "$(lab_code)"
+on "$LEADER" "runuser -u furnace -- sqlite3 /var/lib/furnace/furnace.db \"UPDATE api_tokens SET expires_at='2026-01-01T00:00:00Z' WHERE name='lab'\""
+check "an expired token is refused with a clear message (401)" grep -q 'expired on 2026-01-01.* 401$' <<< "$(lab_code)"
+check "furnace status warns about the expired token" on "$LEADER" "furnace status | grep -q \"WARNING: the API token 'lab' has expired\""
+check "token rotate gives a new value for 30 days again" \
+    on "$LEADER" "furnace token rotate lab | grep -q 'Expires: 20[0-9-]* (in 30 days)'"
+check "token edit changes the permissions" \
+    on "$LEADER" "furnace token edit lab --allow blocklist:read | grep -q 'blocklist read, whitelist -'"
 for n in $(seq 1 10); do
     docker exec "$XSOAR" curl -s -o /dev/null --cacert /root/furnace.crt -H "Authorization: Bearer fur_wrong$n" \
         "https://$SHARED_IP/api/v1/ips/$TEST_IP"

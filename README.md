@@ -102,7 +102,7 @@ You need one file:
 - **Ubuntu and Debian:** `furnace_<version>_all.deb`, installed with `sudo apt install ./FILE`.
 - **Red Hat family, Fedora, Amazon Linux:** `furnace-<version>-1.noarch.rpm`, installed with `sudo dnf install ./FILE`.
 
-The examples below use version 0.5.0 and the `.deb`. With the `.rpm`, use `dnf` where they say `apt`.
+The examples below use version 0.6.0 and the `.deb`. With the `.rpm`, use `dnf` where they say `apt`.
 Everything else (setup, questions, the `furnace` command) is the same on every system.
 
 ### 3.1 Get the package
@@ -110,19 +110,19 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
 - **Download it** from the GitHub releases page: <https://github.com/MahammadRahimov/furnace/releases>.
   The repository is private, so log in to GitHub first. Or, with the GitHub command line tool:
   ```bash
-  gh release download v0.5.0 -R MahammadRahimov/furnace -p '*.deb'    # or -p '*.rpm'
+  gh release download v0.6.0 -R MahammadRahimov/furnace -p '*.deb'    # or -p '*.rpm'
   ```
 - **Or build it yourself:** `packaging/build-deb.sh` on Ubuntu, Debian or WSL, or `packaging/build-rpm.sh` on a
   Red Hat family system (needs `rpm-build`). The file lands in `dist/`.
   The build needs `curl` and `python3`. The first build downloads the bundled libraries once (into
   `build/vendor-cache/`) and stops if one does not match its SHA-256 hash.
-- Copy it to both servers, for example: `scp furnace_0.5.0_all.deb you@SERVER_IP:~/`
+- Copy it to both servers, for example: `scp furnace_0.6.0_all.deb you@SERVER_IP:~/`
 
 ### 3.2 Leader
 
 1. Install the package:
    ```bash
-   sudo apt install ./furnace_0.5.0_all.deb
+   sudo apt install ./furnace_0.6.0_all.deb
    ```
    apt also installs what Furnace needs from the system: nginx, keepalived, Python and a few tools.
    Nothing starts yet.
@@ -147,11 +147,28 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    VRRP router ID (1-255) [51]:
    SSH allowed from [any]:
    Let Furnace set up this server's own firewall (ufw)? [yes]:      (firewalld on the Red Hat family)
+
+     The first API token, for the system that calls the API (for example a SOAR or a script).
+   Token name [api]: soar
+
+     What may this token do? Type a box number to switch it (or several: 2 4).
+
+                      Read       Write
+       Blocklist     1 [x]    2 [x]
+       Whitelist     3 [x]    4 [x]
+
+     Box number, or Enter when done: 4          (whitelist write off: this token may only read the whitelist)
+     ...
+     Box number, or Enter when done:
+
+     Each token has its own expiry. Furnace warns 14 days before. 0 = never.
+   Token expires after how many days: 365
    Set up Furnace with these settings? [yes]:
    ```
+   The token questions come only on a leader that has no API token yet. The expiry has no default: type a number.
 3. Setup configures and starts everything, then runs a self-test.
-4. At the end it shows the **new secrets once**: two API tokens (`block` for blocking, `whitelist` for the
-   whitelist) and the list login (user `lists` and a password). Store them now: the tokens in the caller (for
+4. At the end it shows the **new secrets once**: the API token (with the name, permissions and expiry you chose)
+   and the list login (user `lists` and a password). Store them now: the token in the caller (for
    example a SOAR credentials store), the login in the list reader (for example the firewall's EDL objects). They are not written to
    the log, and Furnace keeps only hashes, so it cannot show them again. Lost one? Make a new one
    ([section 7.1](#71-api-tokens-list-logins-and-the-lockout)).
@@ -167,7 +184,7 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    ```
 2. On the follower, install the package and run setup:
    ```bash
-   sudo apt install ./furnace_0.5.0_all.deb
+   sudo apt install ./furnace_0.6.0_all.deb
    sudo furnace setup
    ```
 3. Answer `follower`. Setup finds the bundle in your home folder, in `/root` or in `/tmp`, or asks where it is.
@@ -197,7 +214,7 @@ For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is 
 - Creates the user `furnace` (no login) and the user `furnace-sync` (can only receive replication snapshots).
 - Leader: creates a self-signed certificate (10 years, names the shared IP and both server IPs), the replication
   SSH key and the keepalived password. Follower: copies them from the bundle.
-- On the server that owns the shared IP: creates the first API tokens and the list login, if there are none yet.
+- On the server that owns the shared IP: creates the first API token and the list login, if there are none yet.
   They are in the database, so the follower gets them with the replication.
 - Writes the nginx and keepalived files from the templates in `/usr/lib/furnace/templates`.
 - Opens only the needed ports on the host firewall (ufw or firewalld): HTTPS, SSH, and VRRP (protocol 112) between
@@ -257,6 +274,15 @@ within that time is locked for that time.
 API tokens and list logins are not settings. They are in the database, as hashes only
 ([section 7.1](#71-api-tokens-list-logins-and-the-lockout)).
 
+**The first API token.** Setup asks for it only on a leader that has no API token yet. The answers are used once
+and are not saved in `setup.conf`. In a settings file for `furnace setup --config`:
+
+| Question | Setting | Default | Meaning |
+|---|---|---|---|
+| Token name | `TOKEN_NAME` | `api` | 1 to 40 characters: letters, numbers, dot, dash or underscore. |
+| The permission grid | `TOKEN_ALLOW` | `all` | Comma-separated: `blocklist:read`, `blocklist:write`, `whitelist:read`, `whitelist:write`, or `all`. Write includes read. |
+| Token expires after how many days | `TOKEN_EXPIRES_DAYS` | asked without a default; `0` in a settings file | 0 to 3650. 0 = never. |
+
 ## 5. Checklist of manual work
 
 Setup cannot do these things for you.
@@ -288,7 +314,8 @@ Palo Alto steps: [section 15.1](#151-palo-alto-firewall-list-reader).
 
 ### 5.3 The caller (for example a SOAR)
 
-- [ ] Store the API tokens (`block`, and `whitelist` if you use the whitelist) in its credentials store.
+- [ ] Store its API token in its credentials store. Give every program its own token, with only the boxes it
+      needs ([section 7.1](#71-api-tokens-list-logins-and-the-lockout)). Note the expiry date.
 - [ ] Make it trust `furnace.crt` (see [6.10](#610-trusting-the-self-signed-certificate)).
 - [ ] Build the HTTP calls with the API guide below. Always call the **shared IP**.
 - [ ] Test with an IP from `203.0.113.0/24` first only if `FURNACE_ALLOW_TEST_RANGES=true`. In production, this is
@@ -314,9 +341,18 @@ The full reference, with every endpoint, limit and answer, is in [docs/API.md](d
 - Base address: `https://SHARED_IP` (always the shared IP, never a server's own IP).
 - Format: JSON (JavaScript Object Notation) in and out. Send `Content-Type: application/json`.
 - Authentication: the header `Authorization: Bearer <token>`. Every `/api/` call needs it.
-  - A token with the scope **block** (setup makes `block`) for `/api/v1/ips` and `/api/v1/domains`.
-  - A token with the scope **whitelist** (setup makes `whitelist`) for `/api/v1/whitelist/...`.
-  - A token with the scope **all** may do both (make one with `sudo furnace token add NAME --scope all`).
+  - Each token has its own permissions, a grid of four boxes:
+
+    |  | Read | Write |
+    |---|---|---|
+    | **Blocklist** (`/api/v1/ips`, `/api/v1/domains`) | look up | block and unblock |
+    | **Whitelist** (`/api/v1/whitelist/...`) | list | add, remove, bulk upload |
+
+    Write includes read. A call without the needed box gets `401` with a message that names the permission.
+  - Each token has its own expiry, chosen when it is made. An expired token gets `401`
+    ("This token expired on ..."). It does not count towards the lockout.
+  - Make tokens with `sudo furnace token add NAME` ([section 7.1](#71-api-tokens-list-logins-and-the-lockout)).
+  - The full reference: [docs/API.md](docs/API.md).
 - Wrong tokens: after 10 wrong tokens in 15 minutes, the calling address is locked for 15 minutes (`429`
   `locked`), even with a good token. A missing token does not count.
 - By default every address may call the API. If `API_ALLOW_FROM` is limited, other addresses get `403` from nginx.
@@ -326,8 +362,8 @@ The curl examples below use these shell variables:
 
 ```bash
 FURNACE=https://192.0.2.10          # the shared IP
-TOKEN='paste-the-block-token-here'
-WL_TOKEN='paste-the-whitelist-token-here'
+TOKEN='paste-a-token-with-blocklist-write-here'
+WL_TOKEN='paste-a-token-with-whitelist-write-here'
 CA=furnace.crt                       # the Furnace certificate file
 ```
 
@@ -355,7 +391,7 @@ Every answer is JSON with `status` and a plain English `message`. Show `message`
 | 200 | `found` | Look-up result. |
 | 200 | `ok` | List or bulk result. |
 | 400 | `bad_request` | The body is not valid JSON, or a field has the wrong type. |
-| 401 | `unauthorized` | The token is missing or wrong for this endpoint. |
+| 401 | `unauthorized` | The token is missing or wrong, has expired, or lacks the permission for this call. `message` says which. |
 | 403 | (nginx page) | `API_ALLOW_FROM` or `LISTS_ALLOW_FROM` is limited, and the caller's IP is not on it. |
 | 404 | `not_found` | The entry is not in the list (or the address does not exist). |
 | 405 | `method_not_allowed` | Wrong HTTP method. |
@@ -392,12 +428,13 @@ How the caller should read an answer:
 - `200` with `already_exists` -> tell the analyst "already blocked since <date>" (it is in `message` and `entry.added_at`).
 - `422` -> show `message`. Do not retry. The input must change.
 - `503`, `429` or a network error -> retry a few times with a pause. If it still fails, tell the analyst.
-- `401` -> the token in the caller is wrong. Alert its admin. Do not retry: wrong tokens lead to a lockout.
+- `401` -> the token in the caller is wrong, expired or lacks a permission (see `message`). Alert its admin.
+  Do not retry: wrong tokens lead to a lockout.
 - `429` with `locked` -> fix the token, then ask the Furnace admin for `sudo furnace unlock <caller IP>`.
 
 ### 6.4 Add an IP
 
-`POST /api/v1/ips` (block token)
+`POST /api/v1/ips` (blocklist write)
 
 ```bash
 curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips" \
@@ -432,7 +469,7 @@ Answer `422`:
 
 ### 6.5 Remove an IP
 
-`DELETE /api/v1/ips/<ip>` (block token)
+`DELETE /api/v1/ips/<ip>` (blocklist write)
 
 ```bash
 curl --cacert "$CA" -X DELETE "$FURNACE/api/v1/ips/203.0.113.45?removed_by=analyst.one" \
@@ -443,7 +480,7 @@ Answers: `200` `{"status": "removed", ...}` or `404` `{"status": "not_found", ..
 
 ### 6.6 Look up an IP or a domain
 
-`GET /api/v1/ips/<ip>` and `GET /api/v1/domains/<domain>` (block token)
+`GET /api/v1/ips/<ip>` and `GET /api/v1/domains/<domain>` (blocklist read)
 
 ```bash
 curl --cacert "$CA" "$FURNACE/api/v1/ips/203.0.113.45" -H "Authorization: Bearer $TOKEN"
@@ -465,7 +502,7 @@ curl --cacert "$CA" "$FURNACE/api/v1/domains/bad.example.com" -H "Authorization:
 
 ### 6.7 Add and remove a domain
 
-`POST /api/v1/domains` and `DELETE /api/v1/domains/<domain>` (block token)
+`POST /api/v1/domains` and `DELETE /api/v1/domains/<domain>` (blocklist write)
 
 ```bash
 curl --cacert "$CA" -X POST "$FURNACE/api/v1/domains" \
@@ -480,7 +517,8 @@ Domains are stored in lower case. Domains never expire. They stay until someone 
 
 ### 6.8 Whitelist: add, remove, list
 
-IPs and ranges: `/api/v1/whitelist/ips`. Domains: `/api/v1/whitelist/domains`. Whitelist token.
+IPs and ranges: `/api/v1/whitelist/ips`. Domains: `/api/v1/whitelist/domains`. Listing needs whitelist read,
+adding and removing need whitelist write.
 
 ```bash
 # add an IP range (the field can be "entry", "cidr" or "ip")
@@ -508,7 +546,7 @@ When a whitelist entry is added, Furnace removes every blocked IP or domain it c
 
 ### 6.9 Bulk whitelist upload
 
-`POST /api/v1/whitelist/ips/bulk` and `POST /api/v1/whitelist/domains/bulk` (whitelist token).
+`POST /api/v1/whitelist/ips/bulk` and `POST /api/v1/whitelist/domains/bulk` (whitelist write, also for `dry_run`).
 Up to 200,000 entries per request. Use `dry_run` first to see what would happen.
 
 ```bash
@@ -557,7 +595,7 @@ The certificate is valid for 10 years.
 IPs). Callers and list readers cannot reach it. It is for keepalived and the admins.
 
 ```json
-{"status": "ok", "version": "0.5.0", "role": "leader", "ips": 1234, "domains": 56}
+{"status": "ok", "version": "0.6.0", "role": "leader", "ips": 1234, "domains": 56}
 ```
 
 ---
@@ -590,10 +628,12 @@ Changes run on the leader. The follower gets them with the next replication (wit
 Every change is in the audit log, with the admin's name, never with the secret.
 
 ```bash
-sudo furnace token list                       # names, scopes and a short id, never the tokens
-sudo furnace token add ui --scope all         # a new token: scope block (default), whitelist or all
-sudo furnace token rotate block               # a new value; the old one stops working at once
-sudo furnace token remove ui                  # it stops working at once
+sudo furnace token list                       # permissions, expiry, last use and a short id, never the tokens
+sudo furnace token add soar                   # asks the permission grid and the expiry, then shows the token
+sudo furnace token add soar --allow blocklist:write,whitelist:read --expires-days 365   # the same, for scripts
+sudo furnace token edit soar                  # change the boxes or the expiry; the token value stays
+sudo furnace token rotate soar                # a new value; the old one stops working at once
+sudo furnace token remove soar                # it stops working at once
 
 sudo furnace edl-user list                    # the list logins (names only)
 sudo furnace edl-user add firewall-2          # a new login with a random password
@@ -604,8 +644,35 @@ sudo furnace lockouts                         # addresses locked after too many 
 sudo furnace unlock 198.51.100.20             # unlock one address (or: --all)
 ```
 
-Give every program its own token (for example `soar` and, later, `ui`). Then you can replace or delete one
-without touching the others. The audit log shows which token made each change (`source` = `api:NAME@IP`).
+`token add` without options asks, like setup:
+
+```
+  What may this token do? Type a box number to switch it (or several: 2 4).
+
+                   Read       Write
+    Blocklist     1 [x]    2 [x]
+    Whitelist     3 [x]    4 [ ]
+
+  Box number, or Enter when done:
+
+  Expires after how many days? (0 = never): 365
+```
+
+- **Permissions:** a number switches a box. Ticking Write also ticks Read. Switching Read off also switches Write
+  off. At least one box must be ticked. `--allow` takes the same as a list: `blocklist:read`, `blocklist:write`,
+  `whitelist:read`, `whitelist:write`, or `all`.
+- **Expiry:** each token has its own, from 0 to 3650 days (0 = never). There is no default: you choose it for
+  every token. `token rotate` starts the same number of days again (or give `--expires-days`). `token edit`
+  counts new days from now.
+- **Warnings:** a token that expires within 14 days, or has expired, is shown with `WARNING` in
+  `sudo furnace status` and in the nightly cleanup log (`journalctl -u furnace-cleanup`). `token list` shows
+  `EXPIRED` for it. Rotate it before the date and give the new value to the program.
+- **Last use:** `token list` shows when each token was last used (at most once an hour, on the leader).
+- Without a terminal (a script, `ssh host sudo furnace ...`), `token add` needs both `--allow` and `--expires-days`.
+
+Give every program its own token (for example `soar` and, later, `ui`), with only the boxes it needs. Then you can
+replace or delete one without touching the others. The audit log shows which token made each change
+(`source` = `api:NAME@IP`).
 
 The lockout is kept on each server and is not replicated. `furnace unlock` works on the server where you run it,
 so run it on the server that owns the shared IP.
@@ -756,7 +823,7 @@ Logs: `journalctl -u furnace-api`, `/var/log/nginx/furnace-access.log`.
 **Upgrade:** install the new package. Do the follower first, then the leader.
 
 ```bash
-sudo apt install ./furnace_0.5.0_all.deb
+sudo apt install ./furnace_0.6.0_all.deb
 ```
 
 The package runs `furnace setup --upgrade` by itself. It uses the saved answers and asks no questions.
@@ -769,6 +836,11 @@ if its settings changed, so an upgrade does not move the shared IP. If you chang
 **From 0.3 to 0.4:** nothing to do. Flask and gunicorn now come with Furnace. The system's
 `python3-flask` and `python3-gunicorn` are no longer needed; remove them with `sudo apt autoremove` if nothing else
 uses them.
+
+**From 0.5 to 0.6:** nothing to do. The tokens keep their rights and never expire: `block` gets blocklist
+read+write, `whitelist` gets whitelist read+write, a token with the scope `all` gets all four boxes. Upgrade the
+leader first. Until the follower is upgraded too, it refuses tokens with other box combinations (it does not know
+them); after a failover in that time, upgrade the follower.
 
 **From 0.3.0 to 0.3.1:** nothing to do. The settings get their new names (`API_ALLOW_FROM`,
 `LISTS_ALLOW_FROM`). Tokens and logins made by 0.3.0 keep their names (`xsoar`, `xsoar-whitelist`, `paloalto`).
@@ -826,8 +898,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 They cover validation, the duplicate rule, restore from the archive, the cleanup with fake dates and the
 `ARCHIVE_AFTER_DAYS` setting, the safety stop, the whitelist, imports (dated and undated, dry-run, formats), the
-API (token scopes, rotate and remove, the lockout, the setup self-test token, errors), list logins (checked with
-openssl), the token migration from 0.2, a snapshot from an older leader, the token commands, many requests at the same time (threads and processes), and that
+API (token permissions and expiry, rotate, edit and remove, last use, the lockout, the setup self-test token,
+errors), list logins (checked with openssl), the token migration from 0.2 and from 0.5, a snapshot from an older
+leader, the token commands and the permission grid, many requests at the same time (threads and processes), and that
 no temporary files are left behind.
 
 Integration test with Docker (two servers, a fake list reader and a fake caller; only test addresses).
@@ -845,12 +918,12 @@ tests/integration/run.sh almalinux:9        # also: almalinux:8, almalinux:10, r
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
-Results for v0.5.0 (every system with the same final package):
+Results for v0.6.0 (every system with the same final package):
 
 | System | Checks |
 |---|---|
-| Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13 (`.deb`) | 93 of 93 each (one more: `apt purge`) |
-| AlmaLinux 8, 9, 10, Rocky Linux 9, Oracle Linux 9, Fedora 42, Amazon Linux 2023 (`.rpm`) | 92 of 92 each |
+| Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13 (`.deb`) | 108 of 108 each (one more: `apt purge`) |
+| AlmaLinux 8, 9, 10, Rocky Linux 9, Oracle Linux 9, Fedora 42, Amazon Linux 2023 (`.rpm`) | 107 of 107 each |
 
 It covers:
 building the package, `apt install` with its dependencies, Flask and gunicorn from the bundle (not the system), nothing running before setup, `setup --check`, refusing
@@ -858,7 +931,9 @@ bad settings, a follower without a bundle, the leader setup by answering the que
 that is asked again, the card and IP found automatically, the keepalived password created), the follower setup with
 only two questions, certificate and settings copied through the bundle, the secrets shown once and never in the
 log or the database, the self-test, API and EDL access through the shared IP, the list login (no login or a wrong
-password is refused), token scopes, the token commands, the wrong-token lockout and unlock, tokens and logins
+password is refused), the first token from the setup questions (permission grid and expiry), token permissions
+(read without write), an expired token and the status warning, the token commands, the wrong-token lockout and
+unlock, tokens and logins
 replicated to the follower, nginx and ufw rules with limited IPs and with `any` (archive and /health never served),
 replication both ways, the follower refusing changes, `furnace status`, an import from a file only root can read,
 a package upgrade that keeps data and tokens without moving the shared IP, both failover modes, the cleanup timer
@@ -945,7 +1020,8 @@ Dynamic Lists, it uses that interface. That matters only if you limit `LISTS_ALL
 
 ### 15.2 Cortex XSOAR (caller)
 
-- Store the API tokens in the XSOAR credentials store.
+- Store the API token in the XSOAR credentials store (a token with blocklist write; add whitelist write only if
+  XSOAR changes the whitelist).
 - Furnace does not need an XSOAR integration or pack. Use plain HTTP calls (for example the generic HTTP
   integration or a script) as described in [section 6](#6-api-guide).
 - Send the analyst's name in `added_by` and the XSOAR incident number in `incident_id`.

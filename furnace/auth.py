@@ -5,7 +5,15 @@ them to the other server. Only a hash is stored. A token or a password is
 shown once, when it is made. Lost? Make a new one with "rotate".
 
 API tokens: SHA-256 of a long random token. A token has a name (who uses it,
-for example "soar" or "ui") and a scope: block (IPs and domains), whitelist, or all.
+for example "soar" or "ui"), permissions and an expiry. There are four
+permissions, a grid of two lists and two actions:
+
+                 read   write
+    blocklist     x      x       look up / block and unblock IPs and domains
+    whitelist     x      x       list and look up / add and remove entries
+
+Write always includes read. Each token has its own expiry in days (0 = never),
+chosen when the token is made.
 
 EDL logins: nginx basic auth. The password hash is SHA-512 crypt ($6$),
 made by openssl. nginx reads the users file on every request, so a change
@@ -19,17 +27,33 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
+import math
 import re
 import secrets
 import sqlite3
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Iterable
 
 from . import db
 from .config import Settings
 
-SCOPES = ("block", "whitelist", "all")
+log = logging.getLogger("furnace")
+
+LISTS = ("blocklist", "whitelist")
+PERMISSIONS = ("blocklist:read", "blocklist:write", "whitelist:read", "whitelist:write")
+# Short names. block, whitelist and all are the scopes of version 0.5 and older.
+ALIASES = {
+    "all": PERMISSIONS,
+    "block": ("blocklist:read", "blocklist:write"),
+    "blocklist": ("blocklist:read", "blocklist:write"),
+    "whitelist": ("whitelist:read", "whitelist:write"),
+}
+MAX_EXPIRES_DAYS = 3650
+LAST_USED_EVERY = 3600  # seconds: "last used" is written at most once an hour per token
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 TOKEN_PREFIX = "fur_"
 
@@ -41,10 +65,15 @@ class AuthError(Exception):
 @dataclass
 class Client:
     name: str
-    scope: str
+    permissions: tuple[str, ...]
+    expires_at: str = ""
+    token_hash: str = field(default="", repr=False)
 
-    def may(self, kind: str) -> bool:
-        return self.scope == "all" or self.scope == kind
+    def may(self, list_name: str, action: str) -> bool:
+        return f"{list_name}:{action}" in self.permissions
+
+    def expired(self, now: datetime | None = None) -> bool:
+        return bool(self.expires_at) and db.from_iso(self.expires_at) <= (now or db.utcnow())
 
 
 def check_name(name: str) -> str:
@@ -53,6 +82,78 @@ def check_name(name: str) -> str:
         raise AuthError("A name has 1 to 40 characters: letters, numbers, dot, dash or underscore. "
                         "It starts with a letter or a number.")
     return name
+
+
+def parse_permissions(value: str | Iterable[str]) -> tuple[str, ...]:
+    """'blocklist:write,whitelist:read', 'all', 'block' ... -> the permissions in a fixed order.
+
+    Write always brings read with it.
+    """
+    items = value.split(",") if isinstance(value, str) else list(value)
+    found: set[str] = set()
+    for item in items:
+        item = str(item).strip().lower()
+        if not item:
+            continue
+        if item in ALIASES:
+            found.update(ALIASES[item])
+        elif item in PERMISSIONS:
+            found.add(item)
+        else:
+            raise AuthError(f"Unknown permission '{item}'. Use {', '.join(PERMISSIONS)} or all.")
+    for list_name in LISTS:
+        if f"{list_name}:write" in found:
+            found.add(f"{list_name}:read")
+    if not found:
+        raise AuthError("A token needs at least one permission.")
+    return tuple(p for p in PERMISSIONS if p in found)
+
+
+def describe_permissions(permissions: Iterable[str]) -> str:
+    """('blocklist:read', 'blocklist:write', 'whitelist:read') -> 'blocklist read+write, whitelist read'."""
+    perms = set(permissions)
+    parts = []
+    for list_name in LISTS:
+        actions = [a for a in ("read", "write") if f"{list_name}:{a}" in perms]
+        parts.append(f"{list_name} {'+'.join(actions) if actions else '-'}")
+    return ", ".join(parts)
+
+
+def legacy_scope(permissions: Iterable[str]) -> str:
+    """The scope column, for a follower that still runs version 0.5 during an upgrade."""
+    perms = set(permissions)
+    if perms == set(PERMISSIONS):
+        return "all"
+    if perms == set(ALIASES["block"]):
+        return "block"
+    if perms == set(ALIASES["whitelist"]):
+        return "whitelist"
+    return "custom"  # version 0.5 refuses it, which is the safe side
+
+
+def check_expires_days(days: object) -> int:
+    try:
+        number = int(str(days).strip())
+    except (TypeError, ValueError):
+        number = -1
+    if not 0 <= number <= MAX_EXPIRES_DAYS:
+        raise AuthError(f"The expiry is a number of days from 0 to {MAX_EXPIRES_DAYS} (0 = never).")
+    return number
+
+
+def expiry_from(days: int, now: datetime) -> str:
+    return db.to_iso(now + timedelta(days=days)) if days else ""
+
+
+def describe_expiry(expires_at: str, now: datetime | None = None) -> str:
+    if not expires_at:
+        return "never"
+    left = db.from_iso(expires_at) - (now or db.utcnow())
+    day = expires_at[:10]
+    if left.total_seconds() <= 0:
+        return f"EXPIRED {day}"
+    days = math.ceil(left.total_seconds() / 86400)
+    return f"{day} (in {days} day{'' if days == 1 else 's'})"
 
 
 def hash_token(token: str) -> str:
@@ -69,54 +170,132 @@ def new_password() -> str:
 
 # ---------------------------------------------------------------------- API tokens
 
+def _permissions_of(row: sqlite3.Row) -> tuple[str, ...]:
+    try:
+        return parse_permissions(row["permissions"] or row["scope"])
+    except AuthError:  # a scope this version does not know: no permissions
+        return ()
+
+
 def find_client(settings: Settings, token: str) -> Client | None:
-    """The client that owns this token, or None."""
+    """The client that owns this token, or None. The caller checks the expiry and the permissions."""
     if not token:
         return None
     selftest = settings.selftest_token()
     if selftest and hmac.compare_digest(token.encode("utf-8"), selftest.encode("utf-8")):
-        return Client("setup-selftest", "all")
+        return Client("setup-selftest", PERMISSIONS)
     conn = db.connect(settings.db_path)
     try:
-        row = conn.execute("SELECT name, scope FROM api_tokens WHERE token_hash = ?",
-                           (hash_token(token),)).fetchone()
+        row = conn.execute("SELECT * FROM api_tokens WHERE token_hash = ?", (hash_token(token),)).fetchone()
     except sqlite3.OperationalError:  # a snapshot from an older version without the table
         return None
     finally:
         conn.close()
-    return Client(row["name"], row["scope"]) if row else None
+    if row is None:
+        return None
+    return Client(row["name"], _permissions_of(row), row["expires_at"], row["token_hash"])
 
 
-def list_tokens(conn: sqlite3.Connection) -> list[dict[str, str]]:
-    return [{"name": r["name"], "scope": r["scope"], "created_at": r["created_at"],
+def mark_used(settings: Settings, client: Client, now: datetime | None = None) -> None:
+    """Remember when a token was last used. Leader only, at most once an hour. Never fails a call."""
+    if not client.token_hash or not settings.is_leader():
+        return
+    now = now or db.utcnow()
+    try:
+        conn = db.connect(settings.db_path)
+        try:
+            conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE token_hash = ? AND last_used_at < ?",
+                         (db.to_iso(now), client.token_hash, db.to_iso(now - timedelta(seconds=LAST_USED_EVERY))))
+        finally:
+            conn.close()
+    except sqlite3.Error as error:
+        log.warning("Could not save when the token '%s' was last used: %s", client.name, error)
+
+
+def list_tokens(conn: sqlite3.Connection, now: datetime | None = None) -> list[dict[str, object]]:
+    now = now or db.utcnow()
+    return [{"name": r["name"], "permissions": _permissions_of(r), "expires_days": r["expires_days"],
+             "expires_at": r["expires_at"], "expires": describe_expiry(r["expires_at"], now),
+             "expired": bool(r["expires_at"]) and db.from_iso(r["expires_at"]) <= now,
+             "last_used_at": r["last_used_at"], "created_at": r["created_at"],
              "created_by": r["created_by"], "id": r["token_hash"][:8]}
             for r in conn.execute("SELECT * FROM api_tokens ORDER BY name")]
 
 
-def add_token(conn: sqlite3.Connection, name: str, scope: str, actor: str, token: str | None = None) -> str:
+def expiring_tokens(conn: sqlite3.Connection, within_days: int = 14,
+                    now: datetime | None = None) -> list[dict[str, object]]:
+    """Tokens that expire within the next days, and tokens that have expired."""
+    now = now or db.utcnow()
+    limit = db.to_iso(now + timedelta(days=within_days))
+    return [t for t in list_tokens(conn, now) if t["expires_at"] and str(t["expires_at"]) <= limit]
+
+
+def get_token(conn: sqlite3.Connection, name: str) -> dict[str, object]:
     name = check_name(name)
-    if scope not in SCOPES:
-        raise AuthError(f"The scope must be one of: {', '.join(SCOPES)}.")
+    for token in list_tokens(conn):
+        if token["name"] == name:
+            return token
+    raise AuthError(f"There is no token named '{name}'. See: furnace token list")
+
+
+def add_token(conn: sqlite3.Connection, name: str, permissions: str | Iterable[str], actor: str,
+              token: str | None = None, expires_days: object = 0) -> str:
+    name = check_name(name)
+    perms = parse_permissions(permissions)
+    days = check_expires_days(expires_days)
     token = token or new_token()
+    now = db.utcnow()
     with db.transaction(conn):
         if conn.execute("SELECT 1 FROM api_tokens WHERE name = ?", (name,)).fetchone():
             raise AuthError(f"A token named '{name}' exists already. Use 'token rotate {name}' for a new one.")
-        conn.execute("INSERT INTO api_tokens(name, token_hash, scope, created_at, created_by) VALUES (?,?,?,?,?)",
-                     (name, hash_token(token), scope, db.to_iso(db.utcnow()), actor))
-        db.audit(conn, "token_add", "api_token", name, "ok", actor=actor, source="cli", details=f"scope={scope}")
+        conn.execute("INSERT INTO api_tokens(name, token_hash, scope, permissions, created_at, created_by,"
+                     " expires_days, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+                     (name, hash_token(token), legacy_scope(perms), ",".join(perms), db.to_iso(now), actor,
+                      days, expiry_from(days, now)))
+        db.audit(conn, "token_add", "api_token", name, "ok", actor=actor, source="cli",
+                 details=f"permissions={','.join(perms)} expires_days={days}")
     return token
 
 
-def rotate_token(conn: sqlite3.Connection, name: str, actor: str) -> str:
+def rotate_token(conn: sqlite3.Connection, name: str, actor: str, expires_days: object = None) -> str:
+    """A new value. The expiry starts again: the same number of days, or the new ones."""
     name = check_name(name)
     token = new_token()
+    now = db.utcnow()
     with db.transaction(conn):
-        changed = conn.execute("UPDATE api_tokens SET token_hash = ?, created_at = ?, created_by = ? WHERE name = ?",
-                               (hash_token(token), db.to_iso(db.utcnow()), actor, name)).rowcount
-        if not changed:
+        row = conn.execute("SELECT expires_days FROM api_tokens WHERE name = ?", (name,)).fetchone()
+        if row is None:
             raise AuthError(f"There is no token named '{name}'. See: furnace token list")
-        db.audit(conn, "token_rotate", "api_token", name, "ok", actor=actor, source="cli")
+        days = row["expires_days"] if expires_days is None else check_expires_days(expires_days)
+        conn.execute("UPDATE api_tokens SET token_hash = ?, created_at = ?, created_by = ?, expires_days = ?,"
+                     " expires_at = ?, last_used_at = '' WHERE name = ?",
+                     (hash_token(token), db.to_iso(now), actor, days, expiry_from(days, now), name))
+        db.audit(conn, "token_rotate", "api_token", name, "ok", actor=actor, source="cli",
+                 details=f"expires_days={days}")
     return token
+
+
+def edit_token(conn: sqlite3.Connection, name: str, actor: str, permissions: str | Iterable[str] | None = None,
+               expires_days: object = None) -> None:
+    """Change the permissions and/or the expiry (counted from now). The token value stays."""
+    name = check_name(name)
+    if permissions is None and expires_days is None:
+        raise AuthError("Nothing to change. Give --allow and/or --expires-days.")
+    now = db.utcnow()
+    with db.transaction(conn):
+        row = conn.execute("SELECT * FROM api_tokens WHERE name = ?", (name,)).fetchone()
+        if row is None:
+            raise AuthError(f"There is no token named '{name}'. See: furnace token list")
+        perms = _permissions_of(row) if permissions is None else parse_permissions(permissions)
+        if expires_days is None:
+            days, expires_at = row["expires_days"], row["expires_at"]
+        else:
+            days = check_expires_days(expires_days)
+            expires_at = expiry_from(days, now)
+        conn.execute("UPDATE api_tokens SET permissions = ?, scope = ?, expires_days = ?, expires_at = ?"
+                     " WHERE name = ?", (",".join(perms), legacy_scope(perms), days, expires_at, name))
+        db.audit(conn, "token_edit", "api_token", name, "ok", actor=actor, source="cli",
+                 details=f"permissions={','.join(perms)} expires_days={days}")
 
 
 def remove_token(conn: sqlite3.Connection, name: str, actor: str) -> None:

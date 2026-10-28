@@ -36,8 +36,8 @@ The curl examples use these shell variables:
 
 ```bash
 FURNACE=https://192.0.2.10          # the shared IP
-TOKEN='paste-the-block-token-here'
-WL_TOKEN='paste-the-whitelist-token-here'
+TOKEN='paste-a-token-with-blocklist-write-here'
+WL_TOKEN='paste-a-token-with-whitelist-write-here'
 CA=furnace.crt                       # the Furnace certificate file
 ```
 
@@ -49,31 +49,45 @@ Send the token in a header on every `/api/` call:
 Authorization: Bearer <token>
 ```
 
-Each token has a scope:
+**Permissions.** Each token has its own permissions, a grid of four boxes:
 
-| Scope | May call |
-|---|---|
-| `block` | `/api/v1/ips...` and `/api/v1/domains...` |
-| `whitelist` | `/api/v1/whitelist/...` |
-| `all` | Everything |
+|  | Read | Write |
+|---|---|---|
+| **Blocklist** | `GET /api/v1/ips/<ip>`, `GET /api/v1/domains/<domain>` | `POST` and `DELETE` on `/api/v1/ips...` and `/api/v1/domains...` |
+| **Whitelist** | `GET /api/v1/whitelist/ips`, `GET /api/v1/whitelist/domains` | `POST` and `DELETE` on `/api/v1/whitelist/...`, bulk upload (also `dry_run`) |
 
-Setup makes two tokens: `block` (scope block) and `whitelist` (scope whitelist).
-Manage tokens on the leader:
+Write includes read. The permission names are `blocklist:read`, `blocklist:write`, `whitelist:read` and
+`whitelist:write`.
+
+**Expiry.** Each token has its own expiry, chosen when the token is made: 0 to 3650 days, 0 = never.
+
+Setup makes one token and asks for its name, its boxes and its expiry. Manage tokens on the leader:
 
 ```bash
-sudo furnace token list
-sudo furnace token add NAME --scope block|whitelist|all   # the token is shown once
-sudo furnace token rotate NAME                            # new value, the old one stops at once
+sudo furnace token list                    # permissions, expiry, last use; never the tokens
+sudo furnace token add NAME                # asks the grid and the days; the token is shown once
+sudo furnace token add NAME --allow blocklist:write,whitelist:read --expires-days 365
+sudo furnace token edit NAME               # change the boxes or the expiry; the value stays
+sudo furnace token rotate NAME             # new value for the same number of days; the old one stops at once
 sudo furnace token remove NAME
 ```
 
-Tokens are stored as SHA-256 hashes and are copied to the follower.
+Tokens are stored as SHA-256 hashes and are copied to the follower. Give every program its own token, with only
+the boxes it needs.
+
+**Refusals with a real token** (both `401`, neither counts towards the lockout):
+
+```json
+{"status": "unauthorized", "message": "This token may not do this. It needs the whitelist write permission."}
+{"status": "unauthorized", "message": "This token expired on 2027-10-28. Ask the Furnace admin for a new one."}
+```
+
+A token that expires within 14 days, or has expired, is shown with `WARNING` in `sudo furnace status` and in the
+nightly cleanup log.
 
 **Lockout.** After 10 wrong tokens in 15 minutes, the calling address is locked for 15 minutes.
 While it is locked, every call gets `429` `locked`, even with a good token. The `Retry-After` header gives the
 seconds to wait. A missing token does not count as wrong. Unlock early with `sudo furnace unlock <caller IP>`.
-
-**A good token with the wrong scope** gets `401`. It does not count towards the lockout.
 
 **Address rules (optional).** By default any address may call the API. If `API_ALLOW_FROM` is set, other
 addresses get a `403` page from nginx (not JSON).
@@ -104,7 +118,7 @@ Some answers have more fields (described for each endpoint).
 | 200 | `found` | Look-up result. |
 | 200 | `ok` | List or bulk result. |
 | 400 | `bad_request` | The body is not a JSON object, or a field has the wrong type. |
-| 401 | `unauthorized` | The token is missing, wrong, or has the wrong scope. |
+| 401 | `unauthorized` | The token is missing or wrong, has expired, or lacks the permission. `message` says which. |
 | 403 | (nginx page) | The caller's address is not allowed (`API_ALLOW_FROM` or `LISTS_ALLOW_FROM`). |
 | 404 | `not_found` | The entry is not in the list, or the path does not exist. |
 | 405 | `method_not_allowed` | Wrong HTTP method for this path. |
@@ -148,22 +162,22 @@ Example of a refusal:
 
 ## 6. Endpoint summary
 
-| Method | Path | Scope | What it does |
+| Method | Path | Permission | What it does |
 |---|---|---|---|
-| POST | `/api/v1/ips` | block | Block an IP |
-| GET | `/api/v1/ips/<ip>` | block | Look up an IP |
-| DELETE | `/api/v1/ips/<ip>` | block | Unblock an IP |
-| POST | `/api/v1/domains` | block | Block a domain |
-| GET | `/api/v1/domains/<domain>` | block | Look up a domain |
-| DELETE | `/api/v1/domains/<domain>` | block | Unblock a domain |
-| POST | `/api/v1/whitelist/ips` | whitelist | Whitelist an IP or range |
-| GET | `/api/v1/whitelist/ips` | whitelist | List whitelisted IPs and ranges (paged) |
-| DELETE | `/api/v1/whitelist/ips/<ip or cidr>` | whitelist | Remove from the whitelist |
-| POST | `/api/v1/whitelist/ips/bulk` | whitelist | Bulk whitelist IPs and ranges |
-| POST | `/api/v1/whitelist/domains` | whitelist | Whitelist a domain |
-| GET | `/api/v1/whitelist/domains` | whitelist | List whitelisted domains (paged) |
-| DELETE | `/api/v1/whitelist/domains/<domain>` | whitelist | Remove from the whitelist |
-| POST | `/api/v1/whitelist/domains/bulk` | whitelist | Bulk whitelist domains |
+| POST | `/api/v1/ips` | blocklist write | Block an IP |
+| GET | `/api/v1/ips/<ip>` | blocklist read | Look up an IP |
+| DELETE | `/api/v1/ips/<ip>` | blocklist write | Unblock an IP |
+| POST | `/api/v1/domains` | blocklist write | Block a domain |
+| GET | `/api/v1/domains/<domain>` | blocklist read | Look up a domain |
+| DELETE | `/api/v1/domains/<domain>` | blocklist write | Unblock a domain |
+| POST | `/api/v1/whitelist/ips` | whitelist write | Whitelist an IP or range |
+| GET | `/api/v1/whitelist/ips` | whitelist read | List whitelisted IPs and ranges (paged) |
+| DELETE | `/api/v1/whitelist/ips/<ip or cidr>` | whitelist write | Remove from the whitelist |
+| POST | `/api/v1/whitelist/ips/bulk` | whitelist write | Bulk whitelist IPs and ranges |
+| POST | `/api/v1/whitelist/domains` | whitelist write | Whitelist a domain |
+| GET | `/api/v1/whitelist/domains` | whitelist read | List whitelisted domains (paged) |
+| DELETE | `/api/v1/whitelist/domains/<domain>` | whitelist write | Remove from the whitelist |
+| POST | `/api/v1/whitelist/domains/bulk` | whitelist write | Bulk whitelist domains |
 | GET | `/edl/blocklist.txt` | list login | Blocked IPs, one per line |
 | GET | `/edl/domains.txt` | list login | Blocked domains, one per line |
 | GET | `/health` | none (servers only) | Health and role |
@@ -459,6 +473,6 @@ It is for keepalived and the admins.
 | `404` `not_found` | Tell the person it was not in the list. |
 | `422` `rejected` | Show `message`. Do not retry. The input must change. |
 | `503`, `429` page, network error | Retry a few times with a pause. If it still fails, tell the person. |
-| `401` | The caller's token is wrong. Alert its admin. Do not retry: wrong tokens lead to a lockout. |
+| `401` | The token is wrong, expired or lacks a permission (see `message`). Alert its admin. Do not retry: wrong tokens lead to a lockout. |
 | `429` `locked` | Fix the token. Then ask the Furnace admin for `sudo furnace unlock <caller IP>`. |
 | `500` | Tell the Furnace admin. The details are in the server log. |

@@ -52,8 +52,8 @@ def create_app(settings: Settings | None = None) -> Flask:
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)  # type: ignore[method-assign]
     app.extensions["furnace"] = furnace
 
-    def require(kind: str) -> Callable:
-        """kind is block or whitelist. A token with the scope 'all' may do both."""
+    def require(list_name: str, action: str) -> Callable:
+        """list_name is blocklist or whitelist, action is read or write."""
         def decorator(view: Callable) -> Callable:
             @wraps(view)
             def wrapper(*args: Any, **kwargs: Any):
@@ -67,16 +67,27 @@ def create_app(settings: Settings | None = None) -> Flask:
                 header = request.headers.get("Authorization", "")
                 given = header[7:].strip() if header[:7].lower() == "bearer " else ""
                 client = auth.find_client(settings, given)
-                if client is None or not client.may(kind):
+                if client is not None and client.expired():
+                    # A real token, so it does not count towards the lockout.
+                    log.warning("Refused %s %s from %s: token '%s' expired on %s.", request.method,
+                                request.path, caller, client.name, client.expires_at)
+                    resp, code = _error("unauthorized", f"This token expired on {client.expires_at[:10]}. "
+                                        "Ask the Furnace admin for a new one.", 401)
+                    resp.headers["WWW-Authenticate"] = 'Bearer error="invalid_token"'
+                    return resp, code
+                if client is None or not client.may(list_name, action):
                     if given and client is None and auth.record_failure(settings, caller):
                         log.warning("Locked %s for %s minutes after %s wrong tokens.",
                                     caller, settings.lockout_minutes, settings.lockout_failures)
                     log.warning("Refused %s %s from %s: %s.", request.method, request.path, caller,
                                 "missing token" if not given else "wrong token" if client is None
-                                else f"token '{client.name}' may not use {kind} calls")
-                    resp, code = _error("unauthorized", "The token is missing or wrong for this endpoint.", 401)
+                                else f"token '{client.name}' has no {list_name} {action} permission")
+                    message = ("The token is missing or wrong." if client is None else
+                               f"This token may not do this. It needs the {list_name} {action} permission.")
+                    resp, code = _error("unauthorized", message, 401)
                     resp.headers["WWW-Authenticate"] = "Bearer"
                     return resp, code
+                auth.mark_used(settings, client)
                 g.source = f"api:{client.name}@{caller}"
                 return view(*args, **kwargs)
             return wrapper
@@ -117,38 +128,38 @@ def create_app(settings: Settings | None = None) -> Flask:
     # -------------------------------------------------------------- IPs
 
     @app.post("/api/v1/ips")
-    @require("block")
+    @require("blocklist", "write")
     def add_ip():
         d = body()
         return _reply(furnace.add_ip(d.get("ip"), d.get("reason"), d.get("added_by"),
                                      d.get("incident_id"), source=g.source))
 
     @app.get("/api/v1/ips/<ip>")
-    @require("block")
+    @require("blocklist", "read")
     def get_ip(ip: str):
         return _reply(furnace.get_ip(ip))
 
     @app.delete("/api/v1/ips/<ip>")
-    @require("block")
+    @require("blocklist", "write")
     def remove_ip(ip: str):
         return _reply(furnace.remove_ip(ip, actor(), source=g.source))
 
     # -------------------------------------------------------------- domains
 
     @app.post("/api/v1/domains")
-    @require("block")
+    @require("blocklist", "write")
     def add_domain():
         d = body()
         return _reply(furnace.add_domain(d.get("domain"), d.get("reason"), d.get("added_by"),
                                          d.get("incident_id"), source=g.source))
 
     @app.get("/api/v1/domains/<domain>")
-    @require("block")
+    @require("blocklist", "read")
     def get_domain(domain: str):
         return _reply(furnace.get_domain(domain))
 
     @app.delete("/api/v1/domains/<domain>")
-    @require("block")
+    @require("blocklist", "write")
     def remove_domain(domain: str):
         return _reply(furnace.remove_domain(domain, actor(), source=g.source))
 
@@ -185,50 +196,50 @@ def create_app(settings: Settings | None = None) -> Flask:
             raise _BadRequest(f"Send at most {MAX_BULK_ENTRIES} entries per request.")
 
     @app.post("/api/v1/whitelist/ips")
-    @require("whitelist")
+    @require("whitelist", "write")
     def add_whitelist_ip():
         d = body()
         value = d.get("entry") or d.get("cidr") or d.get("ip")
         return _reply(furnace.add_whitelist_ip(value, d.get("reason"), d.get("added_by"), source=g.source))
 
     @app.get("/api/v1/whitelist/ips")
-    @require("whitelist")
+    @require("whitelist", "read")
     def list_whitelist_ips():
         return _reply(furnace.list_whitelist_ips(*paging()))
 
     @app.post("/api/v1/whitelist/ips/bulk")
-    @require("whitelist")
+    @require("whitelist", "write")
     def bulk_whitelist_ips():
         entries, dry, reason, who = bulk_input()
         check_bulk_size(entries)
         return _reply(furnace.bulk_whitelist_ips(entries, reason, who, dry_run=dry, source=g.source))
 
     @app.delete("/api/v1/whitelist/ips/<path:entry>")
-    @require("whitelist")
+    @require("whitelist", "write")
     def remove_whitelist_ip(entry: str):
         return _reply(furnace.remove_whitelist_ip(entry, actor(), source=g.source))
 
     @app.post("/api/v1/whitelist/domains")
-    @require("whitelist")
+    @require("whitelist", "write")
     def add_whitelist_domain():
         d = body()
         return _reply(furnace.add_whitelist_domain(d.get("domain"), d.get("reason"), d.get("added_by"),
                                                    source=g.source))
 
     @app.get("/api/v1/whitelist/domains")
-    @require("whitelist")
+    @require("whitelist", "read")
     def list_whitelist_domains():
         return _reply(furnace.list_whitelist_domains(*paging()))
 
     @app.post("/api/v1/whitelist/domains/bulk")
-    @require("whitelist")
+    @require("whitelist", "write")
     def bulk_whitelist_domains():
         entries, dry, reason, who = bulk_input()
         check_bulk_size(entries)
         return _reply(furnace.bulk_whitelist_domains(entries, reason, who, dry_run=dry, source=g.source))
 
     @app.delete("/api/v1/whitelist/domains/<domain>")
-    @require("whitelist")
+    @require("whitelist", "write")
     def remove_whitelist_domain(domain: str):
         return _reply(furnace.remove_whitelist_domain(domain, actor(), source=g.source))
 

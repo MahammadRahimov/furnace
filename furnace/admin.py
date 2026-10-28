@@ -11,9 +11,11 @@ import csv
 import json
 import logging
 import os
+import sqlite3
 import sys
 from datetime import timedelta
 from pathlib import Path
+from typing import Iterable
 
 from . import __version__, auth, backup, db, edl
 from .cleanup import run_cleanup
@@ -79,15 +81,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("apply-replica", help="(replication, follower only) Load a snapshot from the leader.")
     sp.add_argument("file", type=Path)
 
-    sp = sub.add_parser("token", help="API tokens: list, add NAME [--scope], rotate NAME, remove NAME.")
+    sp = sub.add_parser("token", help="API tokens: list, add NAME, edit NAME, rotate NAME, remove NAME.")
     tok = sp.add_subparsers(dest="action", required=True, metavar="ACTION")
-    tok.add_parser("list", help="Show the tokens (names and scopes, never the tokens).")
-    t = tok.add_parser("add", help="Make a new token. It is shown once.")
+    tok.add_parser("list", help="Show the tokens: permissions, expiry, last use (never the tokens).")
+    allow_help = ("Permissions, separated by commas: blocklist:read, blocklist:write, whitelist:read, "
+                  "whitelist:write, or all. Write includes read.")
+    days_help = f"Days until the token expires, 0 to {auth.MAX_EXPIRES_DAYS} (0 = never)."
+    t = tok.add_parser("add", help="Make a new token. Without options it asks. The token is shown once.")
     t.add_argument("name")
-    t.add_argument("--scope", choices=auth.SCOPES, default="block",
-                   help="block = IPs and domains (default), whitelist, or all.")
+    t.add_argument("--allow", help=allow_help)
+    t.add_argument("--scope", dest="allow", help=argparse.SUPPRESS)  # the option of version 0.5
+    t.add_argument("--expires-days", help=days_help)
+    t = tok.add_parser("edit", help="Change a token's permissions or expiry. The token value stays.")
+    t.add_argument("name")
+    t.add_argument("--allow", help=allow_help)
+    t.add_argument("--expires-days", help=days_help + " Counted from now.")
     t = tok.add_parser("rotate", help="Give a token a new value. The old value stops working at once.")
     t.add_argument("name")
+    t.add_argument("--expires-days", help=days_help + " Default: the same number of days as before.")
     t = tok.add_parser("remove", help="Delete a token. It stops working at once.")
     t.add_argument("name")
 
@@ -105,8 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("ip", nargs="?")
     sp.add_argument("--all", action="store_true")
 
-    sp = sub.add_parser("init-secrets", help="(setup) Make the first tokens and the EDL login, if there are none.")
+    sp = sub.add_parser("init-secrets", help="(setup) Make the first token and the EDL login, if there are none.")
     sp.add_argument("--legacy-tokens", type=Path, help="tokens.env from version 0.2: keep these tokens working.")
+    sp.add_argument("--token-name", default="api")
+    sp.add_argument("--allow", default="all")
+    sp.add_argument("--expires-days", default="0")
 
     sub.add_parser("check-config", help="Check the settings file and show the settings (no secrets).")
     return p
@@ -126,27 +140,130 @@ def _show_secret(what: str, value: str) -> None:
     print(f"{what} It is shown only once. Store it now:\n\n    {value}\n")
 
 
+def _interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _input(prompt: str) -> str:
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        raise auth.AuthError("No answer (the input was closed).") from None
+
+
+def ask_permissions(current: Iterable[str] = auth.PERMISSIONS) -> tuple[str, ...]:
+    """The permission grid. A number switches a box. Write ticks read; no read clears write."""
+    boxes = set(current)
+    while True:
+        print("\n  What may this token do? Type a box number to switch it (or several: 2 4).\n")
+        print("                   Read       Write")
+        for i, list_name in enumerate(auth.LISTS):
+            read, write = (f"[{'x' if f'{list_name}:{a}' in boxes else ' '}]" for a in ("read", "write"))
+            print(f"    {list_name.capitalize():<12}  {2 * i + 1} {read}    {2 * i + 2} {write}")
+        answer = _input("\n  Box number, or Enter when done: ")
+        if not answer:
+            if boxes:
+                return auth.parse_permissions(boxes)
+            print("    Tick at least one box.")
+            continue
+        numbers = answer.replace(",", " ").split()
+        if not all(n in ("1", "2", "3", "4") for n in numbers):
+            print("    Type 1, 2, 3 or 4, or press Enter when done.")
+            continue
+        for n in numbers:
+            perm = auth.PERMISSIONS[int(n) - 1]
+            list_name, action = perm.split(":")
+            if perm in boxes:
+                boxes.discard(perm)
+                if action == "read":
+                    boxes.discard(f"{list_name}:write")
+            else:
+                boxes.add(perm)
+                if action == "write":
+                    boxes.add(f"{list_name}:read")
+
+
+def ask_expires_days(keep: int | None = None) -> int | None:
+    """Days until the token expires. With keep, Enter keeps the current expiry (returns None)."""
+    hint = f", Enter = keep {keep}" if keep is not None else ""
+    while True:
+        answer = _input(f"\n  Expires after how many days? (0 = never{hint}): ")
+        if not answer and keep is not None:
+            return None
+        try:
+            return auth.check_expires_days(answer)
+        except auth.AuthError as error:
+            print(f"    {error}")
+
+
+def _token_summary(token: dict[str, object]) -> str:
+    return (f"Permissions: {auth.describe_permissions(token['permissions'])}. "  # type: ignore[arg-type]
+            f"Expires: {token['expires']}.")
+
+
+def print_tokens(conn: sqlite3.Connection) -> None:
+    rows = auth.list_tokens(conn)
+    if not rows:
+        print("There are no API tokens. Make one with: sudo furnace token add NAME")
+        return
+    def cell(perms: tuple[str, ...], list_name: str) -> str:  # noqa: E306
+        actions = [a for a in ("read", "write") if f"{list_name}:{a}" in perms]
+        return "+".join(actions) or "-"
+    print(f"{'NAME':<24} {'BLOCKLIST':<11} {'WHITELIST':<11} {'EXPIRES':<26} {'LAST USED':<17} ID")
+    for r in rows:
+        used = str(r["last_used_at"])[:16].replace("T", " ") or "never"
+        print(f"{r['name']:<24} {cell(r['permissions'], 'blocklist'):<11} "  # type: ignore[arg-type]
+              f"{cell(r['permissions'], 'whitelist'):<11} {r['expires']:<26} {used:<17} {r['id']}")  # type: ignore[arg-type]
+
+
 def cmd_token(settings: Settings, args: argparse.Namespace) -> int:
     with Furnace(settings).locked() as conn:
         if args.action == "list":
-            rows = auth.list_tokens(conn)
-            if not rows:
-                print("There are no API tokens. Make one with: sudo furnace token add NAME")
-            for r in rows:
-                print(f"{r['name']:<24} scope {r['scope']:<10} id {r['id']}  made {r['created_at']} by {r['created_by']}")
+            print_tokens(conn)
             return 0
         _need_leader(settings)
         name = auth.check_name(args.name)
         if args.action == "add":
-            _show_secret(f"New API token '{name}' (scope {args.scope}).",
-                         auth.add_token(conn, name, args.scope, _actor()))
+            allow, days = args.allow, args.expires_days
+            if (allow is None or days is None) and not _interactive():
+                raise auth.AuthError("Give --allow and --expires-days, or run this in a terminal to be asked.")
+            if conn.execute("SELECT 1 FROM api_tokens WHERE name = ?", (name,)).fetchone():
+                raise auth.AuthError(f"A token named '{name}' exists already. Use 'token rotate {name}' for a new one.")
+            if allow is None:
+                allow = ask_permissions()
+            if days is None:
+                days = ask_expires_days()
+            value = auth.add_token(conn, name, allow, _actor(), expires_days=days)
+            _show_secret(f"New API token '{name}'. {_token_summary(auth.get_token(conn, name))}", value)
+        elif args.action == "edit":
+            allow, days = args.allow, args.expires_days
+            if allow is None and days is None:
+                if not _interactive():
+                    raise auth.AuthError("Nothing to change. Give --allow and/or --expires-days.")
+                current = auth.get_token(conn, name)
+                print(f"Token '{name}'. {_token_summary(current)}")
+                allow = ask_permissions(current["permissions"])  # type: ignore[arg-type]
+                days = ask_expires_days(keep=int(current["expires_days"]))  # type: ignore[call-overload]
+            auth.edit_token(conn, name, _actor(), allow, days)
+            print(f"The API token '{name}' is changed. {_token_summary(auth.get_token(conn, name))}")
         elif args.action == "rotate":
-            _show_secret(f"New value for the API token '{name}'. The old value no longer works.",
-                         auth.rotate_token(conn, name, _actor()))
+            value = auth.rotate_token(conn, name, _actor(), args.expires_days)
+            _show_secret(f"New value for the API token '{name}'. The old value no longer works. "
+                         f"{_token_summary(auth.get_token(conn, name))}", value)
         else:
             auth.remove_token(conn, name, _actor())
             print(f"The API token '{name}' is deleted. It no longer works.")
         return 0
+
+
+def token_warnings(conn: sqlite3.Connection) -> list[str]:
+    """One line per token that has expired or expires within 14 days."""
+    lines = []
+    for t in auth.expiring_tokens(conn):
+        what = "has expired" if t["expired"] else "expires soon"
+        lines.append(f"WARNING: the API token '{t['name']}' {what}: {t['expires']}. "
+                     f"Make a new value with: sudo furnace token rotate {t['name']}")
+    return lines
 
 
 def cmd_edl_user(settings: Settings, args: argparse.Namespace) -> int:
@@ -191,14 +308,15 @@ def cmd_lockouts(settings: Settings, args: argparse.Namespace) -> int:
 
 def cmd_init_secrets(settings: Settings, args: argparse.Namespace) -> int:
     """For setup on the leader. Prints one tab-separated line per new secret:
-    token NAME SCOPE VALUE / edl NAME PASSWORD / migrated NAME."""
+    token NAME DESCRIPTION VALUE / edl NAME PASSWORD / migrated NAME."""
     with Furnace(settings).locked() as conn:
         if args.legacy_tokens and args.legacy_tokens.is_file():
             for name in auth.import_legacy_tokens(conn, read_env_file(args.legacy_tokens)):
                 print(f"migrated\t{name}")
         if not conn.execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0]:
-            for name, scope in (("block", "block"), ("whitelist", "whitelist")):
-                print(f"token\t{name}\t{scope}\t{auth.add_token(conn, name, scope, 'setup')}")
+            name = auth.check_name(args.token_name)
+            value = auth.add_token(conn, name, args.allow, "setup", expires_days=args.expires_days)
+            print(f"token\t{name}\t{_token_summary(auth.get_token(conn, name))}\t{value}")
         if not conn.execute("SELECT COUNT(*) FROM edl_users").fetchone()[0]:
             print(f"edl\tlists\t{auth.add_edl_user(conn, 'lists', 'setup')}")
         edl.write_edl_users(conn, settings)
@@ -267,17 +385,21 @@ def cmd_stats(settings: Settings) -> int:
             "last_cleanup": q("SELECT MAX(ts) FROM audit_log WHERE action='cleanup'"),
             "audit_entries": q("SELECT COUNT(*) FROM audit_log"),
             "api_tokens": q("SELECT COUNT(*) FROM api_tokens"),
+            "api_tokens_expiring_or_expired": len(auth.expiring_tokens(conn)),
             "edl_logins": q("SELECT COUNT(*) FROM edl_users"),
             "locked_ips": len(auth.list_lockouts(settings)),
             "blocklist_txt_bytes": settings.blocklist_path.stat().st_size if settings.blocklist_path.exists() else None,
             "domains_txt_bytes": settings.domains_path.stat().st_size if settings.domains_path.exists() else None,
             "backups": len(list(settings.backup_dir.glob("furnace-*.db"))) if settings.backup_dir.exists() else 0,
         }
+        warnings = token_warnings(conn)
     finally:
         conn.close()
     width = max(len(k) for k in stats)
     for key, value in stats.items():
         print(f"{key.replace('_', ' '):<{width}}  {value if value is not None else '-'}")
+    if warnings:
+        print("\n" + "\n".join(warnings))
     return 0
 
 
@@ -324,6 +446,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "cleanup":
             result = run_cleanup(settings, dry_run=args.dry_run, force=args.force)
             print(result.message)
+            conn = db.connect(settings.db_path)
+            try:
+                for line in token_warnings(conn):  # the nightly run puts them in the journal
+                    print(line)
+            finally:
+                conn.close()
             if args.dry_run and result.moved:
                 print("\n".join(result.moved[:50]) + ("\n..." if len(result.moved) > 50 else ""))
             return result.exit_code
