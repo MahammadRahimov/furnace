@@ -12,7 +12,7 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Iterable, Iterator
 
 from . import db, edl
@@ -110,6 +110,45 @@ class Furnace:
     def _raw(value: object) -> str:
         return value.strip()[:300] if isinstance(value, str) else repr(value)[:300]
 
+    @staticmethod
+    def _permanent(value: object) -> bool:
+        if value is None:
+            return False
+        if not isinstance(value, bool):
+            raise Rejected("invalid_permanent")
+        return value
+
+    # ------------------------------------------------------------------ the archive record
+
+    @staticmethod
+    def record_ip(conn: sqlite3.Connection, ip: str, version: int, stamp: str, actor: str, reason: str,
+                  incident: str) -> bool:
+        """Write the archive record of a block. Returns True if the IP was blocked before.
+        Caller holds the transaction."""
+        if conn.execute("UPDATE ip_records SET last_blocked_at = MAX(last_blocked_at, ?),"
+                        " times_blocked = times_blocked + 1 WHERE ip = ?", (stamp, ip)).rowcount:
+            return True
+        conn.execute("INSERT INTO ip_records(ip, version, first_blocked_at, last_blocked_at, added_by, reason,"
+                     " incident_id) VALUES (?,?,?,?,?,?,?)", (ip, version, stamp, stamp, actor, reason, incident))
+        return False
+
+    @staticmethod
+    def record_domain(conn: sqlite3.Connection, domain: str, stamp: str, actor: str, reason: str,
+                      incident: str) -> bool:
+        if conn.execute("UPDATE domain_records SET last_blocked_at = MAX(last_blocked_at, ?),"
+                        " times_blocked = times_blocked + 1 WHERE domain = ?", (stamp, domain)).rowcount:
+            return True
+        conn.execute("INSERT INTO domain_records(domain, first_blocked_at, last_blocked_at, added_by, reason,"
+                     " incident_id) VALUES (?,?,?,?,?,?)", (domain, stamp, stamp, actor, reason, incident))
+        return False
+
+    @staticmethod
+    def _record(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {k: row[k] for k in ("first_blocked_at", "last_blocked_at", "times_blocked", "added_by", "reason",
+                                    "incident_id")}
+
     # ------------------------------------------------------------------ whitelist lookups
 
     @staticmethod
@@ -131,7 +170,8 @@ class Furnace:
     # ------------------------------------------------------------------ IPs
 
     def add_ip(self, value: object, reason: object = "", added_by: object = "",
-               incident_id: object = "", source: str = "api", now: datetime | None = None) -> Result:
+               incident_id: object = "", source: str = "api", now: datetime | None = None,
+               permanent: object = False) -> Result:
         raw = self._raw(value)
         refused = self._not_leader("add", "ip", raw)
         if refused:
@@ -140,6 +180,7 @@ class Furnace:
         with self.locked() as conn:
             try:
                 reason_t, actor, incident = self._texts(reason, added_by, incident_id)
+                forever = self._permanent(permanent)
             except Rejected as error:
                 return self._reject(conn, "add", "ip", raw, error, "", "", source, now)
             try:
@@ -158,30 +199,34 @@ class Furnace:
                 if existing:
                     db.audit(conn, "add", "ip", text, "already_exists", "", actor, incident, source,
                              f"Already blocked since {existing['added_at']}.", now)
+                    record = conn.execute("SELECT * FROM ip_records WHERE ip=?", (text,)).fetchone()
                     return Result("already_exists",
                                   f"This IP is already blocked since {existing['added_at']}. Nothing changed.",
-                                  data={"entry": self._ip_entry(existing)})
+                                  data={"entry": self._ip_entry(existing), "record": self._record(record)})
                 if self.settings.max_ips:
                     count = conn.execute("SELECT COUNT(*) FROM blocked_ips").fetchone()[0]
                     if count >= self.settings.max_ips:
                         db.audit(conn, "add", "ip", text, "rejected", "limit_reached", actor, incident,
                                  source, f"Limit is {self.settings.max_ips}.", now)
                         return Result("rejected", Rejected("limit_reached").message, code="limit_reached")
-                archived = conn.execute("SELECT 1 FROM archived_ips WHERE ip=?", (text,)).fetchone()
-                if archived:
-                    conn.execute("DELETE FROM archived_ips WHERE ip=?", (text,))
                 conn.execute(
-                    "INSERT INTO blocked_ips(ip, version, added_at, aging_from, added_by, reason, incident_id)"
-                    " VALUES (?,?,?,?,?,?,?)", (text, ip.version, stamp, stamp, actor, reason_t, incident))
-                db.audit(conn, "add", "ip", text, "restored" if archived else "added", "", actor,
-                         incident, source, "Moved back from the archive." if archived else "", now)
-            self._rebuild(conn, "ips", *(["archive"] if archived else []))
-            entry = {"ip": text, "added_at": stamp, "added_by": actor, "reason": reason_t,
-                     "incident_id": incident}
-            if archived:
-                return Result("added", "This IP was in the archive. It is blocked again with a new date.",
-                              data={"entry": entry, "restored_from_archive": True})
-            return Result("added", "The IP is now blocked.", data={"entry": entry})
+                    "INSERT INTO blocked_ips(ip, version, added_at, aging_from, added_by, reason, incident_id,"
+                    " permanent) VALUES (?,?,?,?,?,?,?,?)",
+                    (text, ip.version, stamp, stamp, actor, reason_t, incident, int(forever)))
+                before = self.record_ip(conn, text, ip.version, stamp, actor, reason_t, incident)
+                db.audit(conn, "add", "ip", text, "restored" if before else "added", "", actor, incident, source,
+                         ("Blocked before (in the archive). " if before else "")
+                         + ("Permanent." if forever else ""), now)
+                record = conn.execute("SELECT * FROM ip_records WHERE ip=?", (text,)).fetchone()
+                row = conn.execute("SELECT * FROM blocked_ips WHERE ip=?", (text,)).fetchone()
+            self._rebuild(conn, "ips")
+            data = {"entry": self._ip_entry(row), "record": self._record(record)}
+            kind = "permanently" if forever else f"for {self.settings.archive_after_days} days"
+            if before:
+                data["restored_from_archive"] = True
+                return Result("added", f"This IP was blocked before (it is in the archive). "
+                                       f"It is blocked again {kind}, with a new date.", data=data)
+            return Result("added", f"The IP is now blocked {kind}.", data=data)
 
     def remove_ip(self, value: object, removed_by: object = "", source: str = "api",
                   now: datetime | None = None) -> Result:
@@ -215,20 +260,23 @@ class Furnace:
         with self._reader() as conn:
             cidr = self._ip_whitelisted(conn, ip)
             row = conn.execute("SELECT * FROM blocked_ips WHERE ip=?", (text,)).fetchone()
-            if row:
-                return Result("found", "This IP is blocked.",
-                              data={"list": "active", "entry": self._ip_entry(row), "whitelisted_by": cidr})
-            row = conn.execute("SELECT * FROM archived_ips WHERE ip=?", (text,)).fetchone()
-            if row:
-                entry = {k: row[k] for k in ("ip", "added_at", "archived_at", "added_by", "reason", "incident_id")}
-                return Result("found", "This IP is in the archive. It is not blocked now.",
-                              data={"list": "archive", "entry": entry, "whitelisted_by": cidr})
-        return Result("not_found", "This IP is not in the blocklist or the archive.",
-                      data={"whitelisted_by": cidr})
+            record = self._record(conn.execute("SELECT * FROM ip_records WHERE ip=?", (text,)).fetchone())
+        if row:
+            return Result("found", "This IP is blocked.",
+                          data={"list": "active", "entry": self._ip_entry(row), "record": record,
+                                "whitelisted_by": cidr})
+        if record:
+            return Result("found", "This IP is in the archive: it was blocked before. It is not blocked now.",
+                          data={"list": "archive", "entry": {"ip": text, **record}, "record": record,
+                                "whitelisted_by": cidr})
+        return Result("not_found", "This IP was never blocked.", data={"whitelisted_by": cidr})
 
-    @staticmethod
-    def _ip_entry(row: sqlite3.Row) -> dict[str, str]:
-        return {k: row[k] for k in ("ip", "added_at", "added_by", "reason", "incident_id")}
+    def _ip_entry(self, row: sqlite3.Row) -> dict[str, Any]:
+        entry: dict[str, Any] = {k: row[k] for k in ("ip", "added_at", "added_by", "reason", "incident_id")}
+        entry["permanent"] = bool(row["permanent"])
+        entry["expires_at"] = None if row["permanent"] else db.to_iso(
+            db.from_iso(row["aging_from"]) + timedelta(days=self.settings.archive_after_days))
+        return entry
 
     # ------------------------------------------------------------------ domains
 
@@ -256,9 +304,10 @@ class Furnace:
                 if existing:
                     db.audit(conn, "add", "domain", domain, "already_exists", "", actor, incident, source,
                              f"Already blocked since {existing['added_at']}.", now)
+                    record = conn.execute("SELECT * FROM domain_records WHERE domain=?", (domain,)).fetchone()
                     return Result("already_exists",
                                   f"This domain is already blocked since {existing['added_at']}. Nothing changed.",
-                                  data={"entry": dict(existing)})
+                                  data={"entry": dict(existing), "record": self._record(record)})
                 if self.settings.max_domains:
                     count = conn.execute("SELECT COUNT(*) FROM blocked_domains").fetchone()[0]
                     if count >= self.settings.max_domains:
@@ -267,11 +316,19 @@ class Furnace:
                         return Result("rejected", Rejected("limit_reached").message, code="limit_reached")
                 conn.execute("INSERT INTO blocked_domains(domain, added_at, added_by, reason, incident_id)"
                              " VALUES (?,?,?,?,?)", (domain, stamp, actor, reason_t, incident))
-                db.audit(conn, "add", "domain", domain, "added", "", actor, incident, source, "", now)
+                before = self.record_domain(conn, domain, stamp, actor, reason_t, incident)
+                db.audit(conn, "add", "domain", domain, "restored" if before else "added", "", actor, incident,
+                         source, "Blocked before (in the archive)." if before else "", now)
+                record = conn.execute("SELECT * FROM domain_records WHERE domain=?", (domain,)).fetchone()
             self._rebuild(conn, "domains")
-            return Result("added", "The domain is now blocked.",
-                          data={"entry": {"domain": domain, "added_at": stamp, "added_by": actor,
-                                          "reason": reason_t, "incident_id": incident}})
+            data: dict[str, Any] = {"entry": {"domain": domain, "added_at": stamp, "added_by": actor,
+                                              "reason": reason_t, "incident_id": incident},
+                                    "record": self._record(record)}
+            if before:
+                data["restored_from_archive"] = True
+                return Result("added", "This domain was blocked before (it is in the archive). "
+                                       "It is blocked again.", data=data)
+            return Result("added", "The domain is now blocked.", data=data)
 
     def remove_domain(self, value: object, removed_by: object = "", source: str = "api",
                       now: datetime | None = None) -> Result:
@@ -303,9 +360,16 @@ class Furnace:
         with self._reader() as conn:
             whitelisted = self._domain_whitelisted(conn, domain)
             row = conn.execute("SELECT * FROM blocked_domains WHERE domain=?", (domain,)).fetchone()
+            record = self._record(conn.execute("SELECT * FROM domain_records WHERE domain=?",
+                                               (domain,)).fetchone())
         if row:
-            return Result("found", "This domain is blocked.", data={"entry": dict(row), "whitelisted": whitelisted})
-        return Result("not_found", "This domain is not in the blocklist.", data={"whitelisted": whitelisted})
+            return Result("found", "This domain is blocked.",
+                          data={"list": "active", "entry": dict(row), "record": record, "whitelisted": whitelisted})
+        if record:
+            return Result("found", "This domain is in the archive: it was blocked before. It is not blocked now.",
+                          data={"list": "archive", "entry": {"domain": domain, **record}, "record": record,
+                                "whitelisted": whitelisted})
+        return Result("not_found", "This domain was never blocked.", data={"whitelisted": whitelisted})
 
     # ------------------------------------------------------------------ IP whitelist
 

@@ -26,8 +26,14 @@ from .replica import ReplicaError, apply_snapshot
 from .service import Furnace
 
 EXPORTS = {
-    "ips": ("SELECT ip, added_at, added_by, reason, incident_id FROM blocked_ips", "ip"),
-    "archive": ("SELECT ip, added_at, archived_at, added_by, reason, incident_id FROM archived_ips", "ip"),
+    "ips": ("SELECT ip, added_at, added_by, reason, incident_id,"
+            " CASE permanent WHEN 1 THEN 'yes' ELSE 'no' END AS permanent FROM blocked_ips", "ip"),
+    "archive": ("SELECT 'ip' AS type, ip AS value, first_blocked_at, last_blocked_at, times_blocked,"
+                " CASE WHEN EXISTS(SELECT 1 FROM blocked_ips b WHERE b.ip = r.ip) THEN 'yes' ELSE 'no' END"
+                " AS blocked_now, added_by, reason, incident_id FROM ip_records r UNION ALL"
+                " SELECT 'domain', domain, first_blocked_at, last_blocked_at, times_blocked,"
+                " CASE WHEN EXISTS(SELECT 1 FROM blocked_domains b WHERE b.domain = r.domain) THEN 'yes' ELSE 'no'"
+                " END, added_by, reason, incident_id FROM domain_records r", "type, value"),
     "domains": ("SELECT domain, added_at, added_by, reason, incident_id FROM blocked_domains", "domain"),
     "whitelist-ips": ("SELECT cidr, added_at, added_by, reason FROM whitelist_ips", "cidr"),
     "whitelist-domains": ("SELECT domain, added_at, added_by, reason FROM whitelist_domains", "domain"),
@@ -54,6 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--date-format", help="strftime format of the dates, for example %%d/%%m/%%Y.")
     sp.add_argument("--old-ips", choices=("archive", "fresh"), default="archive",
                     help="IPs with a date older than ARCHIVE_AFTER_DAYS: 'archive' (default) or 'fresh'.")
+    sp.add_argument("--permanent", action="store_true",
+                    help="Block every IP of the file permanently (they never expire). Old dates are kept.")
 
     sp = sub.add_parser("import-domains", help="Import domains from a file (domain / domain,reason).")
     common_import(sp)
@@ -72,7 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("stats", help="Show counts, dates and file sizes.")
     sub.add_parser("rebuild", help="Rebuild blocklist.txt, domains.txt and the archive CSV from the database.")
 
-    sp = sub.add_parser("cleanup", help="Move IPs older than ARCHIVE_AFTER_DAYS to the archive.")
+    sp = sub.add_parser("cleanup", help="Remove temporary IPs older than ARCHIVE_AFTER_DAYS from the list "
+                                        "(they stay in the archive).")
     sp.add_argument("--dry-run", action="store_true", help="Show what would move. Change nothing.")
     sp.add_argument("--force", action="store_true", help="Run even if the safety stop would trigger.")
 
@@ -266,6 +275,17 @@ def token_warnings(conn: sqlite3.Connection) -> list[str]:
     return lines
 
 
+PERMANENT_WARN_PERCENT = 50
+
+
+def permanent_warnings(settings: Settings, permanent: int) -> list[str]:
+    """Permanent IPs never leave the list. Warn when they fill half of the IP limit."""
+    if not settings.max_ips or 100 * permanent < PERMANENT_WARN_PERCENT * settings.max_ips:
+        return []
+    return [f"WARNING: {permanent} permanent IPs use {100 * permanent // settings.max_ips} percent of the limit of "
+            f"{settings.max_ips}. They never expire. Unblock the ones that are no longer needed."]
+
+
 def cmd_edl_user(settings: Settings, args: argparse.Namespace) -> int:
     with Furnace(settings).locked() as conn:
         if args.action == "list":
@@ -329,7 +349,7 @@ def cmd_import(settings: Settings, args: argparse.Namespace) -> int:
         return 2
     if args.command == "import-ips":
         report = import_ips(settings, args.file, args.dry_run, args.date_format, args.old_ips,
-                            args.added_by, args.reason, args.report)
+                            args.added_by, args.reason, args.report, permanent=args.permanent)
     elif args.command == "import-domains":
         report = import_domains(settings, args.file, args.dry_run, args.added_by, args.reason, args.report)
     else:
@@ -369,11 +389,14 @@ def cmd_stats(settings: Settings) -> int:
         q = lambda sql, *a: conn.execute(sql, a).fetchone()[0]  # noqa: E731
         now = db.utcnow()
         week = db.to_iso(now - timedelta(days=settings.archive_after_days) + timedelta(days=7))
+        permanent = q("SELECT COUNT(*) FROM blocked_ips WHERE permanent = 1")
         stats = {
             "role": "leader" if settings.is_leader() else "follower",
             "active_ips": q("SELECT COUNT(*) FROM blocked_ips"),
-            "archived_ips": q("SELECT COUNT(*) FROM archived_ips"),
+            "permanent_ips": permanent,
             "domains": q("SELECT COUNT(*) FROM blocked_domains"),
+            "archive_ips": q("SELECT COUNT(*) FROM ip_records"),
+            "archive_domains": q("SELECT COUNT(*) FROM domain_records"),
             "whitelist_ips": q("SELECT COUNT(*) FROM whitelist_ips"),
             "whitelist_domains": q("SELECT COUNT(*) FROM whitelist_domains"),
             "ip_limit": settings.max_ips or "none",
@@ -381,7 +404,8 @@ def cmd_stats(settings: Settings) -> int:
             "archive_after_days": settings.archive_after_days,
             "oldest_active_ip": q("SELECT MIN(added_at) FROM blocked_ips"),
             "newest_active_ip": q("SELECT MAX(added_at) FROM blocked_ips"),
-            "ips_expiring_in_7_days": q("SELECT COUNT(*) FROM blocked_ips WHERE aging_from < ?", week),
+            "ips_expiring_in_7_days": q("SELECT COUNT(*) FROM blocked_ips WHERE permanent = 0 AND aging_from < ?",
+                                        week),
             "last_cleanup": q("SELECT MAX(ts) FROM audit_log WHERE action='cleanup'"),
             "audit_entries": q("SELECT COUNT(*) FROM audit_log"),
             "api_tokens": q("SELECT COUNT(*) FROM api_tokens"),
@@ -392,7 +416,7 @@ def cmd_stats(settings: Settings) -> int:
             "domains_txt_bytes": settings.domains_path.stat().st_size if settings.domains_path.exists() else None,
             "backups": len(list(settings.backup_dir.glob("furnace-*.db"))) if settings.backup_dir.exists() else 0,
         }
-        warnings = token_warnings(conn)
+        warnings = token_warnings(conn) + permanent_warnings(settings, permanent)
     finally:
         conn.close()
     width = max(len(k) for k in stats)
@@ -448,7 +472,8 @@ def main(argv: list[str] | None = None) -> int:
             print(result.message)
             conn = db.connect(settings.db_path)
             try:
-                for line in token_warnings(conn):  # the nightly run puts them in the journal
+                permanent = conn.execute("SELECT COUNT(*) FROM blocked_ips WHERE permanent = 1").fetchone()[0]
+                for line in token_warnings(conn) + permanent_warnings(settings, permanent):  # into the journal
                     print(line)
             finally:
                 conn.close()

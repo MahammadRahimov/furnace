@@ -172,7 +172,7 @@ def test_snapshot_from_an_older_leader(settings, tmp_path):
     old = tmp_path / "old.db"
     with sqlite3.connect(old) as c:
         c.executescript(db.SCHEMA.split("-- API tokens.")[0])
-        c.execute("INSERT INTO blocked_ips VALUES ('198.51.100.3', 4, 't', 't', '', '', '')")
+        c.execute("INSERT INTO blocked_ips(ip, version, added_at, aging_from) VALUES ('198.51.100.3', 4, 't', 't')")
     follower = Settings(data_dir=tmp_path / "f", edl_dir=tmp_path / "f/edl", archive_dir=tmp_path / "f/arch",
                         backup_dir=tmp_path / "f/bk", auth_dir=tmp_path / "f/auth", role_file=tmp_path / "role")
     (tmp_path / "role").write_text("follower")
@@ -384,7 +384,7 @@ def test_tokens_of_version_0_5_keep_working(tmp_path):
     conn = db.connect(s.db_path)
     try:
         assert [t["expires"] for t in auth.list_tokens(conn)] == ["never"] * 3
-        assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "3"
+        assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(db.SCHEMA_VERSION)
     finally:
         conn.close()
 

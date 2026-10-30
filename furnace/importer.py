@@ -52,14 +52,18 @@ class ImportReport:
     skipped: list[Skipped] = field(default_factory=list)
     backup_file: str = ""
     report_file: str = ""
+    permanent: bool = False
 
     def summary(self) -> str:
         head = "DRY RUN - nothing was changed. " if self.dry_run else ""
         parts = [f"{head}Read {self.total_lines} lines.",
                  f"Added to the active list: {self.added_active}."]
         if self.kind == "ips":
-            parts.append(f"Added straight to the archive: {self.added_archive}.")
-            parts.append(f"Moved back from the archive: {self.restored}.")
+            if self.permanent:
+                parts.append("All added IPs are permanent.")
+            parts.append(f"Added only to the archive (too old to block): {self.added_archive}.")
+        if self.kind in ("ips", "domains"):
+            parts.append(f"Blocked again (already in the archive): {self.restored}.")
         parts.append(f"Skipped: {len(self.skipped)}.")
         if self.backup_file:
             parts.append(f"Backup: {self.backup_file}.")
@@ -218,14 +222,16 @@ def _backup_first(settings: Settings, report: ImportReport) -> None:
 
 def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_format: str | None = None,
                old_ips: str = "archive", added_by: str = "import", reason: str = "imported",
-               report_path: Path | None = None, now: datetime | None = None) -> ImportReport:
+               report_path: Path | None = None, now: datetime | None = None,
+               permanent: bool = False) -> ImportReport:
+    """permanent: every added IP is permanent. Then the dates are only kept, nothing is too old."""
     if old_ips not in ("archive", "fresh"):
         raise ImportError_("--old-ips must be 'archive' or 'fresh'.")
     _require_leader(settings)
     now = now or db.utcnow()
     days = settings.archive_after_days
     cutoff = now - timedelta(days=days)
-    report = ImportReport("ips", dry_run)
+    report = ImportReport("ips", dry_run, permanent=permanent)
     added_by = clean_text(added_by, "added_by", 100)
     default_reason = clean_text(reason, "reason", 500)
 
@@ -239,7 +245,7 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
         try:
             whitelist = Furnace.whitelist_rangeset(conn)
             active = {row[0] for row in conn.execute("SELECT ip FROM blocked_ips")}
-            archived = {row[0] for row in conn.execute("SELECT ip FROM archived_ips")}
+            recorded = {row[0] for row in conn.execute("SELECT ip FROM ip_records")}
             seen: set[str] = set()
             dated_active: list[tuple] = []
             to_archive: list[tuple] = []
@@ -285,18 +291,21 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
                     continue
                 seen.add(ip_text)
 
-                if when is not None and when < cutoff:
+                if permanent:
+                    stamp = db.to_iso(when or now)
+                    dated_active.append((ip_text, ip.version, stamp, stamp, added_by, line_reason, "", 1))
+                elif when is not None and when < cutoff:
                     if old_ips == "fresh":
                         undated.append((ip_text, ip.version, line_reason))
-                    elif ip_text in archived:
+                    elif ip_text in recorded:
                         seen.discard(ip_text)
                         report.skipped.append(Skipped(number, text, "already_archived"))
                     else:
-                        to_archive.append((ip_text, ip.version, db.to_iso(when), db.to_iso(now),
-                                           added_by, line_reason, ""))
+                        stamp = db.to_iso(when)
+                        to_archive.append((ip_text, ip.version, stamp, stamp, added_by, line_reason, ""))
                 elif when is not None:
                     stamp = db.to_iso(when)
-                    dated_active.append((ip_text, ip.version, stamp, stamp, added_by, line_reason, ""))
+                    dated_active.append((ip_text, ip.version, stamp, stamp, added_by, line_reason, "", 0))
                 else:
                     undated.append((ip_text, ip.version, line_reason))
 
@@ -306,10 +315,10 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
             for index, (ip_text, version, line_reason) in enumerate(undated):
                 offset = timedelta(seconds=(index + 1) * days * 86400 / (len(undated) + 1))
                 aging = db.to_iso(now - timedelta(days=days) + offset)
-                spread.append((ip_text, version, stamp_now, aging, added_by, line_reason, ""))
+                spread.append((ip_text, version, stamp_now, aging, added_by, line_reason, "", 0))
 
             new_active = dated_active + spread
-            restored = [row[0] for row in new_active if row[0] in archived]
+            restored = [row[0] for row in new_active if row[0] in recorded]
             report.added_active = len(new_active)
             report.added_archive = len(to_archive)
             report.restored = len(restored)
@@ -320,13 +329,14 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
             if not dry_run:
                 _backup_first(settings, report)
                 with db.transaction(conn):
-                    conn.executemany("DELETE FROM archived_ips WHERE ip=?", [(ip,) for ip in restored])
                     conn.executemany(
-                        "INSERT INTO blocked_ips(ip, version, added_at, aging_from, added_by, reason, incident_id)"
-                        " VALUES (?,?,?,?,?,?,?)", new_active)
+                        "INSERT INTO blocked_ips(ip, version, added_at, aging_from, added_by, reason, incident_id,"
+                        " permanent) VALUES (?,?,?,?,?,?,?,?)", new_active)
+                    for row in new_active:
+                        Furnace.record_ip(conn, row[0], row[1], row[2], row[4], row[5], row[6])
                     conn.executemany(
-                        "INSERT INTO archived_ips(ip, version, added_at, archived_at, added_by, reason, incident_id)"
-                        " VALUES (?,?,?,?,?,?,?)", to_archive)
+                        "INSERT INTO ip_records(ip, version, first_blocked_at, last_blocked_at, added_by, reason,"
+                        " incident_id) VALUES (?,?,?,?,?,?,?)", to_archive)
                     audit_rows = [(stamp_now, "import", "ip", row[0], "added", added_by, "import")
                                   for row in new_active]
                     audit_rows += [(stamp_now, "import", "ip", row[0], "archived", added_by, "import")
@@ -359,6 +369,7 @@ def import_domains(settings: Settings, source: Path, dry_run: bool = False, adde
         try:
             whitelist = {row[0] for row in conn.execute("SELECT domain FROM whitelist_domains")}
             active = {row[0] for row in conn.execute("SELECT domain FROM blocked_domains")}
+            recorded = {row[0] for row in conn.execute("SELECT domain FROM domain_records")}
             rows: list[tuple] = []
             seen: set[str] = set()
             first_data = True
@@ -385,6 +396,7 @@ def import_domains(settings: Settings, source: Path, dry_run: bool = False, adde
                     seen.add(domain)
                     rows.append((domain, stamp, added_by, line_reason, ""))
             report.added_active = len(rows)
+            report.restored = sum(1 for r in rows if r[0] in recorded)
             final_count = len(active) + len(rows)
             if settings.max_domains and final_count > settings.max_domains:
                 raise ImportError_(f"The import would make the list {final_count} domains long. "
@@ -394,12 +406,15 @@ def import_domains(settings: Settings, source: Path, dry_run: bool = False, adde
                 with db.transaction(conn):
                     conn.executemany("INSERT INTO blocked_domains(domain, added_at, added_by, reason, incident_id)"
                                      " VALUES (?,?,?,?,?)", rows)
+                    for r in rows:
+                        Furnace.record_domain(conn, r[0], r[1], r[2], r[3], r[4])
                     conn.executemany("INSERT INTO audit_log(ts, action, object_type, value, result, actor, source)"
                                      " VALUES (?,?,?,?,?,?,?)",
                                      [(stamp, "import", "domain", r[0], "added", added_by, "import") for r in rows])
                     db.audit(conn, "import", "domain", source.name, "done", "", added_by, "", "import",
                              f"added={len(rows)} skipped={len(report.skipped)}", now)
                 edl.write_domains(conn, settings)
+                edl.write_archive_csv(conn, settings)
         finally:
             conn.close()
     _write_report(report, source, report_path, now, settings)

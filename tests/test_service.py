@@ -47,7 +47,9 @@ def test_add_ip_stores_fields_and_publishes(furnace, settings):
     assert found.status == "found"
     assert found.data["entry"] == {"ip": "198.51.100.7", "added_at": "2026-01-10T12:00:00Z",
                                    "added_by": "analyst.one", "reason": "Phishing host",
-                                   "incident_id": "1234"}
+                                   "incident_id": "1234", "permanent": False,
+                                   "expires_at": "2026-02-09T12:00:00Z"}
+    assert found.data["record"]["times_blocked"] == 1
     assert audit_rows(settings, action="add", result="added")[0]["incident_id"] == "1234"
 
 
@@ -79,15 +81,9 @@ def test_test_ranges_blocked_without_setting(settings):
 
 def test_restore_from_archive(furnace, settings):
     furnace.add_ip("203.0.113.50", reason="old", now=T0)
-    conn = db.connect(settings.db_path)
-    with db.transaction(conn):
-        row = conn.execute("SELECT * FROM blocked_ips WHERE ip='203.0.113.50'").fetchone()
-        conn.execute("DELETE FROM blocked_ips WHERE ip='203.0.113.50'")
-        conn.execute("INSERT INTO archived_ips(ip, version, added_at, archived_at, added_by, reason, incident_id)"
-                     " VALUES (?,?,?,?,?,?,?)", (row["ip"], 4, row["added_at"], "2026-02-10T00:00:00Z",
-                                                 "", "old", ""))
-    conn.close()
-    assert furnace.get_ip("203.0.113.50").data["list"] == "archive"
+    furnace.remove_ip("203.0.113.50")
+    old = furnace.get_ip("203.0.113.50")
+    assert old.data["list"] == "archive" and old.data["entry"]["reason"] == "old"
 
     later = T0 + timedelta(days=60)
     r = furnace.add_ip("203.0.113.50", reason="seen again", now=later)
@@ -95,11 +91,12 @@ def test_restore_from_archive(furnace, settings):
     got = furnace.get_ip("203.0.113.50")
     assert got.data["list"] == "active"
     assert got.data["entry"]["added_at"] == db.to_iso(later)
+    assert got.data["record"] == {"first_blocked_at": db.to_iso(T0), "last_blocked_at": db.to_iso(later),
+                                  "times_blocked": 2, "added_by": "", "reason": "old", "incident_id": ""}
     conn = db.connect(settings.db_path)
-    assert conn.execute("SELECT COUNT(*) FROM archived_ips").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM ip_records").fetchone()[0] == 1  # never a duplicate
     conn.close()
     assert blocklist(settings) == ["203.0.113.50"]
-    assert "203.0.113.50" not in settings.archive_csv_path.read_text()
 
 
 def test_remove_ip(furnace, settings):
@@ -107,7 +104,8 @@ def test_remove_ip(furnace, settings):
     assert furnace.remove_ip("198.51.100.8").status == "removed"
     assert blocklist(settings) == []
     assert furnace.remove_ip("198.51.100.8").status == "not_found"
-    assert furnace.get_ip("198.51.100.8").status == "not_found"
+    assert furnace.get_ip("198.51.100.8").data["list"] == "archive"
+    assert furnace.get_ip("198.51.100.9").status == "not_found"
 
 
 def test_ip_limit(furnace, settings):

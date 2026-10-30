@@ -1,4 +1,7 @@
-"""Nightly cleanup: move old IPs from the active list to the archive.
+"""Nightly cleanup: temporary IPs older than ARCHIVE_AFTER_DAYS leave the active list.
+
+Permanent IPs and domains never expire. An IP that leaves the list stays in the
+archive record (written when it was blocked), so nothing else is written here.
 
 Safety stop: if one run would remove more than FURNACE_CLEANUP_MAX_PERCENT
 (default 20) percent of a list with at least FURNACE_CLEANUP_MIN_SIZE
@@ -42,7 +45,7 @@ def run_cleanup(settings: Settings, now: datetime | None = None, dry_run: bool =
         try:
             total = conn.execute("SELECT COUNT(*) FROM blocked_ips").fetchone()[0]
             old = sorted((row[0] for row in conn.execute(
-                "SELECT ip FROM blocked_ips WHERE aging_from < ?", (cutoff,))), key=ip_sort_key)
+                "SELECT ip FROM blocked_ips WHERE permanent = 0 AND aging_from < ?", (cutoff,))), key=ip_sort_key)
             percent = (100.0 * len(old) / total) if total else 0.0
 
             if (total >= settings.cleanup_min_size and percent > settings.cleanup_max_percent
@@ -57,23 +60,20 @@ def run_cleanup(settings: Settings, now: datetime | None = None, dry_run: bool =
                 return CleanupResult(EXIT_SAFETY_STOP, message, old, total)
 
             if dry_run:
-                return CleanupResult(EXIT_OK, f"Dry run: {len(old)} of {total} IPs would move to the archive "
-                                              f"(older than {settings.archive_after_days} days).", old, total)
+                return CleanupResult(EXIT_OK, f"Dry run: {len(old)} of {total} IPs would expire "
+                                              f"(temporary, older than {settings.archive_after_days} days). "
+                                              "They stay in the archive.", old, total)
 
-            stamp = db.to_iso(now)
             with db.transaction(conn):
-                conn.executemany(
-                    "INSERT OR REPLACE INTO archived_ips(ip, version, added_at, archived_at, added_by, reason,"
-                    " incident_id) SELECT ip, version, added_at, ?, added_by, reason, incident_id"
-                    " FROM blocked_ips WHERE ip=?", [(stamp, ip) for ip in old])
                 conn.executemany("DELETE FROM blocked_ips WHERE ip=?", [(ip,) for ip in old])
                 for ip in old:
-                    db.audit(conn, "archive", "ip", ip, "archived", "", "cleanup", "", "cleanup", "", now)
+                    db.audit(conn, "expire", "ip", ip, "expired", "", "cleanup", "", "cleanup", "", now)
                 db.audit(conn, "cleanup", "ip", "", "done", "", "cleanup", "", "cleanup",
-                         f"Moved {len(old)} of {total} IPs to the archive."
+                         f"{len(old)} of {total} IPs expired."
                          + (" Forced." if force else ""), now)
             edl.write_blocklist(conn, settings)
             edl.write_archive_csv(conn, settings)
         finally:
             conn.close()
-    return CleanupResult(EXIT_OK, f"Moved {len(old)} of {total} IPs to the archive.", old, total)
+    return CleanupResult(EXIT_OK, f"{len(old)} of {total} IPs expired and left the list. "
+                                  "They stay in the archive.", old, total)

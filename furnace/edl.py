@@ -58,21 +58,31 @@ def write_domains(conn: sqlite3.Connection, settings: Settings) -> int:
     return len(domains)
 
 
-ARCHIVE_COLUMNS = ["ip", "added_at", "archived_at", "added_by", "reason", "incident_id"]
+ARCHIVE_COLUMNS = ["type", "value", "first_blocked_at", "last_blocked_at", "times_blocked", "blocked_now",
+                   "added_by", "reason", "incident_id"]
+_RECORD_FIELDS = "first_blocked_at, last_blocked_at, times_blocked, {now}, added_by, reason, incident_id"
 
 
 def write_archive_csv(conn: sqlite3.Connection, settings: Settings) -> int:
-    """Storage only. Not an EDL. nginx never serves this folder."""
+    """The archive record (every IP and domain ever blocked) as CSV. Storage only. Not an EDL.
+    nginx never serves this folder. Written by the nightly cleanup, imports and rebuild;
+    'furnace export archive' always gives the current state."""
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
     writer.writerow(ARCHIVE_COLUMNS)
-    count = 0
-    for row in conn.execute(f"SELECT {', '.join(ARCHIVE_COLUMNS)} FROM archived_ips "
-                            "ORDER BY archived_at, ip"):
-        writer.writerow(list(row))
-        count += 1
+    ips = conn.execute("SELECT ip, " + _RECORD_FIELDS.format(
+        now="EXISTS(SELECT 1 FROM blocked_ips b WHERE b.ip = r.ip)") + " FROM ip_records r").fetchall()
+    ips.sort(key=lambda row: ip_sort_key(row[0]))
+    domains = conn.execute("SELECT domain, " + _RECORD_FIELDS.format(
+        now="EXISTS(SELECT 1 FROM blocked_domains b WHERE b.domain = r.domain)")
+        + " FROM domain_records r ORDER BY domain").fetchall()
+    for kind, rows in (("ip", ips), ("domain", domains)):
+        for row in rows:
+            values = list(row)
+            values[4] = "yes" if values[4] else "no"
+            writer.writerow([kind] + values)
     atomic_write(settings.archive_csv_path, buffer.getvalue(), mode=0o640)
-    return count
+    return len(ips) + len(domains)
 
 
 def write_edl_users(conn: sqlite3.Connection, settings: Settings) -> int:

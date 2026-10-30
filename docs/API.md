@@ -11,7 +11,7 @@ The README has the same content in a shorter form ([README section 6](../README.
 4. [Answers and status codes](#4-answers-and-status-codes)
 5. [Reason codes](#5-reason-codes)
 6. [Endpoint summary](#6-endpoint-summary)
-7. [Blocked IPs](#7-blocked-ips)
+7. [Blocked IPs](#7-blocked-ips) (and [the archive](#74-the-archive))
 8. [Blocked domains](#8-blocked-domains)
 9. [Whitelist: IPs and ranges](#9-whitelist-ips-and-ranges)
 10. [Whitelist: domains](#10-whitelist-domains)
@@ -158,6 +158,7 @@ Example of a refusal:
 | `invalid_cidr` | whitelist IPs | Not a valid IP or range. |
 | `range_too_wide` | whitelist IPs | Shorter than /8 (IPv4) or /16 (IPv6). |
 | `field_too_long` | all | `reason`, `added_by`, `removed_by` or `incident_id` is too long, or not text. |
+| `invalid_permanent` | IPs | `permanent` is not `true` or `false`. |
 | `not_leader` | all changes | This server is the follower (HTTP 503). |
 
 ## 6. Endpoint summary
@@ -196,6 +197,7 @@ Body:
 | `reason` | recommended | 500 | Short reason, for example "Phishing C2 server". |
 | `added_by` | recommended | 100 | The person who asked for the block. |
 | `incident_id` | recommended | 100 | The incident or ticket number. Text or number. |
+| `permanent` | no | - | `true`: the IP never expires. `false` or missing: temporary, it leaves the list after `ARCHIVE_AFTER_DAYS`. |
 
 ```bash
 curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips" \
@@ -203,17 +205,32 @@ curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips" \
   -d '{"ip":"203.0.113.45","reason":"Phishing C2 server","added_by":"analyst.one","incident_id":"4521"}'
 ```
 
+A permanent block:
+
+```bash
+curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"ip":"203.0.113.46","reason":"Known C2 server","added_by":"analyst.one","permanent":true}'
+```
+
 `201` (new):
 
 ```json
-{"status": "added", "message": "The IP is now blocked.",
+{"status": "added", "message": "The IP is now blocked for 30 days.",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
-           "reason": "Phishing C2 server", "incident_id": "4521"}}
+           "reason": "Phishing C2 server", "incident_id": "4521",
+           "permanent": false, "expires_at": "2026-11-25T09:15:02Z"},
+ "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "last_blocked_at": "2026-10-26T09:15:02Z",
+            "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server", "incident_id": "4521"}}
 ```
 
-If the IP was in the archive, it comes back with a new date and `"restored_from_archive": true`.
+- `entry.permanent` is `true` or `false`. `entry.expires_at` is the expiry of a temporary IP, `null` when permanent.
+  The real removal happens in the nightly cleanup after that moment.
+- `record` is the archive record ([section 7.4](#74-the-archive)).
+- If the IP was blocked before (it is in the archive), it is blocked again with a new date,
+  `"restored_from_archive": true`, and `record.times_blocked` goes up by one.
 
-`200` (already blocked; the old date is kept):
+`200` (already blocked; nothing changes, also not `permanent`, and the old date is kept):
 
 ```json
 {"status": "already_exists",
@@ -221,9 +238,11 @@ If the IP was in the archive, it comes back with a new date and `"restored_from_
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-20T08:00:00Z", "...": "..."}}
 ```
 
-Other answers: `422` `rejected` ([section 5](#5-reason-codes)), `503` `not_leader` or `busy`.
+Other answers: `422` `rejected` ([section 5](#5-reason-codes), for example `invalid_permanent`), `503` `not_leader`
+or `busy`.
 
-Blocked IPs move to the archive after `ARCHIVE_AFTER_DAYS` (nightly cleanup). They then leave the list file.
+Temporary IPs leave the list after `ARCHIVE_AFTER_DAYS` (nightly cleanup). Permanent IPs stay until an unblock.
+Both stay in the archive.
 
 ### 7.2 Look up an IP
 
@@ -238,13 +257,29 @@ curl --cacert "$CA" "$FURNACE/api/v1/ips/203.0.113.45" -H "Authorization: Bearer
 ```json
 {"status": "found", "message": "This IP is blocked.", "list": "active",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
-           "reason": "Phishing C2 server", "incident_id": "4521"},
+           "reason": "Phishing C2 server", "incident_id": "4521",
+           "permanent": false, "expires_at": "2026-11-25T09:15:02Z"},
+ "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "last_blocked_at": "2026-10-26T09:15:02Z",
+            "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server", "incident_id": "4521"},
  "whitelisted_by": null}
 ```
 
-- `list` is `active` (blocked now) or `archive` (was blocked, expired; `entry` then also has `archived_at`).
+An IP that was blocked before, but not now:
+
+```json
+{"status": "found", "message": "This IP is in the archive: it was blocked before. It is not blocked now.",
+ "list": "archive",
+ "entry": {"ip": "203.0.113.45", "first_blocked_at": "2026-10-26T09:15:02Z", "last_blocked_at": "...",
+           "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server", "incident_id": "4521"},
+ "record": {"...": "..."}, "whitelisted_by": null}
+```
+
+- `list` is `active` (blocked now) or `archive` (blocked before, not now: expired, unblocked or whitelisted).
+  For `archive`, `entry` is the archive record with the IP.
+- `record` is the archive record ([section 7.4](#74-the-archive)).
+- `404` `not_found` means it was never blocked.
 - `whitelisted_by` is the whitelist range that covers the IP, or `null`.
-- `404` `not_found` means it is in neither list. `whitelisted_by` is still included.
+- `whitelisted_by` is still included with `404`.
 
 Look-ups work on the follower too.
 
@@ -267,9 +302,34 @@ curl --cacert "$CA" -X DELETE "$FURNACE/api/v1/ips/203.0.113.45?removed_by=analy
 
 `404` `not_found`: the IP is not in the active blocklist.
 
+The IP leaves the list file. It stays in the archive.
+
+### 7.4 The archive
+
+The archive is a record of every different IP and domain that was ever blocked:
+
+- One row per IP or domain. Never a duplicate, never removed.
+- Written when it is blocked for the first time, at the same time as the list.
+- It keeps the details of the first block (`added_by`, `reason`, `incident_id`), `first_blocked_at`,
+  `last_blocked_at` and `times_blocked`.
+- Expiry, unblock and the whitelist remove an entry only from the list, never from the archive.
+- Blocked again later: back in the list with a new date, `last_blocked_at` is new and `times_blocked` goes up by one.
+
+Fields of `record`:
+
+| Field | What |
+|---|---|
+| `first_blocked_at` | When it was blocked for the first time. |
+| `last_blocked_at` | When it was blocked the last time. |
+| `times_blocked` | How many times it went into the list. |
+| `added_by`, `reason`, `incident_id` | The details of the first block. |
+
+The archive is not served as a file. The admin gets it with `sudo furnace export archive`.
+
 ## 8. Blocked domains
 
-Same as IPs, with the field `domain`. Domains are stored in lower case. They never expire.
+Same as IPs, with the field `domain`. Domains are stored in lower case. They never expire, so there is no
+`permanent` field. Domains get the archive record too: a look-up answers `list` `active` or `archive`, with `record`.
 Only exact domains are accepted: no wildcards, no URLs, no IPs.
 
 ### 8.1 Block a domain
@@ -458,7 +518,7 @@ It is for keepalived and the admins.
 `200`:
 
 ```json
-{"status": "ok", "version": "0.6.0", "role": "leader", "ips": 1234, "domains": 56}
+{"status": "ok", "version": "0.7.0", "role": "leader", "ips": 1234, "domains": 56}
 ```
 
 `503` `error` when the database or the list files cannot be read.

@@ -102,7 +102,7 @@ You need one file:
 - **Ubuntu and Debian:** `furnace_<version>_all.deb`, installed with `sudo apt install ./FILE`.
 - **Red Hat family, Fedora, Amazon Linux:** `furnace-<version>-1.noarch.rpm`, installed with `sudo dnf install ./FILE`.
 
-The examples below use version 0.6.0 and the `.deb`. With the `.rpm`, use `dnf` where they say `apt`.
+The examples below use version 0.7.0 and the `.deb`. With the `.rpm`, use `dnf` where they say `apt`.
 Everything else (setup, questions, the `furnace` command) is the same on every system.
 
 ### 3.1 Get the package
@@ -110,19 +110,19 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
 - **Download it** from the GitHub releases page: <https://github.com/MahammadRahimov/furnace/releases>.
   The repository is private, so log in to GitHub first. Or, with the GitHub command line tool:
   ```bash
-  gh release download v0.6.0 -R MahammadRahimov/furnace -p '*.deb'    # or -p '*.rpm'
+  gh release download v0.7.0 -R MahammadRahimov/furnace -p '*.deb'    # or -p '*.rpm'
   ```
 - **Or build it yourself:** `packaging/build-deb.sh` on Ubuntu, Debian or WSL, or `packaging/build-rpm.sh` on a
   Red Hat family system (needs `rpm-build`). The file lands in `dist/`.
   The build needs `curl` and `python3`. The first build downloads the bundled libraries once (into
   `build/vendor-cache/`) and stops if one does not match its SHA-256 hash.
-- Copy it to both servers, for example: `scp furnace_0.6.0_all.deb you@SERVER_IP:~/`
+- Copy it to both servers, for example: `scp furnace_0.7.0_all.deb you@SERVER_IP:~/`
 
 ### 3.2 Leader
 
 1. Install the package:
    ```bash
-   sudo apt install ./furnace_0.6.0_all.deb
+   sudo apt install ./furnace_0.7.0_all.deb
    ```
    apt also installs what Furnace needs from the system: nginx, keepalived, Python and a few tools.
    Nothing starts yet.
@@ -143,7 +143,7 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    Who may call the API [any]:
    Who may download the lists [any]:
    Most entries per list [50000]:
-   Days an IP stays blocked before it moves to the archive [30]:
+   Days an IP stays blocked (permanent IPs never expire) [30]:
    VRRP router ID (1-255) [51]:
    SSH allowed from [any]:
    Let Furnace set up this server's own firewall (ufw)? [yes]:      (firewalld on the Red Hat family)
@@ -184,7 +184,7 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    ```
 2. On the follower, install the package and run setup:
    ```bash
-   sudo apt install ./furnace_0.6.0_all.deb
+   sudo apt install ./furnace_0.7.0_all.deb
    sudo furnace setup
    ```
 3. Answer `follower`. Setup finds the bundle in your home folder, in `/root` or in `/tmp`, or asks where it is.
@@ -249,7 +249,7 @@ Each question saves one setting in `/etc/furnace/setup.conf`. The same names are
 | Who may call the API | `API_ALLOW_FROM` | `any` | `any` = every address (a token is always needed). Or IPs and ranges, comma-separated, for example a SOAR server and its engines. |
 | Who may download the lists | `LISTS_ALLOW_FROM` | `any` | `any` = every address (the list login is always needed). Or the list readers' IPs; for a firewall HA pair, list both. |
 | Most entries per list | `MAX_IPS`, `MAX_DOMAINS` | `50000` | The list reader's limit per list. Adds beyond it are refused. 0 = no limit. The question sets both; a settings file can set them apart. |
-| Days before the archive | `ARCHIVE_AFTER_DAYS` | `30` | Days an IP stays active before the nightly job archives it. |
+| Days an IP stays blocked | `ARCHIVE_AFTER_DAYS` | `30` | Days a temporary IP stays in the list before the nightly job removes it. Permanent IPs and domains never expire. |
 | VRRP router ID | `VRRP_ROUTER_ID` | `51` | 1-255. Same on both servers. Must be unique in the network segment. |
 | SSH allowed from | `SSH_ALLOW_FROM` | `any` | Who may use SSH. `any` or a list of IPs. The other server is always allowed. |
 | Set up the host firewall? | `HOST_FIREWALL` | `ufw` or `firewalld` | The tool on this server (`ufw` on the Debian family, `firewalld` on the Red Hat family) = configure it. `none` = leave it alone. |
@@ -421,6 +421,7 @@ Reason codes for `422` (`reason_code`):
 | `invalid_cidr` | Whitelist: not a valid IP or range. |
 | `range_too_wide` | Whitelist: shorter than /8 (IPv4) or /16 (IPv6). |
 | `field_too_long` | `reason`, `added_by` or `incident_id` is too long, or not text. |
+| `invalid_permanent` | `permanent` is not `true` or `false`. |
 
 How the caller should read an answer:
 
@@ -442,12 +443,18 @@ curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips" \
   -d '{"ip":"203.0.113.45","reason":"Phishing C2 server","added_by":"analyst.one","incident_id":"4521"}'
 ```
 
+Optional: `"permanent": true` blocks the IP for ever. Without it (or with `false`) the IP is temporary: it leaves
+the list after `ARCHIVE_AFTER_DAYS`.
+
 Answer `201`:
 
 ```json
-{"status": "added", "message": "The IP is now blocked.",
+{"status": "added", "message": "The IP is now blocked for 30 days.",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
-           "reason": "Phishing C2 server", "incident_id": "4521"}}
+           "reason": "Phishing C2 server", "incident_id": "4521",
+           "permanent": false, "expires_at": "2026-11-25T09:15:02Z"},
+ "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "last_blocked_at": "2026-10-26T09:15:02Z",
+            "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server", "incident_id": "4521"}}
 ```
 
 Answer `200` when it was already there:
@@ -458,7 +465,10 @@ Answer `200` when it was already there:
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-20T08:00:00Z", "...": "..."}}
 ```
 
-If the IP was in the archive, it comes back with a new date: `201`, `"restored_from_archive": true`.
+Already in the list: nothing changes, also not `permanent`. The first block decides.
+
+If the IP was blocked before (it is in the archive), it is blocked again with a new date: `201`,
+`"restored_from_archive": true`, and the archive record counts one more block.
 
 Answer `422`:
 
@@ -489,11 +499,14 @@ curl --cacert "$CA" "$FURNACE/api/v1/ips/203.0.113.45" -H "Authorization: Bearer
 ```json
 {"status": "found", "message": "This IP is blocked.", "list": "active",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
-           "reason": "Phishing C2 server", "incident_id": "4521"},
+           "reason": "Phishing C2 server", "incident_id": "4521", "permanent": false,
+           "expires_at": "2026-11-25T09:15:02Z"},
+ "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "...": "..."},
  "whitelisted_by": null}
 ```
 
-`list` is `active` (blocked now) or `archive` (was blocked, expired). `404` means it is in neither.
+`list` is `active` (blocked now) or `archive` (blocked before, not now). `404` means it was never blocked.
+`record` is the archive record (first and last block, times blocked). Domains answer the same way.
 `whitelisted_by` shows the whitelist entry that covers the IP, if any.
 
 ```bash
@@ -514,6 +527,7 @@ curl --cacert "$CA" -X DELETE "$FURNACE/api/v1/domains/bad.example.com?removed_b
 ```
 
 Domains are stored in lower case. Domains never expire. They stay until someone removes them.
+Domains have no `permanent` field. Like IPs, every domain gets an archive record.
 
 ### 6.8 Whitelist: add, remove, list
 
@@ -595,7 +609,7 @@ The certificate is valid for 10 years.
 IPs). Callers and list readers cannot reach it. It is for keepalived and the admins.
 
 ```json
-{"status": "ok", "version": "0.6.0", "role": "leader", "ips": 1234, "domains": 56}
+{"status": "ok", "version": "0.7.0", "role": "leader", "ips": 1234, "domains": 56}
 ```
 
 ---
@@ -614,9 +628,10 @@ sudo furnace status                     # role, shared IP, services and counts; 
 sudo furnace stats                       # counts, dates, sizes, role
 sudo furnace rebuild                     # rebuild blocklist.txt, domains.txt and archive.csv from the database
 sudo furnace backup [--keep N]           # SQLite backup, keeps the newest N (default 14)
-sudo furnace cleanup --dry-run           # what the nightly job would archive
+sudo furnace cleanup --dry-run           # which temporary IPs the nightly job would remove
 sudo furnace cleanup [--force]           # run it now (--force skips the safety stop)
-sudo furnace export ips -o /tmp/ips.csv  # also: archive, domains, whitelist-ips, whitelist-domains, audit
+sudo furnace export ips -o /tmp/ips.csv  # also: archive (every IP and domain ever blocked), domains,
+                                        # whitelist-ips, whitelist-domains, audit
 sudo furnace check-config                # show the settings (no secrets)
 ```
 
@@ -695,10 +710,12 @@ sudo furnace import-ips /tmp/old-list.csv
     `25/05/2026`), Furnace uses that order. Otherwise the line is skipped as `ambiguous_date`.
   - Or give the format: `--date-format "%d/%m/%Y"`.
 - Real dates from the file are kept.
-- IPs with a date older than `ARCHIVE_AFTER_DAYS` go straight to the archive.
+- IPs with a date older than `ARCHIVE_AFTER_DAYS` go only into the archive (they were blocked, not now).
   With `--old-ips fresh` they go into the active list with a new date instead. Their expiry is spread out, like
   undated IPs, so they do not all expire on the same night.
 - IPs with no date get their expiry spread evenly over the next `ARCHIVE_AFTER_DAYS` days.
+- `--permanent` blocks every IP of the file permanently. Dates are kept, nothing is too old.
+- Every added IP gets an archive record. An IP already in the archive counts one more block.
 - Skipped lines (invalid, private, whitelisted, duplicate, already active, bad date) are written with their reason
   to a report file in `/var/lib/furnace/reports/` (or `--report FILE`).
 - Every import takes a database backup first and is all or nothing.
@@ -721,14 +738,17 @@ sudo furnace import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
 - The documentation ranges 192.0.2.0/24, 198.51.100.0/24 and 203.0.113.0/24 are refused unless
   `FURNACE_ALLOW_TEST_RANGES=true` (tests and the setup self-test only).
 - Refused when on the whitelist.
-- Already active: nothing changes, the old date is kept, and the answer says so.
-- In the archive and added again: it moves back to the active list with a new date. An IP is never in both.
-- Stored for each IP: date added, who added it, reason, incident number.
+- Temporary (default): leaves the list after `ARCHIVE_AFTER_DAYS`. Permanent (`"permanent": true`): never expires,
+  only an unblock removes it.
+- Already active: nothing changes (also not temporary or permanent), the old date is kept, and the answer says so.
+- In the archive and added again: back in the list with a new date.
+- Stored for each IP: date added, who added it, reason, incident number, temporary or permanent.
+- `furnace status` warns when permanent IPs fill half of `MAX_IPS`, because they never leave the list.
 
 **Domains**
 - Exact domains only. Refused: wildcards, URLs, IPs, invalid names. Stored in lower case.
   Non-ASCII names are stored as punycode (`xn--...`).
-- No expiry and no archive.
+- No expiry: a domain stays until someone removes it.
 - Refused when on the domain whitelist. The domain whitelist is exact: whitelisting `example.com` does not
   whitelist `www.example.com`.
 
@@ -741,14 +761,26 @@ sudo furnace import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
 
 ## 9. The nightly cleanup and the archive
 
+Furnace keeps two lists:
+
+- **The EDL lists** (`blocklist.txt`, `domains.txt`): what is blocked now.
+- **The archive**: a record of every different IP and domain that was ever blocked. One row each, never a
+  duplicate, never removed. It is written when an IP or domain is blocked for the first time. The row keeps the
+  first details (date, who, reason, incident), the last block date and how many times it was blocked.
+  Expiry, unblock and the whitelist remove an entry only from the EDL list, never from the archive.
+
+The nightly cleanup:
+
 - `furnace-cleanup.timer` runs every night at 02:30, only on the server that owns the shared IP.
-- It moves IPs older than `ARCHIVE_AFTER_DAYS` to the archive table in one transaction, rebuilds `blocklist.txt`,
-  and rewrites `/var/lib/furnace/archive/archive.csv`.
+- It removes temporary IPs older than `ARCHIVE_AFTER_DAYS` from the list in one transaction and rebuilds
+  `blocklist.txt`. Permanent IPs and domains are never removed.
+- It rewrites `/var/lib/furnace/archive/archive.csv` (IPs and domains, with `blocked_now` yes or no). Imports and
+  `furnace rebuild` write it too. `sudo furnace export archive` always gives the current state.
 - The archive CSV is only storage. It is not an EDL. nginx never serves it.
 - **Safety stop:** if one run would remove more than 20 percent of the list, and the list has at least 100 IPs,
   the job changes nothing, writes an audit entry and exits with code 3. systemd marks the run as failed.
   Check the dates. If the removal is correct, run `sudo furnace cleanup --force`.
-- `sudo furnace cleanup --dry-run` shows what would move.
+- `sudo furnace cleanup --dry-run` shows which IPs would be removed.
 - Logs: `journalctl -u furnace-cleanup`.
 
 ## 10. Two servers: leader and follower
@@ -805,7 +837,7 @@ shared IP as the leader, and then starts the service again. Afterwards the other
 | `/var/lib/furnace/furnace.db` | The database (master record), with the API tokens and list logins as hashes. |
 | `/var/lib/furnace/lockout.db` | Addresses locked after wrong tokens (this server only). |
 | `/var/lib/furnace-auth/edl-users` | List logins for nginx (name and hash), written from the database. Never served. |
-| `/var/lib/furnace/archive/archive.csv` | Archive storage. Never served. |
+| `/var/lib/furnace/archive/archive.csv` | The archive record of IPs and domains as CSV. Never served. |
 | `/var/lib/furnace/backups/` | Database backups. |
 | `/var/lib/furnace/reports/` | Import reports. |
 | `/var/lib/furnace-edl/` | `blocklist.txt` and `domains.txt` (served by nginx). |
@@ -823,13 +855,18 @@ Logs: `journalctl -u furnace-api`, `/var/log/nginx/furnace-access.log`.
 **Upgrade:** install the new package. Do the follower first, then the leader.
 
 ```bash
-sudo apt install ./furnace_0.6.0_all.deb
+sudo apt install ./furnace_0.7.0_all.deb
 ```
 
 The package runs `furnace setup --upgrade` by itself. It uses the saved answers and asks no questions.
 Data, tokens and the certificate are kept. The API is reloaded without downtime, and keepalived is restarted only
 if its settings changed, so an upgrade does not move the shared IP. If you change answers that affect keepalived
 (for example the VRRP router ID), the restart can move the shared IP to the other server. That is safe.
+
+**From 0.6 to 0.7:** nothing to do. The database gets the archive record: every IP and domain in the lists, and
+every IP of the old archive, gets a record row. IPs in the list stay temporary with their dates. Domains stay as they
+are. Upgrade both servers the same day: a follower that still runs 0.6 and becomes the leader would let permanent
+IPs expire.
 
 **From 0.4 to 0.5:** nothing to do.
 
@@ -896,7 +933,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest -q
 ```
 
-They cover validation, the duplicate rule, restore from the archive, the cleanup with fake dates and the
+They cover validation, the duplicate rule, permanent IPs, the archive record of IPs and domains, the upgrade
+from 0.6, restore from the archive, the cleanup with fake dates and the
 `ARCHIVE_AFTER_DAYS` setting, the safety stop, the whitelist, imports (dated and undated, dry-run, formats), the
 API (token permissions and expiry, rotate, edit and remove, last use, the lockout, the setup self-test token,
 errors), list logins (checked with openssl), the token migration from 0.2 and from 0.5, a snapshot from an older

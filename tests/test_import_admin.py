@@ -43,11 +43,12 @@ def test_dated_import_uses_real_dates(furnace, settings, tmp_path):
                 "198.51.100.3\t1779926400\ttab and unix time\n"
                 "198.51.100.4 2026-05-25 08:30:00 space separated words\n")
     r = import_ips(settings, src, now=NOW, report_path=tmp_path / "r.txt")
-    active, archive = rows(settings, "blocked_ips"), rows(settings, "archived_ips")
+    active, archive = rows(settings, "blocked_ips"), rows(settings, "ip_records")
     assert active["198.51.100.1"]["added_at"] == "2026-05-20T00:00:00Z"
     assert active["198.51.100.1"]["reason"] == "phishing"
-    assert "198.51.100.2" in archive  # older than 30 days -> archive
-    assert archive["198.51.100.2"]["added_at"] == "2026-04-01T00:00:00Z"
+    assert "198.51.100.2" in archive and "198.51.100.2" not in active  # older than 30 days -> archive only
+    assert archive["198.51.100.2"]["first_blocked_at"] == "2026-04-01T00:00:00Z"
+    assert sorted(archive) == ["198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4"]
     assert active["198.51.100.3"]["added_at"] == "2026-05-28T00:00:00Z"
     assert active["198.51.100.4"]["added_at"] == "2026-05-25T08:30:00Z"
     assert active["198.51.100.4"]["reason"] == "space separated words"
@@ -166,11 +167,13 @@ def test_archived_ip_is_restored_by_import(furnace, settings, tmp_path):
     furnace.add_ip("198.51.100.7", now=NOW - timedelta(days=40))
     from furnace.cleanup import run_cleanup
     run_cleanup(settings, now=NOW)
-    assert "198.51.100.7" in rows(settings, "archived_ips")
-    import_ips(settings, write(tmp_path, "a.txt", "198.51.100.7,2026-05-30\n"), now=NOW,
-               report_path=tmp_path / "r.txt")
+    assert "198.51.100.7" not in rows(settings, "blocked_ips")
+    r = import_ips(settings, write(tmp_path, "a.txt", "198.51.100.7,2026-05-30\n"), now=NOW,
+                   report_path=tmp_path / "r.txt")
+    assert r.restored == 1
     assert "198.51.100.7" in rows(settings, "blocked_ips")
-    assert "198.51.100.7" not in rows(settings, "archived_ips")
+    record = rows(settings, "ip_records")["198.51.100.7"]
+    assert (record["times_blocked"], record["last_blocked_at"]) == (2, "2026-05-30T00:00:00Z")
 
 
 def test_30000_lines_in_seconds(furnace, settings, tmp_path, monkeypatch):

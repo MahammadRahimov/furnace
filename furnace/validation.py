@@ -43,6 +43,7 @@ REASON_TEXT = {
     "invalid_cidr": "This is not a valid IP address or range.",
     "range_too_wide": "This range is too wide. The limit is /8 for IPv4 and /16 for IPv6.",
     "field_too_long": "A field is too long.",
+    "invalid_permanent": "The field permanent must be true or false.",
     "not_leader": "This server is the standby. Send changes to the shared IP.",
 }
 

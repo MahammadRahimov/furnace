@@ -244,6 +244,18 @@ check "the firewall sees the IP in blocklist.txt" grep -qx "$TEST_IP" <<< "$(edl
 r="$(api POST /api/v1/domains '{"domain":"bad.example.com","added_by":"tester"}')"
 check "XSOAR adds a domain (201)" grep -q ' 201$' <<< "$r"
 check "the firewall sees the domain in domains.txt" grep -qx "bad.example.com" <<< "$(edl domains.txt)"
+PERM_IP=203.0.113.77
+r="$(api POST /api/v1/ips "{\"ip\":\"$PERM_IP\",\"reason\":\"known C2\",\"permanent\":true}")"
+check "XSOAR adds a permanent IP (201, permanent)" grep -Eq '"permanent": ?true.* 201$' <<< "$r"
+r="$(api POST /api/v1/ips "{\"ip\":\"$PERM_IP\",\"permanent\":\"yes\"}")"
+check "permanent must be true or false (422)" grep -q 'invalid_permanent.* 422$' <<< "$r"
+check "furnace stats counts the permanent IP" on "$LEADER" "furnace stats | grep -Eq '^permanent ips +1$'"
+r="$(api DELETE "/api/v1/ips/$PERM_IP")"
+check "XSOAR unblocks the permanent IP (200)" grep -q ' 200$' <<< "$r"
+check "the unblocked IP left blocklist.txt" bash -c "! grep -qx '$PERM_IP' <<< \"\$1\"" _ "$(edl blocklist.txt)"
+r="$(api GET "/api/v1/ips/$PERM_IP")"
+check "the unblocked IP is still in the archive (200, archive)" grep -Eq '"list": ?"archive".* 200$' <<< "$r"
+check "furnace export archive lists it" on "$LEADER" "furnace export archive | grep -q '^ip,$PERM_IP,'"
 check "the firewall may not use the API (403)" [ "$(code_from "$FW" "https://$SHARED_IP/api/v1/ips/$TEST_IP")" = "403" ]
 check "XSOAR may not read the EDL (403)" [ "$(code_from "$XSOAR" "https://$SHARED_IP/edl/blocklist.txt")" = "403" ]
 check "the archive CSV is not served" [ "$(code_from "$FW" "https://$SHARED_IP/edl/archive.csv")" = "404" ]
@@ -298,6 +310,8 @@ for _ in $(seq 1 90); do
 done
 check "the follower has the IP in its blocklist.txt" [ "$ok" = 1 ]
 check "the follower has the domain" on "$FOLLOWER" "grep -qx bad.example.com /var/lib/furnace-edl/domains.txt"
+check "the follower has the archive record" \
+    on "$FOLLOWER" "[ \"\$(sqlite3 /var/lib/furnace/furnace.db \"SELECT COUNT(*) FROM ip_records WHERE ip='$PERM_IP'\")\" = 1 ]"
 r="$(docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"ip":"198.51.100.78"}' -w ' %{http_code}' "https://$FOLLOWER_IP/api/v1/ips" | tr -d '\n')"
 check "the follower refuses changes (503 not_leader)" grep -q 'not_leader.* 503$' <<< "$r"

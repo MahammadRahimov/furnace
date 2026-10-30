@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS meta (
 
 -- Active IP blocklist. aging_from is the date the cleanup uses.
 -- It equals added_at, except for undated imports, where it is spread out.
+-- permanent = 1: the cleanup never removes the IP. Only an unblock does.
 CREATE TABLE IF NOT EXISTS blocked_ips (
     ip          TEXT PRIMARY KEY,
     version     INTEGER NOT NULL,
@@ -29,10 +30,38 @@ CREATE TABLE IF NOT EXISTS blocked_ips (
     aging_from  TEXT NOT NULL,
     added_by    TEXT NOT NULL DEFAULT '',
     reason      TEXT NOT NULL DEFAULT '',
-    incident_id TEXT NOT NULL DEFAULT ''
+    incident_id TEXT NOT NULL DEFAULT '',
+    permanent   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_blocked_ips_aging ON blocked_ips(aging_from);
 
+-- The archive: a record of every different IP and domain ever blocked. One row each,
+-- written when it is first blocked, never removed. added_by, reason and incident_id are
+-- the details of the first block. Blocked now = also in blocked_ips / blocked_domains.
+CREATE TABLE IF NOT EXISTS ip_records (
+    ip               TEXT PRIMARY KEY,
+    version          INTEGER NOT NULL,
+    first_blocked_at TEXT NOT NULL,
+    last_blocked_at  TEXT NOT NULL,
+    times_blocked    INTEGER NOT NULL DEFAULT 1,
+    added_by         TEXT NOT NULL DEFAULT '',
+    reason           TEXT NOT NULL DEFAULT '',
+    incident_id      TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS domain_records (
+    domain           TEXT PRIMARY KEY,
+    first_blocked_at TEXT NOT NULL,
+    last_blocked_at  TEXT NOT NULL,
+    times_blocked    INTEGER NOT NULL DEFAULT 1,
+    added_by         TEXT NOT NULL DEFAULT '',
+    reason           TEXT NOT NULL DEFAULT '',
+    incident_id      TEXT NOT NULL DEFAULT ''
+);
+
+-- The archive of version 0.6 and older (expired IPs only). Version 0.7 moves its rows
+-- to ip_records and leaves it empty. It stays, so a follower that still runs 0.6 accepts
+-- the snapshots of a 0.7 leader during an upgrade.
 CREATE TABLE IF NOT EXISTS archived_ips (
     ip          TEXT PRIMARY KEY,
     version     INTEGER NOT NULL,
@@ -149,6 +178,7 @@ ADDED_COLUMNS = (
     ("api_tokens", "expires_days", "INTEGER NOT NULL DEFAULT 0"),
     ("api_tokens", "expires_at", "TEXT NOT NULL DEFAULT ''"),
     ("api_tokens", "last_used_at", "TEXT NOT NULL DEFAULT ''"),
+    ("blocked_ips", "permanent", "INTEGER NOT NULL DEFAULT 0"),
 )
 SCOPE_PERMISSIONS = {  # version 0.5 scopes -> permissions
     "block": "blocklist:read,blocklist:write",
@@ -160,7 +190,7 @@ SCOPE_PERMISSIONS = {  # version 0.5 scopes -> permissions
 def migrate(conn: sqlite3.Connection) -> None:
     """Bring a database from an older version (or a snapshot from an older leader) up to date.
 
-    Old tokens keep their rights and never expire.
+    Old tokens keep their rights and never expire. Old IPs stay temporary with their dates.
     """
     for table, column, definition in ADDED_COLUMNS:
         have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -169,7 +199,25 @@ def migrate(conn: sqlite3.Connection) -> None:
     for scope, permissions in SCOPE_PERMISSIONS.items():
         conn.execute("UPDATE api_tokens SET permissions = ? WHERE permissions = '' AND scope = ?",
                      (permissions, scope))
+    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    if row is None or int(row[0]) < 4:
+        fill_records(conn)
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+
+
+def fill_records(conn: sqlite3.Connection) -> None:
+    """Version 0.7: every blocked IP and domain and every old archived IP gets a record row.
+    Rows that exist already are kept. The old archive table is emptied."""
+    conn.execute("INSERT OR IGNORE INTO ip_records(ip, version, first_blocked_at, last_blocked_at, added_by,"
+                 " reason, incident_id) SELECT ip, version, added_at, added_at, added_by, reason, incident_id"
+                 " FROM blocked_ips")
+    conn.execute("INSERT OR IGNORE INTO ip_records(ip, version, first_blocked_at, last_blocked_at, added_by,"
+                 " reason, incident_id) SELECT ip, version, added_at, added_at, added_by, reason, incident_id"
+                 " FROM archived_ips")
+    conn.execute("DELETE FROM archived_ips")
+    conn.execute("INSERT OR IGNORE INTO domain_records(domain, first_blocked_at, last_blocked_at, added_by,"
+                 " reason, incident_id) SELECT domain, added_at, added_at, added_by, reason, incident_id"
+                 " FROM blocked_domains")
 
 
 @contextmanager

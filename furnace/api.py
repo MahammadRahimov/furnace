@@ -132,7 +132,7 @@ def create_app(settings: Settings | None = None) -> Flask:
     def add_ip():
         d = body()
         return _reply(furnace.add_ip(d.get("ip"), d.get("reason"), d.get("added_by"),
-                                     d.get("incident_id"), source=g.source))
+                                     d.get("incident_id"), source=g.source, permanent=d.get("permanent")))
 
     @app.get("/api/v1/ips/<ip>")
     @require("blocklist", "read")

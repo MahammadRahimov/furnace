@@ -67,7 +67,9 @@ def test_add_ip_flow(client, settings):
     r = client.delete("/api/v1/ips/198.51.100.20?removed_by=analyst.two", headers=BLOCK)
     assert r.status_code == 200 and r.get_json()["status"] == "removed"
     assert client.delete("/api/v1/ips/198.51.100.20", headers=BLOCK).status_code == 404
-    assert client.get("/api/v1/ips/198.51.100.20", headers=BLOCK).status_code == 404
+    r = client.get("/api/v1/ips/198.51.100.20", headers=BLOCK)  # unblocked, still in the archive
+    assert r.status_code == 200 and r.get_json()["list"] == "archive"
+    assert client.get("/api/v1/ips/198.51.100.21", headers=BLOCK).status_code == 404
 
 
 def test_rejections_are_422_with_code(client):

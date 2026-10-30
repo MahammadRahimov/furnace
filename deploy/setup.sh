@@ -467,7 +467,7 @@ ask_all() {
     note "The firewall's EDL limit. Adds beyond it are refused. 0 = no limit. Used for both lists."
     ask MAX_IPS "Most entries per list" "${CFG_MAX_IPS:-50000}"
     CFG_MAX_DOMAINS="$CFG_MAX_IPS"
-    ask ARCHIVE_AFTER_DAYS "Days an IP stays blocked before it moves to the archive" "${CFG_ARCHIVE_AFTER_DAYS:-30}"
+    ask ARCHIVE_AFTER_DAYS "Days an IP stays blocked (permanent IPs never expire)" "${CFG_ARCHIVE_AFTER_DAYS:-30}"
     note "VRRP router ID: the same on both servers, unique in this network. Keep 51 if you are not sure."
     ask VRRP_ROUTER_ID "VRRP router ID (1-255)" "${CFG_VRRP_ROUTER_ID:-51}"
     note "Who may log in with SSH: 'any', or IPs separated by commas. The other server is always allowed."
@@ -538,7 +538,7 @@ show_settings() {
     printf '    %-22s %s\n' "Role" "$CFG_ROLE" "Network card" "$CFG_INTERFACE" "This server" "$CFG_THIS_IP" \
         "Other server" "$CFG_PEER_IP" "Shared IP" "$CFG_SHARED_IP/$CFG_SHARED_IP_PREFIX" "API from" "$CFG_API_ALLOW_FROM" \
         "Lists from" "$CFG_LISTS_ALLOW_FROM" "Most IPs / domains" "$CFG_MAX_IPS / $CFG_MAX_DOMAINS" \
-        "Archive after" "$CFG_ARCHIVE_AFTER_DAYS days" "VRRP router ID" "$CFG_VRRP_ROUTER_ID" \
+        "IPs expire after" "$CFG_ARCHIVE_AFTER_DAYS days" "VRRP router ID" "$CFG_VRRP_ROUTER_ID" \
         "SSH allowed from" "$CFG_SSH_ALLOW_FROM" "Host firewall" "$CFG_HOST_FIREWALL" "HTTPS" "$CFG_USE_HTTPS"
     if needs_first_token; then
         local expiry="never"

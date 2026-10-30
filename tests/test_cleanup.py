@@ -24,10 +24,12 @@ def add_aged(furnace, ip, days_old):
 
 
 def counts(settings):
+    """(IPs in the list, IPs only in the archive)."""
     conn = db.connect(settings.db_path)
     try:
         return (conn.execute("SELECT COUNT(*) FROM blocked_ips").fetchone()[0],
-                conn.execute("SELECT COUNT(*) FROM archived_ips").fetchone()[0])
+                conn.execute("SELECT COUNT(*) FROM ip_records WHERE ip NOT IN (SELECT ip FROM blocked_ips)")
+                .fetchone()[0])
     finally:
         conn.close()
 
@@ -42,9 +44,10 @@ def test_moves_only_old_ips(furnace, settings):
     assert settings.blocklist_path.read_text() == "198.51.100.2\n"
     assert counts(settings) == (1, 2)
     rows = list(csv.DictReader(settings.archive_csv_path.open()))
-    assert [r["ip"] for r in rows] == ["198.51.100.1", "198.51.100.3"]
+    assert [(r["value"], r["blocked_now"]) for r in rows] == [
+        ("198.51.100.1", "no"), ("198.51.100.2", "yes"), ("198.51.100.3", "no")]
     assert rows[0]["reason"] == "31 days"
-    assert rows[0]["archived_at"] == db.to_iso(NOW)
+    assert rows[0]["first_blocked_at"] == db.to_iso(NOW - timedelta(days=31))
     assert leftover_temp_files(settings.edl_dir, settings.archive_dir) == []
 
 
