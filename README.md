@@ -74,6 +74,14 @@ WAL mode (Write-Ahead Logging) with `synchronous=FULL`, nginx, keepalived and Op
 
 SUSE is planned. Both servers should run the same system.
 
+**Docker and other containers are not supported.** Run Furnace on virtual machines or real servers. Furnace needs
+systemd (its services and timers), keepalived with real network access (the shared IP must be reachable by the
+list reader and the caller, and must move between two hosts), and its own host firewall rules. A normal container
+has none of these, and data in a container without volumes is lost when the container is removed. The integration
+tests do run in containers, but only with `--privileged` and systemd, on one host: that is fine for a test, not for
+real use (almost full control of the host, and no failover when the host dies). Container support is a later idea
+in `docs/ROADMAP.md`.
+
 | | Debian family (`.deb`) | Red Hat family (`.rpm`) |
 |---|---|---|
 | Host firewall | ufw | firewalld |

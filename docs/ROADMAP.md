@@ -73,6 +73,11 @@ unblock and the record on the follower.
   one minute of changes. Options: a shorter interval (15 to 30 seconds, small change) or real-time replication
   (bigger, fits the high-availability phase).
 - A UI with its own user logins. High availability with more servers.
+- **Docker support** (asked 2026-10-30; not supported today, the README says so). Needed: an official image, one
+  process per container instead of systemd (API, nginx, timers as separate containers or a small supervisor),
+  volumes for the database and the certificate, settings from environment variables instead of setup questions, no
+  host firewall changes, and failover either with keepalived on the host network (`NET_ADMIN`) or left to a load
+  balancer or Kubernetes. Fits the high-availability phase. Rough size: 2 to 4 working sessions.
 
 ## How to test
 
