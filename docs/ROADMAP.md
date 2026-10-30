@@ -73,11 +73,22 @@ unblock and the record on the follower.
   one minute of changes. Options: a shorter interval (15 to 30 seconds, small change) or real-time replication
   (bigger, fits the high-availability phase).
 - A UI with its own user logins. High availability with more servers.
-- **Docker support** (asked 2026-10-30; not supported today, the README says so). Needed: an official image, one
-  process per container instead of systemd (API, nginx, timers as separate containers or a small supervisor),
-  volumes for the database and the certificate, settings from environment variables instead of setup questions, no
-  host firewall changes, and failover either with keepalived on the host network (`NET_ADMIN`) or left to a load
-  balancer or Kubernetes. Fits the high-availability phase. Rough size: 2 to 4 working sessions.
+
+### After v0.7.0: Docker support, both ways (user decision 2026-10-30)
+
+Starts after the v0.7.0 test round and release. Containers are not supported until then (the README says so).
+
+1. **Shared base + option A** (about 2 to 3 sessions, released on its own):
+   - An official Furnace image: API, nginx and the timers without systemd.
+   - Settings from environment variables instead of setup questions. Volumes for the database and the certificate.
+   - No host firewall changes from inside a container.
+   - Failover as today: keepalived on the host network (`NET_ADMIN`), two hosts, one shared IP, SSH snapshots.
+   - A `docker-compose.yml` example. Tests for the image.
+2. **Option B: Kubernetes** (about 2 to 3 more sessions, with the high-availability phase):
+   - The leader decision becomes pluggable: the role file from keepalived (today) or a Kubernetes lease.
+   - Clients reach the leader through a Kubernetes Service.
+   - Replication must follow the leader inside Kubernetes (the hard part); fits real-time replication.
+   - Test cluster: for example a small k3s VM in Hyper-V, with failover tests.
 
 ## How to test
 
