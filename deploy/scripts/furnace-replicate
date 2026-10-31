@@ -1,7 +1,9 @@
 #!/bin/bash
 # Runs every minute on both servers (systemd timer), as the furnace user.
-# Only the leader does something: it makes a SQLite backup snapshot and
-# pushes it over SSH to the other server, with a dedicated key.
+# Only the leader does something: it sends a database snapshot to the other server,
+# over HTTPS with the replication secret. If that does not work (for example while the
+# other server still runs an older Furnace during an upgrade), it falls back to SSH
+# with the dedicated key. The SSH fallback goes away in the version after 0.8.
 set -euo pipefail
 
 ROLE="$(cat /run/furnace-state/role 2>/dev/null || echo follower)"
@@ -12,10 +14,32 @@ fi
 # shellcheck source=/dev/null
 . /etc/furnace/install.env
 
+LIB=/usr/lib/furnace
 OUT=/var/lib/furnace/replica/outgoing.db
-/usr/lib/furnace/bin/furnace-python -m furnace snapshot "$OUT"
+RESULT=/var/lib/furnace/replica/last-result
 
-gzip -c "$OUT" | ssh -i /etc/furnace/ssh/replica_key \
+record() {  # record STATE TEXT: the last result, for 'furnace status'
+    printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$1" "$2" > "$RESULT.tmp" && mv -f "$RESULT.tmp" "$RESULT"
+}
+
+why=""
+if [ "${USE_HTTPS:-yes}" = "yes" ] && [ -r /etc/furnace/secrets/replica-secret ]; then
+    if out="$("$LIB/bin/furnace-python" -m furnace send-replica "$PEER_IP" 2>&1)"; then
+        record ok "over HTTPS: ${out##*$'\n'}"
+        exit 0
+    fi
+    why="${out##*$'\n'}"
+    why="${why#Error: }"
+    echo "Replication over HTTPS did not work ($why). Trying SSH." >&2
+fi
+
+"$LIB/bin/furnace-python" -m furnace snapshot "$OUT"
+if gzip -c "$OUT" | ssh -i /etc/furnace/ssh/replica_key \
     -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 \
     -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/var/lib/furnace/replica/known_hosts \
-    "furnace-sync@${PEER_IP}"
+    "furnace-sync@${PEER_IP}"; then
+    record ok "over SSH${why:+ (HTTPS: $why)}"
+else
+    record failed "HTTPS: ${why:-not used}; SSH failed too"
+    exit 1
+fi

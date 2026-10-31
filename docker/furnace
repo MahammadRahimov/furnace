@@ -111,6 +111,6 @@ case "${1:-help}" in
         echo "In Docker, the settings come from the container's environment (FURNACE_...), see docker-compose.yml." >&2
         [ "$1" = failover-test ] && echo "Test a failover with: docker stop furnace (on the leader host), then docker start furnace." >&2
         exit 2 ;;
-    snapshot|apply-replica|init-secrets) echo "'$1' is used by Furnace itself only." >&2; exit 2 ;;
+    snapshot|apply-replica|send-replica|init-secrets) echo "'$1' is used by Furnace itself only." >&2; exit 2 ;;
     *) run_data_command "$@" ;;
 esac

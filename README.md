@@ -217,7 +217,8 @@ For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is 
 - Saves the answers in `/etc/furnace/setup.conf` (readable by root only, it holds the keepalived password).
 - Creates the user `furnace` (no login) and the user `furnace-sync` (can only receive replication snapshots).
 - Leader: creates a self-signed certificate (10 years, names the shared IP and both server IPs), the replication
-  SSH key and the keepalived password. Follower: copies them from the bundle.
+  SSH key and the keepalived password. Follower: copies them from the bundle. Both: the replication secret,
+  derived from the certificate key they share (so both have the same one, without copying anything new).
 - On the server that owns the shared IP: creates the first API token and the list login, if there are none yet.
   They are in the database, so the follower gets them with the replication.
 - Writes the nginx and keepalived files from the templates in `/usr/lib/furnace/templates`.
@@ -332,7 +333,8 @@ and becomes the leader. `docker start furnace` brings the old leader back as the
 shared IP back). It gets the new data with the next replication, within a minute.
 
 **Differences from the servers:**
-- Replication goes over HTTPS (port 443, only from the other host, with the replication secret), not SSH.
+- Replication goes over HTTPS only (port 443, only from the other host, with the replication secret). The
+  servers also use HTTPS, but keep SSH as a fallback for one version.
 - No setup questions and no self-test at start. `furnace setup` and `furnace failover-test` do not exist.
 - The host firewall is not touched.
 - **Upgrade:** load the new image, change `image:` in `docker-compose.yml`, `docker compose up -d`. The leader
@@ -396,7 +398,9 @@ Setup cannot do these things for you.
 
 - [ ] List reader (its download source address) -> shared IP, TCP 443.
 - [ ] Caller (and any helper servers it uses, for example SOAR engines) -> shared IP, TCP 443.
-- [ ] Leader <-> follower: SSH (TCP 22) both ways, for replication.
+- [ ] Leader <-> follower: HTTPS (TCP 443) both ways, for replication and the health check.
+- [ ] Leader <-> follower: SSH (TCP 22) both ways. Version 0.8 needs it only as the replication fallback while one
+  server still runs an older Furnace (during an upgrade). The version after 0.8 no longer uses it.
 - [ ] Leader <-> follower: VRRP (IP protocol 112) both ways, unicast.
 - [ ] The network must allow the shared IP to move between the two servers (ARP updates). In a virtual
       environment (VMware, Hyper-V, cloud), check that MAC spoofing / IP moves are allowed for these VMs.
@@ -906,9 +910,13 @@ The nightly cleanup:
 - keepalived calls `/health` every 5 seconds. After 3 failures the IP moves, even if the machine is still alive.
 - When a server takes the shared IP, the notify script marks it as leader and starts the cleanup timer.
   When it loses the IP, it marks it as follower and stops the timer.
-- **Replication:** every minute the leader makes a SQLite backup snapshot and pushes it over SSH to the follower,
-  with a dedicated key. The key can only run the receive command. The follower loads the snapshot and rebuilds its
-  EDL files.
+- **Replication:** every minute the leader makes a SQLite backup snapshot and sends it over HTTPS to
+  `https://PEER_IP/replica/snapshot`, with the replication secret both servers share. nginx lets only the other
+  server reach this address. The follower checks the secret, loads the snapshot, rebuilds its EDL files and
+  answers at once, so the leader knows that it worked. `sudo furnace status` on the leader shows the last result.
+- **SSH fallback (this version only):** if HTTPS does not work, for example while the follower still runs an older
+  Furnace during an upgrade, the leader pushes the snapshot over SSH as before (a dedicated key that can only run
+  the receive command). `furnace status` then says so. The version after 0.8 removes SSH replication.
 - The follower refuses all changes while it is not the leader (`503 not_leader`).
 
 ### 10.1 Risks
@@ -948,7 +956,8 @@ shared IP as the leader, and then starts the service again. Afterwards the other
 | `/etc/furnace/setup.conf` | Your setup answers. Readable by root only. |
 | `/etc/furnace/furnace.env` | Program settings (no secrets). |
 | `/etc/furnace/tls/` | Certificate and private key. |
-| `/etc/furnace/ssh/` | Replication key. |
+| `/etc/furnace/secrets/replica-secret` | The replication secret (from the certificate key). Root and the furnace group. |
+| `/etc/furnace/ssh/` | SSH replication key (the fallback in this version). |
 | `/var/lib/furnace/furnace.db` | The database (master record), with the API tokens and list logins as hashes. |
 | `/var/lib/furnace/lockout.db` | Addresses locked after wrong tokens (this server only). |
 | `/var/lib/furnace-auth/edl-users` | List logins for nginx (name and hash), written from the database. Never served. |
@@ -977,6 +986,11 @@ The package runs `furnace setup --upgrade` by itself. It uses the saved answers 
 Data, tokens and the certificate are kept. The API is reloaded without downtime, and keepalived is restarted only
 if its settings changed, so an upgrade does not move the shared IP. If you change answers that affect keepalived
 (for example the VRRP router ID), the restart can move the shared IP to the other server. That is safe.
+
+**From 0.7 to 0.8:** nothing to do. Replication now goes over HTTPS. Setup makes the replication secret from
+the certificate key both servers already share, so no new bundle is needed. While one server is upgraded and the
+other is not yet, the leader uses SSH as before; when both run 0.8 it uses HTTPS. Port 443 between the servers is
+already open (the health check uses it). New: blocklist files through the API (section 6.9).
 
 **From 0.6 to 0.7:** nothing to do. The database gets the archive record: every IP and domain in the lists, and
 every IP of the old archive, gets a record row. IPs in the list stay temporary with their dates. Domains stay as they

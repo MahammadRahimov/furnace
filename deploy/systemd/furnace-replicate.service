@@ -8,4 +8,4 @@ Group=furnace
 UMask=0027
 EnvironmentFile=/etc/furnace/furnace.env
 ExecStart=/usr/lib/furnace/bin/furnace-replicate
-TimeoutStartSec=50
+TimeoutStartSec=110

@@ -18,7 +18,11 @@ How a release happens (user decision 2026-11-01):
    `date_format`, `reason`, `added_by`. Needs the blocklist write permission.
 2. **Docker image** (step 1): Furnace in one container per host, settings in `docker-compose.yml`, the same
    failover with keepalived. README section 3.6. *(Paused by the user: in this release or later is still open.)*
-3. **Replication over HTTPS for Docker.** The servers (`.deb`/`.rpm`) keep SSH replication.
+3. **Replication over HTTPS, for the servers and Docker.** Every minute the leader sends the snapshot to
+   `https://PEER_IP/replica/snapshot` with a replication secret; the follower loads it and answers at once, so
+   `furnace status` on the leader shows whether it worked. On the servers the secret comes from the certificate key
+   both already share, so an upgrade needs no new bundle. For this version the leader falls back to SSH when HTTPS
+   does not work (an older follower during an upgrade); the version after 0.8 removes SSH replication.
 4. **Small changes on the servers:** nginx no longer logs `/health` (asked every 5 seconds), and the keepalived
    notify script also works without systemd.
 5. **Docs:** README, `docs/API.md` and the roadmap are updated for the changes above.

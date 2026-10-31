@@ -5,20 +5,27 @@ checks it, copies it into its own database with the SQLite backup
 function (one step, safe with WAL), and rebuilds its EDL files.
 A leader never applies a snapshot, so a late push cannot overwrite it.
 
-On servers the snapshot comes over SSH. In Docker it comes over HTTPS
-(receive_snapshot, called by the API) with a secret both servers share.
+The snapshot comes over HTTPS (send_snapshot on the leader, receive_snapshot in the
+follower's API) with a secret both servers share. On servers that secret is derived from
+the TLS key they already share (derive_secret). For one version the servers can still fall
+back to SSH, so an upgrade works while the follower is still old.
 """
 
 from __future__ import annotations
 
 import gzip
+import hashlib
 import hmac
+import json
 import os
 import sqlite3
+import ssl
 import tempfile
+import urllib.error
+import urllib.request
 import zlib
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 
 from . import db, edl
 from .config import Settings
@@ -52,6 +59,47 @@ def secret_matches(path: Path, given: str) -> bool:
     except ReplicaError:
         return False
     return bool(given) and hmac.compare_digest(given.encode(), expected.encode())
+
+
+def derive_secret(key_file: Path) -> str:
+    """The replication secret of two servers: both have the same TLS key (from the leader's bundle),
+    so both get the same secret without copying anything new. A new key gives a new secret."""
+    return hmac.new(Path(key_file).read_bytes(), b"furnace replication v1", hashlib.sha256).hexdigest()
+
+
+def send_snapshot(settings: Settings, peer_ip: str, cafile: Path, secret_file: Path, out: Path,
+                  opener: Callable | None = None) -> str:
+    """Leader: send one gzip snapshot to the other server. Returns a short result; raises ReplicaError."""
+    from . import backup
+
+    if not settings.is_leader():
+        return "not the leader"
+    secret = read_secret(secret_file)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    backup.snapshot(settings, out)
+    body = gzip.compress(out.read_bytes(), compresslevel=6)
+    request = urllib.request.Request(
+        f"https://{peer_ip}/replica/snapshot", data=body, method="POST",
+        headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/octet-stream"})
+    if opener is None:
+        context = ssl.create_default_context(cafile=str(cafile))
+        opener = lambda req: urllib.request.urlopen(req, timeout=50, context=context)  # noqa: E731
+    try:
+        with opener(request) as reply:
+            answer = json.loads(reply.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            message = json.loads(exc.read() or b"{}").get("message", "")
+        except ValueError:
+            message = ""
+        if exc.code == 404:
+            message = "it does not take snapshots over HTTPS (an older Furnace)"
+        raise ReplicaError(f"the other server answered {exc.code}: {message}".strip(": ")) from None
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise ReplicaError(f"cannot reach the other server at {peer_ip}: {reason}") from None
+    applied = answer.get("applied", {})
+    return f"sent ({len(body)} bytes, {applied.get('ips', '?')} IPs, {applied.get('domains', '?')} domains)"
 
 
 def receive_snapshot(settings: Settings, stream: BinaryIO, limit: int = MAX_SNAPSHOT_BYTES) -> dict[str, int]:

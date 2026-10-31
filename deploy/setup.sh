@@ -668,8 +668,8 @@ if ! id furnace-sync >/dev/null 2>&1; then
 fi
 usermod -p '*' furnace-sync   # no password; only the replication key can log in
 install -d -m 0750 -o root -g furnace "$ETC"
-install -d -m 0700 -o root -g root "$ETC/tls"
-install -d -m 0750 -o root -g furnace "$ETC/ssh"
+install -d -m 0750 -o root -g furnace "$ETC/tls"     # the furnace user reads the certificate (not the key)
+install -d -m 0750 -o root -g furnace "$ETC/secrets" "$ETC/ssh"
 install -d -m 0750 -o furnace -g furnace "$DATA" "$DATA/archive" "$DATA/backups" "$DATA/reports" "$DATA/replica"
 install -d -m 0755 -o furnace -g furnace "$EDL"
 install -d -m 2750 -o furnace -g "$NGINX_GROUP" "$AUTH"   # the list users file: nginx reads it
@@ -753,6 +753,14 @@ if [ "$CFG_USE_HTTPS" = "yes" ] && ! cert_names_ok "$ETC/tls/furnace.crt"; then
     warn "If the IPs changed: delete $ETC/tls on the leader, run setup there, then on the follower."
     TODO+=("Fix the certificate: it does not name all server IPs.")
 fi
+# Replication over HTTPS: both servers have the same TLS key, so both derive the same secret.
+# Nothing new to copy, also not when an older install is upgraded. A new key gives a new secret.
+NEW_SECRET="$(mktemp)"
+"$PY" -c 'import sys; from furnace.replica import derive_secret; print(derive_secret(sys.argv[1]))' \
+    "$ETC/tls/furnace.key" > "$NEW_SECRET"
+install -m 0640 -o root -g furnace "$NEW_SECRET" "$ETC/secrets/replica-secret"
+rm -f "$NEW_SECRET"
+ok "Replication secret ready (from the shared certificate key)"
 
 # --------------------------------------------------------------------------- config files
 
@@ -780,7 +788,21 @@ else
     R_LISTEN="    listen 80;"
     R_TLS="    # Plain HTTP (USE_HTTPS=no). Test lab only."
 fi
-R_REPLICA="    # Replication uses SSH on servers (HTTPS only in Docker)."
+if [ "$CFG_USE_HTTPS" = "yes" ]; then
+    R_REPLICA="    # Replication: only the other server may send a snapshot (with the replication secret).
+    location = /replica/snapshot {
+        allow ${CFG_PEER_IP};
+        deny all;
+        client_max_body_size 2g;
+        proxy_request_buffering off;
+        proxy_pass http://127.0.0.1:8081/replica/snapshot;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_read_timeout 120s;
+    }
+"
+else
+    R_REPLICA="    # Plain HTTP (USE_HTTPS=no): replication uses SSH only."
+fi
 export R_LISTS_ALLOW R_API_ALLOW R_LISTEN R_TLS R_REPLICA
 
 render() { "$PY" "$LIB/render.py" "$1" "$2"; }

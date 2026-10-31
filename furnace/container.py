@@ -16,7 +16,6 @@ On SIGTERM (docker stop) it stops keepalived first, so the other server takes th
 
 from __future__ import annotations
 
-import gzip
 import ipaddress
 import json
 import os
@@ -24,7 +23,6 @@ import re
 import secrets
 import shutil
 import signal
-import ssl
 import string
 import subprocess
 import sys
@@ -358,37 +356,11 @@ def write_configs(s: ContainerSettings, etc: Path = ETC, lib: Path = LIB) -> Non
 
 def replicate(peer_ip: str, etc: Path = ETC, data: Path = DATA, opener: Callable | None = None) -> str:
     """Send one snapshot to the other server. Returns a short result; raises on failure."""
-    from . import backup
     from .config import Settings
+    from .replica import send_snapshot
 
-    settings = Settings.load()
-    if not settings.is_leader():
-        return "not the leader"
-    from .replica import read_secret
-    secret = read_secret(etc / "secrets" / "replica-secret")
-    out = data / "replica" / "outgoing.db"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    backup.snapshot(settings, out)
-    body = gzip.compress(out.read_bytes(), compresslevel=6)
-    context = ssl.create_default_context(cafile=str(etc / "tls" / "furnace.crt"))
-    request = urllib.request.Request(
-        f"https://{peer_ip}/replica/snapshot", data=body, method="POST",
-        headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/octet-stream"})
-    send = opener or (lambda req: urllib.request.urlopen(req, timeout=50, context=context))
-    try:
-        with send(request) as reply:
-            answer = json.loads(reply.read() or b"{}")
-    except urllib.error.HTTPError as exc:
-        try:
-            message = json.loads(exc.read() or b"{}").get("message", "")
-        except ValueError:
-            message = ""
-        raise RuntimeError(f"the other server answered {exc.code}. {message}".strip()) from None
-    except (urllib.error.URLError, OSError) as exc:
-        reason = getattr(exc, "reason", exc)
-        raise RuntimeError(f"cannot reach the other server at {peer_ip}: {reason}") from None
-    applied = answer.get("applied", {})
-    return f"sent ({len(body)} bytes, {applied.get('ips', '?')} IPs, {applied.get('domains', '?')} domains)"
+    return send_snapshot(Settings.load(), peer_ip, etc / "tls" / "furnace.crt", etc / "secrets" / "replica-secret",
+                         data / "replica" / "outgoing.db", opener=opener)
 
 
 # --------------------------------------------------------------------------- process manager

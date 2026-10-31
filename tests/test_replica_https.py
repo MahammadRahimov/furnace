@@ -119,3 +119,79 @@ def test_secret_file_from_the_environment(tmp_path):
     assert s.replica_secret_file == Path("/etc/furnace/replica-secret")
     assert s.incoming_dir == tmp_path / "incoming"
     assert Settings.from_env({}).replica_secret_file is None
+
+
+# ---------------------------------------------------------------------- the leader's side
+
+
+def test_both_servers_derive_the_same_secret(tmp_path):
+    key = tmp_path / "furnace.key"
+    key.write_text("-----BEGIN PRIVATE KEY-----\nsame key on both servers\n-----END PRIVATE KEY-----\n")
+    other = tmp_path / "other.key"
+    other.write_text("-----BEGIN PRIVATE KEY-----\na new key\n-----END PRIVATE KEY-----\n")
+    secret = replica.derive_secret(key)
+    assert secret == replica.derive_secret(key) and len(secret) == 64
+    assert secret != replica.derive_secret(other)
+    assert key.read_text() not in secret
+
+
+class FakeReply:
+    def __init__(self, body: bytes):
+        self.body = body
+
+    def read(self):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_send_snapshot_end_to_end(settings, tmp_path, secret_file, snapshot_gz):
+    """The leader's sender and the follower's receiver, with the network replaced by the test client."""
+    follower = create_app(follower_settings(tmp_path, secret_file)).test_client()
+    sent = {}
+
+    def opener(req):
+        sent["url"], sent["auth"] = req.full_url, req.get_header("Authorization")
+        r = follower.post("/replica/snapshot", data=req.data, headers={"Authorization": sent["auth"]})
+        if r.status_code != 200:
+            import urllib.error
+            raise urllib.error.HTTPError(req.full_url, r.status_code, "x", {}, io.BytesIO(r.data))
+        return FakeReply(r.data)
+
+    out = replica.send_snapshot(settings, "192.0.2.12", tmp_path / "ca.crt", secret_file,
+                                tmp_path / "replica" / "outgoing.db", opener=opener)
+    assert out.startswith("sent (") and "1 IPs, 1 domains" in out
+    assert sent["url"] == "https://192.0.2.12/replica/snapshot" and sent["auth"] == f"Bearer {SECRET}"
+
+    wrong = tmp_path / "wrong"
+    wrong.write_text("x" * 40)
+    with pytest.raises(replica.ReplicaError, match="answered 401"):
+        replica.send_snapshot(settings, "192.0.2.12", tmp_path / "ca.crt", wrong, tmp_path / "o.db", opener=opener)
+
+
+def test_send_snapshot_explains_an_old_follower_and_a_network_problem(settings, tmp_path, secret_file):
+    import urllib.error
+
+    def old(req):
+        raise urllib.error.HTTPError(req.full_url, 404, "x", {}, io.BytesIO(b'{"status":"not_found"}'))
+
+    with pytest.raises(replica.ReplicaError, match="older Furnace"):
+        replica.send_snapshot(settings, "192.0.2.12", tmp_path / "ca.crt", secret_file, tmp_path / "o.db", opener=old)
+
+    def down(req):
+        raise urllib.error.URLError("Connection refused")
+
+    with pytest.raises(replica.ReplicaError, match="cannot reach the other server at 192.0.2.12"):
+        replica.send_snapshot(settings, "192.0.2.12", tmp_path / "ca.crt", secret_file, tmp_path / "o.db", opener=down)
+
+
+def test_a_follower_does_not_send(settings, tmp_path, secret_file):
+    role = tmp_path / "role-f"
+    role.write_text("follower\n")
+    settings.role_file = role
+    assert replica.send_snapshot(settings, "192.0.2.12", tmp_path / "ca.crt", secret_file, tmp_path / "o.db",
+                                 opener=lambda req: pytest.fail("a follower must not send")) == "not the leader"

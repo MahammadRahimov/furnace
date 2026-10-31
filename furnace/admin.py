@@ -22,7 +22,7 @@ from .cleanup import run_cleanup
 from .config import ConfigError, Settings, read_env_file
 from .importer import ImportError_, import_domains, import_ips, import_whitelist
 from .locking import LockTimeout
-from .replica import ReplicaError, apply_snapshot
+from .replica import ReplicaError, apply_snapshot, send_snapshot
 from .service import Furnace
 
 EXPORTS = {
@@ -89,6 +89,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("output", type=Path)
     sp = sub.add_parser("apply-replica", help="(replication, follower only) Load a snapshot from the leader.")
     sp.add_argument("file", type=Path)
+    sp = sub.add_parser("send-replica", help="(replication, leader only) Send a snapshot to the other server (HTTPS).")
+    sp.add_argument("peer_ip")
+    sp.add_argument("--cafile", type=Path, default=Path("/etc/furnace/tls/furnace.crt"))
+    sp.add_argument("--secret-file", type=Path, default=Path("/etc/furnace/secrets/replica-secret"))
 
     sp = sub.add_parser("token", help="API tokens: list, add NAME, edit NAME, rotate NAME, remove NAME.")
     tok = sp.add_subparsers(dest="action", required=True, metavar="ACTION")
@@ -491,6 +495,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_lockouts(settings, args)
         if args.command == "init-secrets":
             return cmd_init_secrets(settings, args)
+        if args.command == "send-replica":
+            print(send_snapshot(settings, args.peer_ip, args.cafile, args.secret_file,
+                                settings.data_dir / "replica" / "outgoing.db"))
+            return 0
         if args.command == "apply-replica":
             counts = apply_snapshot(settings, args.file)
             print(f"Snapshot applied. {counts['ips']} IPs, {counts['domains']} domains.")

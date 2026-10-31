@@ -108,6 +108,24 @@ status() {
         fi
     done
     echo
+    # The leader writes the result of every replication (HTTPS, or SSH as the fallback).
+    local last="/var/lib/furnace/replica/last-result" when what age
+    if [ "$role" != "leader" ]; then
+        echo "Replication: this server receives the snapshots from the leader"
+    elif [ -f "$last" ]; then
+        read -r when state what < "$last"
+        age=$(( $(date +%s) - $(date -d "$when" +%s 2>/dev/null || echo 0) ))
+        echo "Replication: $state $what ($age seconds ago)"
+        if [ "$state" != "ok" ] || [ "$age" -gt 300 ]; then
+            echo "             <-- the other server does not get the changes"
+            problems=1
+        elif [[ "$what" == "over SSH"* ]]; then
+            echo "             (SSH is the fallback for this version. Upgrade the other server to use HTTPS.)"
+        fi
+    else
+        echo "Replication: no result yet (it runs every minute)"
+    fi
+    echo
     run_data_command stats || problems=1
     if [ "$problems" -ne 0 ]; then
         echo
@@ -122,6 +140,6 @@ case "${1:-help}" in
     setup) shift; need_root setup; exec "$LIB/setup.sh" "$@" ;;
     status) status ;;
     failover-test) shift; need_root failover-test; need_setup; exec "$LIB/bin/furnace-failover-test" "$@" ;;
-    snapshot|apply-replica|init-secrets) echo "'$1' is used by Furnace itself only." >&2; exit 2 ;;
+    snapshot|apply-replica|send-replica|init-secrets) echo "'$1' is used by Furnace itself only." >&2; exit 2 ;;
     *) run_data_command "$@" ;;
 esac

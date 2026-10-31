@@ -271,6 +271,28 @@ r="$(api POST /api/v1/whitelist/ips '{"entry":"198.51.100.200"}')"
 check "but not change it (401, names the permission)" grep -q 'whitelist write permission.* 401$' <<< "$r"
 check "the last use of the token is shown" on "$LEADER" "furnace token list | grep -Eq '^soar .* 20[0-9-]{8} [0-9:]{5} +[0-9a-f]{8}$'"
 
+step "Bulk upload of a blocklist file through the API"
+bulk() {  # bulk PATH QUERY TEXT -> prints "BODY HTTP_CODE"
+    printf '%b' "$3" | docker exec -i "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $TOKEN" \
+        -H 'Content-Type: text/plain' --data-binary @- -w ' %{http_code}' "https://$SHARED_IP$1?$2" | tr -d '\n'
+}
+FILE='ip,date,reason\n203.0.113.90\n203.0.113.91,,scanner\n203.0.113.91\n10.0.0.9\n'
+r="$(bulk /api/v1/ips/bulk dry_run=true "$FILE")"
+check "a dry run shows what would happen (2 added, 3 skipped)" grep -Eq '"dry_run": ?true.*"added": ?2.*"skipped": ?3.* 200$' <<< "$r"
+check "the dry run changed nothing" bash -c "! grep -qx '203.0.113.90' <<< \"\$1\"" _ "$(edl blocklist.txt)"
+r="$(bulk /api/v1/ips/bulk "added_by=bulk-test" "$FILE")"
+check "the file is uploaded (200, 2 added)" grep -Eq '"added": ?2.* 200$' <<< "$r"
+check "the skipped lines are named" bash -c 'grep -q duplicate_in_file <<< "$1" && grep -q private_ip <<< "$1"' _ "$r"
+check "the uploaded IPs are in blocklist.txt" bash -c 'grep -qx 203.0.113.90 <<< "$1" && grep -qx 203.0.113.91 <<< "$1"' _ "$(edl blocklist.txt)"
+r="$(bulk /api/v1/domains/bulk "" 'bulk1.example.com\nbulk2.example.org,malware\n')"
+check "a domain file is uploaded (200, 2 added)" grep -Eq '"added": ?2.* 200$' <<< "$r"
+r="$(docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $WL_TOKEN" -H 'Content-Type: text/plain' \
+     --data-binary '203.0.113.92' -w ' %{http_code}' "https://$SHARED_IP/api/v1/ips/bulk" | tr -d '\n')"
+check "the whitelist token may not upload a blocklist (401)" grep -q ' 401$' <<< "$r"
+for ip in 203.0.113.90 203.0.113.91; do api DELETE "/api/v1/ips/$ip" >/dev/null; done
+for d in bulk1.example.com bulk2.example.org; do api DELETE "/api/v1/domains/$d" >/dev/null; done
+check "the test entries are removed again" bash -c "! grep -qx '203.0.113.90' <<< \"\$1\"" _ "$(edl blocklist.txt)"
+
 step "API tokens, expiry and the wrong-token lockout"
 out="$(on "$LEADER" "furnace token add lab 2>&1" || true)"
 check "token add without a terminal needs the options" grep -q "Give --allow and --expires-days" <<< "$out"
@@ -318,6 +340,32 @@ check "the follower refuses changes (503 not_leader)" grep -q 'not_leader.* 503$
 check "the follower got the tokens and the EDL login" \
     [ "$(on "$LEADER" 'furnace token list; furnace edl-user list')" = "$(on "$FOLLOWER" 'furnace token list; furnace edl-user list')" ]
 check "the follower refuses token changes" on "$FOLLOWER" "furnace token add late 2>&1 | grep -q 'Run this on the leader'"
+
+step "Replication goes over HTTPS (SSH only as the fallback for an older follower)"
+check "both servers have the same replication secret, readable by the furnace group only" bash -c '
+    [ "$(docker exec "$1" sha256sum < /etc/furnace/secrets/replica-secret)" = "$(docker exec "$2" sha256sum < /etc/furnace/secrets/replica-secret)" ] &&
+    [ "$(docker exec "$1" stat -c "%U %G %a" /etc/furnace/secrets/replica-secret)" = "root furnace 640" ] &&
+    [ "$(docker exec "$1" stat -c "%a" /etc/furnace/tls/furnace.key)" = 600 ]' _ "$LEADER" "$FOLLOWER"
+last_result() { on "$LEADER" "cat /var/lib/furnace/replica/last-result 2>/dev/null" || true; }
+wait_result() {  # wait_result PATTERN: until the leader's last replication result matches (up to 90 s)
+    local _
+    for _ in $(seq 1 90); do grep -Eq "$1" <<< "$(last_result)" && return 0; sleep 1; done
+    return 1
+}
+check "the leader sends over HTTPS" wait_result ' ok over HTTPS: sent'
+check "status shows the replication" bash -c 'grep -q "Replication: ok over HTTPS" <<< "$1"' _ "$(on "$LEADER" "furnace status")"
+check "only the other server may send a snapshot (403)" \
+    [ "$(code_from "$XSOAR" "https://$FOLLOWER_IP/replica/snapshot")" = "403" ]
+# An older follower (0.7) has no HTTPS replication: take it away for a moment, the leader must use SSH.
+on "$FOLLOWER" "sed -i 's/^FURNACE_REPLICA_SECRET_FILE=/#OFF_FURNACE_REPLICA_SECRET_FILE=/' /etc/furnace/furnace.env && systemctl restart furnace-api"
+check "with an older follower the leader falls back to SSH" wait_result ' ok over SSH \(HTTPS: .*older Furnace'
+api POST /api/v1/ips '{"ip":"198.51.100.79","reason":"over ssh"}' >/dev/null
+check "and the follower still gets the changes" bash -c 'for _ in $(seq 1 90); do
+    docker exec "$1" grep -qx 198.51.100.79 /var/lib/furnace-edl/blocklist.txt && exit 0; sleep 1; done; exit 1' _ "$FOLLOWER"
+check "status names the fallback" bash -c 'grep -q "SSH is the fallback" <<< "$1"' _ "$(on "$LEADER" "furnace status")"
+on "$FOLLOWER" "sed -i 's/^#OFF_FURNACE_REPLICA_SECRET_FILE=/FURNACE_REPLICA_SECRET_FILE=/' /etc/furnace/furnace.env && systemctl restart furnace-api"
+check "after the upgrade of the follower it is HTTPS again" wait_result ' ok over HTTPS: sent'
+api DELETE /api/v1/ips/198.51.100.79 >/dev/null
 
 step "The furnace command: status and import"
 check "status is fine on the leader" on "$LEADER" "furnace status"
