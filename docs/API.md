@@ -15,7 +15,7 @@ The README has the same content in a shorter form ([README section 6](../README.
 8. [Blocked domains](#8-blocked-domains)
 9. [Whitelist: IPs and ranges](#9-whitelist-ips-and-ranges)
 10. [Whitelist: domains](#10-whitelist-domains)
-11. [Bulk whitelist upload](#11-bulk-whitelist-upload)
+11. [Bulk whitelist upload](#11-bulk-whitelist-upload) (and [blocked IPs and domains from a file](#111-bulk-upload-of-blocked-ips-and-domains-a-file))
 12. [List files for the list reader](#12-list-files-for-the-list-reader)
 13. [Health check](#13-health-check)
 14. [How a caller should handle answers](#14-how-a-caller-should-handle-answers)
@@ -53,7 +53,7 @@ Authorization: Bearer <token>
 
 |  | Read | Write |
 |---|---|---|
-| **Blocklist** | `GET /api/v1/ips/<ip>`, `GET /api/v1/domains/<domain>` | `POST` and `DELETE` on `/api/v1/ips...` and `/api/v1/domains...` |
+| **Blocklist** | `GET /api/v1/ips/<ip>`, `GET /api/v1/domains/<domain>` | `POST` and `DELETE` on `/api/v1/ips...` and `/api/v1/domains...`, bulk upload of a file (also `dry_run`) |
 | **Whitelist** | `GET /api/v1/whitelist/ips`, `GET /api/v1/whitelist/domains` | `POST` and `DELETE` on `/api/v1/whitelist/...`, bulk upload (also `dry_run`) |
 
 Write includes read. The permission names are `blocklist:read`, `blocklist:write`, `whitelist:read` and
@@ -168,9 +168,11 @@ Example of a refusal:
 | POST | `/api/v1/ips` | blocklist write | Block an IP |
 | GET | `/api/v1/ips/<ip>` | blocklist read | Look up an IP |
 | DELETE | `/api/v1/ips/<ip>` | blocklist write | Unblock an IP |
+| POST | `/api/v1/ips/bulk` | blocklist write | Block the IPs of a file (like `furnace import-ips`) |
 | POST | `/api/v1/domains` | blocklist write | Block a domain |
 | GET | `/api/v1/domains/<domain>` | blocklist read | Look up a domain |
 | DELETE | `/api/v1/domains/<domain>` | blocklist write | Unblock a domain |
+| POST | `/api/v1/domains/bulk` | blocklist write | Block the domains of a file |
 | POST | `/api/v1/whitelist/ips` | whitelist write | Whitelist an IP or range |
 | GET | `/api/v1/whitelist/ips` | whitelist read | List whitelisted IPs and ranges (paged) |
 | DELETE | `/api/v1/whitelist/ips/<ip or cidr>` | whitelist write | Remove from the whitelist |
@@ -489,6 +491,61 @@ curl --cacert "$CA" -X POST "$FURNACE/api/v1/whitelist/ips/bulk?dry_run=true&add
  "rejected": [{"value": "10.0.0.0/4", "reason_code": "range_too_wide", "message": "..."}],
  "removed_from_blocklist": ["203.0.113.45"]}
 ```
+
+### 11.1 Bulk upload of blocked IPs and domains (a file)
+
+`POST /api/v1/ips/bulk` and `POST /api/v1/domains/bulk` (permission: blocklist write)
+
+Send a whole file of IPs or domains in one request. It uses exactly the same rules as `sudo furnace import-ips` and
+`import-domains` on the server ([README section 7.2](../README.md#72-import-ips)):
+
+- Lines: `ip`, `ip,date` or `ip,date,reason` (domains: `domain` or `domain,reason`). Comma, semicolon, tab or
+  spaces. A header line, blank lines and comments (`#`, `;`, `//`) are skipped.
+- IPs with a date keep it and expire `ARCHIVE_AFTER_DAYS` after it. A date older than that goes only into the
+  archive (or with `old_ips=fresh` into the list with a new date). IPs without a date get spread-out expiry dates.
+  A date more than a day in the future is skipped (`future_date`).
+- Whitelisted, invalid, private, duplicate and already active lines are skipped and listed with a reason code.
+- All or nothing: one transaction, a database backup first. If the list would grow over `MAX_IPS` (or
+  `MAX_DOMAINS`), the upload is refused (`422`) and nothing changes.
+- Up to 200,000 lines and 20 MB per request. Only the leader takes uploads (the follower answers `503`
+  `not_leader`, also for a dry run). A report of the skipped lines stays on the server in
+  `/var/lib/furnace/reports/`.
+
+**Plain text body** (the file as it is). Options in the query string:
+
+| Option | Default | What it does |
+|---|---|---|
+| `dry_run` | `false` | `true`: check and answer, change nothing |
+| `permanent` | `false` | IPs only. `true`: every IP of the file is permanent (never expires) |
+| `old_ips` | `archive` | IPs only. `fresh`: old dates go into the list with a new date |
+| `date_format` | found automatically | IPs only. For example `%d/%m/%Y` |
+| `reason` | `uploaded through the API` | For lines without a reason |
+| `added_by` | the token name | Stored on every new entry |
+
+```bash
+curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips/bulk?dry_run=true&added_by=admin.one" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: text/plain" --data-binary @blocklist.csv
+```
+
+**JSON body:** the same options as fields, and `entries`: a list of lines (strings).
+
+```bash
+curl --cacert "$CA" -X POST "$FURNACE/api/v1/domains/bulk" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"entries":["bad.example.com","worse.example.net,malware"],"reason":"feed"}'
+```
+
+`200`:
+
+```json
+{"status": "ok", "message": "DRY RUN - nothing was changed. Read 4 lines. Added to the active list: 2. ...",
+ "dry_run": true, "received": 4, "added": 2, "permanent": false, "archived": 1, "blocked_again": 0,
+ "skipped": 1, "skipped_lines": [{"line": 1, "reason_code": "header", "text": "ip,date,reason"}],
+ "report": "api-ips-k2j3h4.txt.20261101-101500.report.txt"}
+```
+
+`skipped_lines` lists at most 1,000 lines; `skipped` is the full number. Domains have no `permanent` and
+`archived` (domains never expire).
 
 ## 12. List files for the list reader
 

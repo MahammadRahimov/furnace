@@ -663,7 +663,7 @@ curl --cacert "$CA" -X DELETE "$FURNACE/api/v1/whitelist/domains/good.example.co
 When a whitelist entry is added, Furnace removes every blocked IP or domain it covers. The answer lists them in
 `removed_from_blocklist`. Each removal is in the audit log.
 
-### 6.9 Bulk whitelist upload
+### 6.9 Bulk upload (whitelist, and blocked IPs and domains)
 
 `POST /api/v1/whitelist/ips/bulk` and `POST /api/v1/whitelist/domains/bulk` (whitelist write, also for `dry_run`).
 Up to 200,000 entries per request. Use `dry_run` first to see what would happen.
@@ -690,6 +690,16 @@ Answer `200`:
 ```
 
 Bulk upload is all in one transaction. Bad lines are skipped and listed. Good lines are added.
+
+**Blocked IPs and domains from a file:** `POST /api/v1/ips/bulk` and `POST /api/v1/domains/bulk` (blocklist write).
+The same rules as `sudo furnace import-ips` and `import-domains` ([section 7.2](#72-import-ips)): dates, header and
+comment lines, the whitelist, the archive, a backup first, all or nothing, and `MAX_IPS`. Options in the query
+string: `dry_run`, `permanent`, `old_ips`, `date_format`, `reason`, `added_by`. Details: [docs/API.md](docs/API.md).
+
+```bash
+curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips/bulk?dry_run=true" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: text/plain" --data-binary @blocklist.csv
+```
 
 ### 6.10 Trusting the self-signed certificate
 

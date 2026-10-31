@@ -9,14 +9,17 @@ Internal errors are logged on the server and never shown to the caller.
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 from functools import wraps
+from pathlib import Path
 from typing import Any, Callable
 
 from flask import Flask, Response, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import __version__, auth, db, replica
+from . import __version__, auth, db, importer, replica
 from .config import Settings
 from .locking import LockTimeout
 from .service import Furnace, Result
@@ -214,6 +217,88 @@ def create_app(settings: Settings | None = None) -> Flask:
     def check_bulk_size(entries: list[Any]) -> None:
         if len(entries) > MAX_BULK_ENTRIES:
             raise _BadRequest(f"Send at most {MAX_BULK_ENTRIES} entries per request.")
+
+    def flag(name: str, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.lower() in ("1", "true", "yes", "0", "false", "no", ""):
+            return value.lower() in ("1", "true", "yes")
+        raise _BadRequest(f"The field {name} must be true or false.")
+
+    def bulk_file(kind: str) -> tuple[Response, int]:
+        """A whole file of blocked IPs or domains, with the same rules as 'furnace import-ips'.
+
+        Plain text body (the file as it is; options in the query string) or JSON
+        {"entries": ["ip", "ip,date,reason", ...], "dry_run": true, ...}.
+        """
+        if request.mimetype == "application/json":
+            d = body()
+            entries = d.get("entries")
+            if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
+                raise _BadRequest("The field entries must be a list of lines (strings).")
+            text = "\n".join(entries)
+            options: dict[str, Any] = d
+        else:
+            text = request.get_data(as_text=True)
+            options = dict(request.args)
+        lines = sum(1 for line in text.splitlines() if line.strip())
+        if lines > MAX_BULK_ENTRIES:
+            raise _BadRequest(f"Send at most {MAX_BULK_ENTRIES} lines per request.")
+        if not lines:
+            raise _BadRequest("The upload has no lines.")
+        dry_run = flag("dry_run", options.get("dry_run", False))
+        added_by = options.get("added_by") or g.source.split("@")[0]
+        reason = options.get("reason") or "uploaded through the API"
+        if not isinstance(added_by, str) or not isinstance(reason, str):
+            raise _BadRequest("added_by and reason must be text.")
+        folder = settings.data_dir / "uploads"
+        folder.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(dir=folder, prefix=f"api-{kind}-", suffix=".txt")
+        source = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            if kind == "ips":
+                old_ips = options.get("old_ips", "archive")
+                date_format = options.get("date_format") or None
+                if old_ips not in ("archive", "fresh"):
+                    raise _BadRequest("The field old_ips must be 'archive' or 'fresh'.")
+                if date_format is not None and not isinstance(date_format, str):
+                    raise _BadRequest("The field date_format must be text, for example %d/%m/%Y.")
+                report = importer.import_ips(settings, source, dry_run=dry_run, date_format=date_format,
+                                             old_ips=old_ips, added_by=added_by, reason=reason,
+                                             permanent=flag("permanent", options.get("permanent", False)))
+            else:
+                report = importer.import_domains(settings, source, dry_run=dry_run, added_by=added_by,
+                                                 reason=reason)
+        except importer.ImportError_ as exc:
+            if not settings.is_leader():
+                return _error("not_leader", "This server is the standby. Send the upload to the shared IP.", 503)
+            return _error("rejected", str(exc), 422)
+        finally:
+            source.unlink(missing_ok=True)
+        skipped = [{"line": s.line_no, "reason_code": s.reason, "text": s.text[:200]} for s in report.skipped]
+        answer: dict[str, Any] = {
+            "status": "ok",
+            "message": report.summary().split("\nBackup:")[0].split("\nReport:")[0].replace("\n", " "),
+            "dry_run": dry_run, "received": report.total_lines, "added": report.added_active,
+        }
+        if kind == "ips":
+            answer.update(permanent=report.permanent, archived=report.added_archive)
+        answer.update(blocked_again=report.restored, skipped=len(skipped), skipped_lines=skipped[:1000],
+                      report=Path(report.report_file).name)
+        log.info("Bulk %s upload by %s: %s", kind, g.source, answer["message"])
+        return jsonify(answer), 200
+
+    @app.post("/api/v1/ips/bulk")
+    @require("blocklist", "write")
+    def bulk_ips():
+        return bulk_file("ips")
+
+    @app.post("/api/v1/domains/bulk")
+    @require("blocklist", "write")
+    def bulk_domains():
+        return bulk_file("domains")
 
     @app.post("/api/v1/whitelist/ips")
     @require("whitelist", "write")
