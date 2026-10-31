@@ -1,36 +1,24 @@
 # Next release: v0.8.0 (not released)
 
-The list of every change since v0.7.0 that goes into the next release, and the tests it needs.
-The process (user decision 2026-11-01):
+What changes in the next release, compared with v0.7.0.
 
-1. Every finished change is added to this list.
-2. The lab (test environment) is updated with the new code.
-3. The user and Claude test in the lab.
-4. Even when everything is OK, nothing is released yet. Only when the user says "update" or "new version":
-   check this list, then update the version on GitHub and publish the release with the packages.
-   After the release, this list starts again for the version after it.
+How a release happens (user decision 2026-11-01):
 
-## Changes
+1. Every finished change is added to this list. The lab can be updated and tried at any time.
+2. Nothing is released until the user says "update" or "new version".
+3. Then: the full tests (unit tests, the 11-system integration round, the package tests, and the Docker test
+   when Docker changed), then the version on GitHub and the release with the packages.
+4. After the release, this list is emptied for the version after it.
 
-| # | Change | Who sees it | Status | Commit |
-|---|---|---|---|---|
-| 1 | **Bulk upload of blocked IPs and domains through the API**: `POST /api/v1/ips/bulk`, `POST /api/v1/domains/bulk`. A whole file in one request, the same rules as `furnace import-ips` (dates, whitelist, archive, backup, all or nothing, `MAX_IPS`), `dry_run`, `permanent`, `old_ips`, `date_format`. Blocklist write. Leader only. | servers and Docker | coded, unit tests pass, in the lab | 7fff051 |
-| 2 | **Docker image (step 1)**: one container per host (API, nginx, keepalived, jobs), settings in `docker-compose.yml`, follower bundle, `docker exec` for tokens. README section 3.6. | Docker users | coded, Docker test 48/48, **paused by the user** (decide: in this release or later) | f78c4ec, 1ff9226 |
-| 3 | **Replication over HTTPS** (`POST /replica/snapshot` with a shared secret). Only on when `FURNACE_REPLICA_SECRET_FILE` is set, so only in Docker. Servers keep SSH. | Docker users | coded, unit tests pass | d075111 |
-| 4 | Small shared changes: nginx does not log `/health` (keepalived asks every 5 seconds); an empty replication block in the nginx template; `furnace-notify` works without systemd. | servers and Docker | coded, in the lab | f78c4ec |
-| 5 | Version 0.8.0 in the code; docs (README, `docs/API.md`, roadmap). | everyone | done | 1ff9226 |
+## What changes
 
-## Tests before the release
-
-| Test | Status |
-|---|---|
-| Unit tests (`pytest`) | 205 pass (2026-11-01) |
-| Lab: upgrade from 0.7.0 to 0.8.0 with the data kept | done 2026-11-01 (both servers, self-test passed) |
-| Lab: bulk upload of IPs and domains (dry run, real, skipped lines) | started (dry run through the test UI) |
-| Lab: failover and replication on the new version | to do |
-| Integration round on the 11 systems (`tests/integration/run.sh`) | to do |
-| Docker test (`tests/docker/run.sh`), only if item 2 is in this release | to do |
-
-## Open questions for the user
-
-- Item 2 (Docker): ship it in v0.8.0, or keep it out of the release notes until the Docker work goes on?
+1. **Upload a blocklist file through the API.** New: `POST /api/v1/ips/bulk` and `POST /api/v1/domains/bulk`.
+   A whole file of IPs or domains in one request, with the same rules as `furnace import-ips` (dates, whitelist,
+   archive, backup first, all or nothing, the list limit). Options: `dry_run`, `permanent`, `old_ips`,
+   `date_format`, `reason`, `added_by`. Needs the blocklist write permission.
+2. **Docker image** (step 1): Furnace in one container per host, settings in `docker-compose.yml`, the same
+   failover with keepalived. README section 3.6. *(Paused by the user: in this release or later is still open.)*
+3. **Replication over HTTPS for Docker.** The servers (`.deb`/`.rpm`) keep SSH replication.
+4. **Small changes on the servers:** nginx no longer logs `/health` (asked every 5 seconds), and the keepalived
+   notify script also works without systemd.
+5. **Docs:** README, `docs/API.md` and the roadmap are updated for the changes above.
