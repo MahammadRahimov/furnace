@@ -1,6 +1,6 @@
 # Furnace roadmap
 
-State on 2026-10-30: **v0.6.0 is released** (`.deb` and `.rpm`). v0.7.0 is coded (unit tests pass), not yet tested on the 11 systems and not released. This file holds the plan for the next steps,
+State on 2026-10-31: **v0.7.0 is released** (`.deb` and `.rpm`). Next: Docker support, step 1. This file holds the plan for the next steps,
 so the work can continue later exactly where it stopped.
 
 ## Decisions so far
@@ -26,46 +26,9 @@ so the work can continue later exactly where it stopped.
 | 1 | v0.4.0 | Debian 12 and 13. Flask and gunicorn bundled. Python 3.9+. |
 | 2 | v0.5.0 | `.rpm` for RHEL / Rocky / AlmaLinux / Oracle Linux / CentOS Stream 8, 9, 10, Fedora 41+, Amazon Linux 2023. firewalld. SELinux (tested on a real AlmaLinux 9.8 VM). |
 | 3 | v0.6.0 | Token permissions: a grid of Blocklist / Whitelist and Read / Write (write includes read). Each token has its own expiry, chosen when it is made (no default). `token edit`, `rotate` keeps the days, last use, warnings in `status` and the nightly cleanup log. Setup makes one token and asks its name, boxes and days. Tokens of 0.5 keep their rights and never expire. Integration 108/108 (`.deb`) and 107/107 (`.rpm`) on all 11 systems. |
+| 4 | v0.7.0 | Permanent IPs (`permanent: true` never expires; the same IP again changes nothing). The archive is a record of every different IP and domain ever blocked (first and last blocked, times blocked). Domains never expire. Schema 4 with a migration from 0.6. Unit tests 175. Integration 116/116 (`.deb`) and 115/115 (`.rpm`) on all 11 systems. |
 
 ## Next
-
-### v0.7.0: permanent IPs and the archive record (coded 2026-10-30; next: the 11-system test round when the user says "test it", then release)
-
-IPs:
-
-- `POST /api/v1/ips` gets an optional field `permanent` (true or false, default false).
-- Temporary IPs leave the EDL list after `ARCHIVE_AFTER_DAYS` (nightly cleanup, as today). Permanent IPs never leave
-  it. Only an unblock removes them.
-- The same IP again while it is in the list: `200 already_exists`, nothing changes, `permanent` is ignored.
-- Look-ups show `permanent` and, for temporary IPs, the expiry date.
-- `import-ips` gets the same option (`--permanent`). (There is no bulk block upload; only the whitelist has one.)
-- `furnace status` (and the nightly cleanup log) shows how many IPs are permanent and warns when they fill half of `MAX_IPS`.
-
-Domains:
-
-- Never expire, as today. No `permanent` field.
-
-Archive record (IPs and domains):
-
-- Written when an IP or domain is blocked for the first time, at the same time as the EDL list.
-- One row per IP or domain, never a duplicate, never removed. It keeps the first details (date, reason, added by,
-  incident) and also last blocked and times blocked.
-- Expiry and unblock remove it only from the EDL list. Blocked again later: back in the EDL list, the record row
-  gets a new last blocked and times blocked + 1.
-
-Upgrade from 0.6:
-
-- New database schema with a migration. Every IP and domain in the EDL list now gets a record row. The old archived
-  IPs become record rows too.
-- IPs already in the list stay temporary with their current date. Domains already in the list stay as they are
-  (they never expire).
-- `docs/API.md` and the README are updated with it.
-
-Built as: tables `ip_records` and `domain_records` (schema 4), column `blocked_ips.permanent`. The old table
-`archived_ips` stays empty, so a follower that still runs 0.6 accepts the snapshots during an upgrade. The archive
-CSV now lists IPs and domains and is written by the nightly cleanup, imports and rebuild (`furnace export archive`
-is always current). Unit tests 175. The integration test has new checks for a permanent IP, the archive after an
-unblock and the record on the follower.
 
 ### Later ideas (not planned)
 

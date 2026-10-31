@@ -964,12 +964,12 @@ tests/integration/run.sh almalinux:9        # also: almalinux:8, almalinux:10, r
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
-Results for v0.6.0 (every system with the same final package):
+Results for v0.7.0 (every system with the same final package):
 
 | System | Checks |
 |---|---|
-| Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13 (`.deb`) | 108 of 108 each (one more: `apt purge`) |
-| AlmaLinux 8, 9, 10, Rocky Linux 9, Oracle Linux 9, Fedora 42, Amazon Linux 2023 (`.rpm`) | 107 of 107 each |
+| Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13 (`.deb`) | 116 of 116 each (one more: `apt purge`) |
+| AlmaLinux 8, 9, 10, Rocky Linux 9, Oracle Linux 9, Fedora 42, Amazon Linux 2023 (`.rpm`) | 115 of 115 each |
 
 It covers:
 building the package, `apt install` with its dependencies, Flask and gunicorn from the bundle (not the system), nothing running before setup, `setup --check`, refusing
