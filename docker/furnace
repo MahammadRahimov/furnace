@@ -1,0 +1,116 @@
+#!/bin/bash
+# furnace: the one command for Furnace, inside the Docker container.
+#   docker exec -it furnace furnace help
+# The settings come from the container's environment (FURNACE_...), not from setup questions.
+set -euo pipefail
+
+LIB=/usr/lib/furnace
+STATE_DIR=/run/furnace-state
+
+py() { "$LIB/bin/furnace-python" "$@"; }
+version() { py -c 'import furnace; print(furnace.__version__)'; }
+
+usage() {
+    cat <<EOF
+Furnace $(version) (Docker): blocklist server that publishes IP and domain lists (EDLs, threat feeds).
+
+Usage: docker exec -it CONTAINER furnace COMMAND [options]
+
+Health:
+  status                 Show the role, the processes, replication and the list counts.
+  check                  Check the FURNACE_ settings of this container.
+  version                Show the version.
+
+Data (details: furnace COMMAND --help):
+EOF
+    py - <<'PY'
+from furnace.admin import build_parser
+
+parser = build_parser()
+for action in parser._subparsers._group_actions:
+    for choice in action._choices_actions:
+        if not choice.help.startswith(("(replication", "(setup")):
+            print(f"  {choice.dest:<23}{choice.help}")
+PY
+    echo
+    echo "Files to import: copy them in first, for example: docker cp list.txt CONTAINER:/tmp/list.txt"
+}
+
+# The data commands run as the furnace user. A file this user cannot read is copied first.
+run_data_command() {
+    local args=("$@") tmp="" i
+    if [[ "${args[0]}" == import-* ]]; then
+        for ((i = 1; i < ${#args[@]}; i++)); do
+            case "${args[i]}" in
+                --report|--added-by|--reason|--date-format|--old-ips|--config) i=$((i + 1)) ;;
+                -*) ;;
+                *)
+                    if [ -f "${args[i]}" ] && ! runuser -u furnace -- test -r "${args[i]}"; then
+                        tmp="$(mktemp -d /tmp/furnace-import.XXXXXX)"
+                        cp "${args[i]}" "$tmp/$(basename "${args[i]}")"
+                        chown -R furnace:furnace "$tmp"
+                        args[i]="$tmp/$(basename "${args[i]}")"
+                    fi
+                    break
+                    ;;
+            esac
+        done
+    fi
+    local code=0
+    runuser -u furnace -- env FURNACE_ACTOR="${FURNACE_ACTOR:-docker}" \
+        "$LIB/bin/furnace-python" -m furnace "${args[@]}" || code=$?
+    [ -n "$tmp" ] && rm -rf "$tmp"
+    return "$code"
+}
+
+status() {
+    local problems=0
+    echo "Furnace $(version) (Docker)"
+    py - "$STATE_DIR/status.json" <<'PY' || problems=1
+import json, os, sys
+
+try:
+    status = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    print("The process manager has not written its status yet. Wait a few seconds.")
+    sys.exit(1)
+shared = os.environ.get("FURNACE_SHARED_IP", "")
+role = status.get("role", "unknown")
+where = "this host owns" if role == "leader" else "the other host owns"
+print(f"Role:     {role} ({where} the shared IP {shared})")
+print(f"Host:     {os.environ.get('FURNACE_THIS_IP', '')}, other host {os.environ.get('FURNACE_PEER_IP', '')}")
+print()
+print("Processes:")
+bad = 0
+for name, (state, restarts) in status.get("processes", {}).items():
+    note = f"   (restarted {restarts} times)" if restarts else ""
+    mark = "" if state == "running" else "   <-- expected running"
+    bad |= state != "running"
+    print(f"  {name:<12} {state}{note}{mark}")
+replication = status.get("replication") or ("not needed (follower)" if role != "leader" else "waiting for the first run")
+print(f"\nReplication: {replication}")
+if role == "leader" and replication.startswith("failed"):
+    bad = 1
+print()
+sys.exit(bad)
+PY
+    run_data_command stats || problems=1
+    if [ "$problems" -ne 0 ]; then
+        echo
+        echo "Something is not right. Look at: docker logs --since 1h CONTAINER"
+        return 1
+    fi
+}
+
+case "${1:-help}" in
+    help|-h|--help) usage ;;
+    version|--version) version ;;
+    status) status ;;
+    check) py -m furnace.container check ;;
+    setup|failover-test)
+        echo "In Docker, the settings come from the container's environment (FURNACE_...), see docker-compose.yml." >&2
+        [ "$1" = failover-test ] && echo "Test a failover with: docker stop furnace (on the leader host), then docker start furnace." >&2
+        exit 2 ;;
+    snapshot|apply-replica|init-secrets) echo "'$1' is used by Furnace itself only." >&2; exit 2 ;;
+    *) run_data_command "$@" ;;
+esac

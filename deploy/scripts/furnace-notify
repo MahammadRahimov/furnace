@@ -4,6 +4,8 @@
 #
 # It writes the role file that Furnace reads, and starts the nightly
 # cleanup timer only on the server that owns the shared IP.
+# In Docker there is no systemd: the container's process manager reads
+# the role file and runs the cleanup on the leader only.
 set -euo pipefail
 
 STATE="${3:-}"
@@ -17,18 +19,24 @@ set_role() {
     mv -f "$DIR/role.tmp" "$DIR/role"
 }
 
+with_systemd() { [ -d /run/systemd/system ]; }
+
+say() {
+    if [ -S /dev/log ]; then logger -t furnace "$*" || true; else echo "furnace: $*"; fi
+}
+
 case "$STATE" in
     MASTER)
         set_role leader
-        systemctl start furnace-cleanup.timer || true
-        logger -t furnace "This server now owns the shared IP. It is the leader."
+        if with_systemd; then systemctl start furnace-cleanup.timer || true; fi
+        say "This server now owns the shared IP. It is the leader."
         ;;
     BACKUP|FAULT|STOP)
         set_role follower
-        systemctl stop furnace-cleanup.timer || true
-        logger -t furnace "This server is now the standby (keepalived state: $STATE)."
+        if with_systemd; then systemctl stop furnace-cleanup.timer || true; fi
+        say "This server is now the standby (keepalived state: $STATE)."
         ;;
     *)
-        logger -t furnace "furnace-notify: unknown state '$STATE', no change."
+        say "furnace-notify: unknown state '$STATE', no change."
         ;;
 esac

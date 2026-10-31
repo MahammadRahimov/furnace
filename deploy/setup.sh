@@ -780,7 +780,8 @@ else
     R_LISTEN="    listen 80;"
     R_TLS="    # Plain HTTP (USE_HTTPS=no). Test lab only."
 fi
-export R_LISTS_ALLOW R_API_ALLOW R_LISTEN R_TLS
+R_REPLICA="    # Replication uses SSH on servers (HTTPS only in Docker)."
+export R_LISTS_ALLOW R_API_ALLOW R_LISTEN R_TLS R_REPLICA
 
 render() { "$PY" "$LIB/render.py" "$1" "$2"; }
 

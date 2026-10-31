@@ -57,7 +57,9 @@ server {
         proxy_read_timeout 120s;
     }
 
+{{REPLICA}}
     location = /health {
+        access_log off;  # keepalived asks every 5 seconds
         allow 127.0.0.1;
         allow {{THIS_IP}};
         allow {{PEER_IP}};
