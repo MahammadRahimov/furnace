@@ -1,4 +1,4 @@
-"""Replication over HTTPS (Docker): the leader POSTs a gzip snapshot to /replica/snapshot."""
+"""Replication over HTTPS: the leader POSTs a gzip snapshot to /replica/snapshot."""
 
 import gzip
 import io

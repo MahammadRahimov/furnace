@@ -79,7 +79,7 @@ class Settings:
     lock_timeout: int = 30
     lockout_failures: int = 10    # this many wrong tokens from one IP ...
     lockout_minutes: int = 15     # ... within this time lock that IP for this time
-    replica_secret_file: Path | None = None  # Docker: HTTPS replication on; the secret both servers share
+    replica_secret_file: Path | None = None  # HTTPS replication on; the secret both servers share
 
     @property
     def db_path(self) -> Path:
@@ -103,7 +103,7 @@ class Settings:
 
     @property
     def incoming_dir(self) -> Path:
-        return self.data_dir / "incoming"  # snapshots received over HTTPS (Docker)
+        return self.data_dir / "incoming"  # snapshots received over HTTPS
 
     @property
     def edl_users_path(self) -> Path:

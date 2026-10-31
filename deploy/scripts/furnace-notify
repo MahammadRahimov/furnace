@@ -4,8 +4,7 @@
 #
 # It writes the role file that Furnace reads, and starts the nightly
 # cleanup timer only on the server that owns the shared IP.
-# In Docker there is no systemd: the container's process manager reads
-# the role file and runs the cleanup on the leader only.
+# Without systemd (for example in a container) it only writes the role file.
 set -euo pipefail
 
 STATE="${3:-}"

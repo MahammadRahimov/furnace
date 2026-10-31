@@ -1,6 +1,6 @@
 # Furnace roadmap
 
-State on 2026-11-01: **v0.7.0 is released** (`.deb` and `.rpm`). v0.8.0 (Docker, step 1) is coded and has passed the Docker test; next: the 11-system round, then the release. This file holds the plan for the next steps,
+State on 2026-11-01: **v0.7.0 is released** (`.deb` and `.rpm`). v0.8.0 (bulk blocklist upload, HTTPS replication) is coded, not released; the list is in `docs/NEXT-RELEASE.md`. Docker step 1 is coded and parked on the branch `docker` (not in v0.8.0). This file holds the plan for the next steps,
 so the work can continue later exactly where it stopped.
 
 ## Decisions so far
@@ -22,6 +22,7 @@ so the work can continue later exactly where it stopped.
 | 2026-11-01 | **Docker stays simple and separate (option a).** The container runs only Furnace; other software belongs in its own container or on the host. No custom keepalived file, no extra keepalived settings and no external failover mode in v0.8.0: the user only fills in `docker-compose.yml`. An external role command (`furnace role leader|follower`) may come with the Kubernetes step, where it is needed. |
 | 2026-11-01 | **Bulk upload of blocked IPs and domains through the API** (changes the 2026-10-28 "no bulk block endpoint" decision). `POST /api/v1/ips/bulk` and `/api/v1/domains/bulk`, blocklist write, the same rules as `furnace import-ips` (dates, whitelist, archive, backup, all or nothing, `MAX_IPS`), `dry_run` and `permanent`. Still one token per program. |
 | 2026-11-01 | **The servers replicate over HTTPS too, in v0.8.0** (option a). The leader sends the snapshot to `https://PEER_IP/replica/snapshot`; the secret is derived from the TLS key both servers already share, so an upgrade needs no new bundle. For one version the leader falls back to SSH when HTTPS does not work (an old follower during the upgrade). The version after v0.8.0 removes SSH replication. |
+| 2026-11-01 | **No Docker image in v0.8.0.** The Docker work moves to the branch `docker` (kept, parked); `main` and the release have no Docker files or Docker docs. The shared parts (HTTPS replication, the notify script without systemd) stay. |
 
 ## Done
 
@@ -43,9 +44,9 @@ so the work can continue later exactly where it stopped.
 
 ### After v0.7.0: Docker support, both ways (user decision 2026-10-30)
 
-Containers are supported from v0.8.0 (step 1). Kubernetes is not supported yet (step 2).
+Not in v0.8.0 (user decision 2026-11-01): step 1 is coded and tested (Docker test 48/48) on the branch `docker`, parked until the user continues it. Containers stay unsupported on `main`.
 
-1. **Shared base + option A** (v0.8.0, released on its own; coded 2026-11-01, Docker test 48/48, not released):
+1. **Shared base + option A** (coded 2026-11-01 on the branch `docker`, Docker test 48/48, parked, not released):
    - One Furnace image (Debian 12 slim, the same bundled Flask and gunicorn). One container per server runs the
      API, nginx, keepalived and the timers. A small process manager (`furnace/container.py`) replaces systemd:
      it starts them, restarts what dies, runs replication every minute, backup at 01:30 and cleanup at 02:30
@@ -75,7 +76,7 @@ Containers are supported from v0.8.0 (step 1). Kubernetes is not supported yet (
 ## How to test
 
 - Unit tests (WSL Ubuntu-22.04): `~/furnace-venv/bin/python -m pytest -q`
-- Docker image (two containers, failover): `tests/docker/run.sh`
+- Docker image (on the branch `docker`): `tests/docker/run.sh`
 - Docker integration, one system at a time (the PC has little free memory):
   `tests/integration/run.sh ubuntu:24.04` (or `debian:12`, `almalinux:9`, `fedora:42`, `amazonlinux:2023`, ...).
   Docker Desktop must be running. A failure at the install step is often a short DNS problem in Docker: run again.

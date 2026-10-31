@@ -1,6 +1,0 @@
-.git
-dist
-build
-tests
-**/__pycache__
-.pytest_cache

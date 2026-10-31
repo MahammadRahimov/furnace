@@ -74,9 +74,13 @@ WAL mode (Write-Ahead Logging) with `synchronous=FULL`, nginx, keepalived and Op
 
 SUSE is not supported (the work is parked on the branch `suse`). Both servers should run the same system.
 
-**Docker:** Furnace also comes as a Docker image: two hosts, one container each, the same failover with
-keepalived. See [section 3.6](#36-docker). Kubernetes is not supported yet (it is the next step in
-`docs/ROADMAP.md`).
+**Docker and other containers are not supported.** Run Furnace on virtual machines or real servers. Furnace needs
+systemd (its services and timers), keepalived with real network access (the shared IP must be reachable by the
+list reader and the caller, and must move between two hosts), and its own host firewall rules. A normal container
+has none of these, and data in a container without volumes is lost when the container is removed. The integration
+tests do run in containers, but only with `--privileged` and systemd, on one host: that is fine for a test, not for
+real use (almost full control of the host, and no failover when the host dies). Container support is planned
+(`docs/ROADMAP.md`); the work so far is parked on the branch `docker`.
 
 | | Debian family (`.deb`) | Red Hat family (`.rpm`) |
 |---|---|---|
@@ -237,108 +241,6 @@ For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is 
 **Safe to run again.** Run `sudo furnace setup` again to change an answer. The brackets show the current answers.
 It never wipes the database and never changes the tokens, the list logins or the certificate.
 The log is in `/var/log/furnace-setup.log`. It never contains secrets.
-
-### 3.6 Docker
-
-Instead of the package, each of the two hosts can run one Furnace container. The container runs everything
-inside: the API, nginx, keepalived, replication, the daily backup and the nightly cleanup. There are no setup
-questions: the settings are environment variables in `docker-compose.yml`.
-
-**What the hosts need:** Linux with Docker and Docker Compose, in the same network (the shared IP moves between
-them), a free port 443, and these open between the hosts and to the clients:
-
-| From | To | Port | Why |
-|---|---|---|---|
-| the list reader and the caller | the shared IP | TCP 443 | lists and API |
-| each host | the other host | TCP 443 | replication over HTTPS |
-| each host | the other host | IP protocol 112 (VRRP) | keepalived |
-
-The container does not change the host firewall. Open these ports yourself.
-
-The container uses the host network (`network_mode: host`) and gets only two extra rights, `NET_ADMIN` and
-`NET_RAW`, for keepalived. It is not privileged.
-
-**1. Load the image** (on both hosts). It is a file on the GitHub release:
-
-```bash
-gh release download v0.8.0 -R MahammadRahimov/furnace -p 'furnace-image-*.tar.gz'
-docker load -i furnace-image-0.8.0.tar.gz
-```
-
-Or build it from the repository: `docker build -f docker/Dockerfile -t furnace:0.8.0 .`
-
-**2. Leader.** Make a folder, copy `docker/docker-compose.yml` into it and change the values marked `CHANGE`:
-
-```bash
-mkdir ~/furnace && cd ~/furnace && cp /path/to/docker-compose.yml .
-nano docker-compose.yml      # FURNACE_ROLE: leader, and the three IPs
-docker compose up -d
-docker logs furnace          # "Ready." and "Follower bundle: /etc/furnace/furnace-peer-bundle.tar.gz"
-```
-
-At the first start the leader makes the certificate, the keepalived password, the replication secret and the
-follower bundle `./config/furnace-peer-bundle.tar.gz`. They stay in `./config` (keep it private).
-
-**3. Follower.** The same folder and file, with `FURNACE_ROLE: follower`, `FURNACE_THIS_IP` and `FURNACE_PEER_IP`
-swapped. Copy the bundle from the leader first, then start:
-
-```bash
-mkdir -p ~/furnace/config
-scp you@LEADER_IP:furnace/config/furnace-peer-bundle.tar.gz ~/furnace/config/
-cd ~/furnace && docker compose up -d
-```
-
-The follower takes the secrets from the bundle and deletes it. Without the bundle it stops and says what to do.
-Delete the copy you used for the transfer.
-
-**4. The first API token and the list login** (on the leader). They are shown once and never written to the
-container log:
-
-```bash
-docker exec -it furnace furnace token add api       # asks the permission grid and the days
-docker exec -it furnace furnace edl-user add paloalto
-```
-
-**Settings** (environment variables):
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `FURNACE_ROLE` | (required) | `leader` on one host, `follower` on the other |
-| `FURNACE_THIS_IP` | (required) | this host's IP |
-| `FURNACE_PEER_IP` | (required) | the other host's IP |
-| `FURNACE_SHARED_IP` | (required) | the shared IP (VIP) everyone uses |
-| `FURNACE_SHARED_IP_PREFIX` | `24` | network prefix of the shared IP |
-| `FURNACE_INTERFACE` | the card that has `FURNACE_THIS_IP` | the host's network card |
-| `FURNACE_API_ALLOW_FROM` | `any` | who may call the API (every call still needs a token) |
-| `FURNACE_LISTS_ALLOW_FROM` | `any` | who may download the lists (always with the login) |
-| `FURNACE_VRRP_ROUTER_ID` | `51` | the same on both hosts, unique on the network |
-| `FURNACE_ARCHIVE_AFTER_DAYS` | `30` | days a temporary IP stays in the list |
-| `FURNACE_MAX_IPS`, `FURNACE_MAX_DOMAINS` | `50000` | most entries per list, `0` = no limit |
-| `TZ` | `UTC` | time zone of the backup (01:30) and the cleanup (02:30) |
-
-A wrong setting stops the container at start, with a message that names every problem. Check the settings
-without starting: `docker compose run --rm furnace check`.
-
-**Daily work** is the same `furnace` command, through `docker exec`:
-
-```bash
-docker exec furnace furnace status          # role, processes, replication, list counts
-docker exec furnace furnace token list
-docker cp ips.txt furnace:/tmp/ips.txt && docker exec furnace furnace import-ips /tmp/ips.txt
-docker logs --since 1h furnace              # what happened (no secrets in it)
-```
-
-**Failover test:** `docker stop furnace` on the leader. Within a few seconds the follower owns the shared IP
-and becomes the leader. `docker start furnace` brings the old leader back as the standby (it does not take the
-shared IP back). It gets the new data with the next replication, within a minute.
-
-**Differences from the servers:**
-- Replication goes over HTTPS only (port 443, only from the other host, with the replication secret). The
-  servers also use HTTPS, but keep SSH as a fallback for one version.
-- No setup questions and no self-test at start. `furnace setup` and `furnace failover-test` do not exist.
-- The host firewall is not touched.
-- **Upgrade:** load the new image, change `image:` in `docker-compose.yml`, `docker compose up -d`. The leader
-  first, then the follower. The database is updated at start. Data and secrets stay in `./config` and `./data`.
 
 ## 4. Setup questions and settings
 
@@ -1082,18 +984,6 @@ tests/integration/run.sh almalinux:9        # also: almalinux:8, almalinux:10, r
                                             #       fedora:42, amazonlinux:2023
 ```
 
-Docker image test (two containers like `docker-compose.yml`, but on a test network; not privileged, only
-`NET_ADMIN` and `NET_RAW`):
-
-```bash
-tests/docker/run.sh
-```
-
-It covers wrong settings, the leader's secrets and bundle, a follower without and with the bundle, file rights,
-the first token and list login with `docker exec` (not in the log), the API and the lists through the shared IP,
-replication over HTTPS (and that only the other host with the secret may send), a process that stops and is
-started again, failover with `docker stop`, and the old leader coming back as the standby with its data.
-
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
@@ -1135,9 +1025,6 @@ replication timer was not allowed to run ssh); it is fixed.
 ## 14. What was not tested
 
 Be aware of these limits before you go live:
-
-- **Docker on two real hosts.** The image was tested with two containers on one Docker host (a test network),
-  not with `network_mode: host` on two machines. Test a failover on your hosts before you go live.
 
 - **A real Palo Alto firewall.** The EDL download, also with the EDL login, was tested with curl from a container.
   The PAN-OS menus in this README come from documentation and may differ in your version.

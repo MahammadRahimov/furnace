@@ -128,7 +128,7 @@ def create_app(settings: Settings | None = None) -> Flask:
                         "role": "leader" if settings.is_leader() else "follower",
                         "ips": ips, "domains": domains})
 
-    # -------------------------------------------------------------- replication (Docker)
+    # -------------------------------------------------------------- replication
 
     if settings.replica_secret_file is not None:
         @app.post("/replica/snapshot")
