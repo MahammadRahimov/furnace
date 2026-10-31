@@ -19,6 +19,7 @@ so the work can continue later exactly where it stopped.
 | 2026-10-30 | **Two lists.** The EDL list is what is blocked now. The archive is a record of every different IP and domain ever blocked: written when it is first blocked, one row each, no duplicates, never removed. The row keeps first blocked, last blocked and times blocked. |
 | 2026-10-30 | **Domains never expire** (domains are not dynamic like IPs). No `permanent` field for domains. Domains get the archive record too. |
 | 2026-10-31 | **Docker, step 1 choices.** One container per server with everything inside (API, nginx, keepalived, timers, replication); a small built-in process manager replaces systemd. Replication in Docker goes **over HTTPS** (the leader sends the snapshot to the follower's Furnace with a replication secret), no SSH. The servers (`.deb`/`.rpm`) keep SSH replication for now. The first API token and the list login are made with `docker exec` commands and shown once, never in `docker logs`. The image comes as a file on the GitHub release (`docker load`) plus the Dockerfile in the repo; no registry. |
+| 2026-11-01 | **Docker stays simple and separate (option a).** The container runs only Furnace; other software belongs in its own container or on the host. No custom keepalived file, no extra keepalived settings and no external failover mode in v0.8.0: the user only fills in `docker-compose.yml`. An external role command (`furnace role leader|follower`) may come with the Kubernetes step, where it is needed. |
 
 ## Done
 
