@@ -1,6 +1,6 @@
 # Furnace roadmap
 
-State on 2026-10-31: **v0.7.0 is released** (`.deb` and `.rpm`). Next: Docker support, step 1. This file holds the plan for the next steps,
+State on 2026-11-01: **v0.7.0 is released** (`.deb` and `.rpm`). v0.8.0 (Docker, step 1) is coded and has passed the Docker test; next: the 11-system round, then the release. This file holds the plan for the next steps,
 so the work can continue later exactly where it stopped.
 
 ## Decisions so far
@@ -40,9 +40,9 @@ so the work can continue later exactly where it stopped.
 
 ### After v0.7.0: Docker support, both ways (user decision 2026-10-30)
 
-Starts after the v0.7.0 test round and release. Containers are not supported until then (the README says so).
+Containers are supported from v0.8.0 (step 1). Kubernetes is not supported yet (step 2).
 
-1. **Shared base + option A** (v0.8.0, about 2 to 3 sessions, released on its own; started 2026-11-01):
+1. **Shared base + option A** (v0.8.0, released on its own; coded 2026-11-01, Docker test 48/48, not released):
    - One Furnace image (Debian 12 slim, the same bundled Flask and gunicorn). One container per server runs the
      API, nginx, keepalived and the timers. A small process manager (`furnace/container.py`) replaces systemd:
      it starts them, restarts what dies, runs replication every minute, backup at 01:30 and cleanup at 02:30
@@ -72,6 +72,7 @@ Starts after the v0.7.0 test round and release. Containers are not supported unt
 ## How to test
 
 - Unit tests (WSL Ubuntu-22.04): `~/furnace-venv/bin/python -m pytest -q`
+- Docker image (two containers, failover): `tests/docker/run.sh`
 - Docker integration, one system at a time (the PC has little free memory):
   `tests/integration/run.sh ubuntu:24.04` (or `debian:12`, `almalinux:9`, `fedora:42`, `amazonlinux:2023`, ...).
   Docker Desktop must be running. A failure at the install step is often a short DNS problem in Docker: run again.
@@ -79,4 +80,5 @@ Starts after the v0.7.0 test round and release. Containers are not supported unt
   `Start-VM omerta-alma9` and `(Get-VMNetworkAdapter -VMName omerta-alma9).IPAddresses`. Count SELinux denials in
   the raw `/var/log/audit/audit.log`, not with `ausearch -ts`. Put the VM back as it was afterwards.
 - Release: build the `.deb` in WSL (`packaging/build-deb.sh dist`), the `.rpm` in an `almalinux:9` container
-  (`packaging/build-rpm.sh`), then `git tag`, `git push`, `gh release create` with both files.
+  (`packaging/build-rpm.sh`), the image with `docker build -f docker/Dockerfile --build-arg VERSION=V -t furnace:V .` and
+  `docker save furnace:V | gzip > dist/furnace-image-V.tar.gz`, then `git tag`, `git push`, `gh release create` with the three files.
