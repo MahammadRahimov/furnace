@@ -16,7 +16,7 @@ from flask import Flask, Response, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import __version__, auth, db
+from . import __version__, auth, db, replica
 from .config import Settings
 from .locking import LockTimeout
 from .service import Furnace, Result
@@ -124,6 +124,26 @@ def create_app(settings: Settings | None = None) -> Flask:
         return jsonify({"status": "ok", "version": __version__,
                         "role": "leader" if settings.is_leader() else "follower",
                         "ips": ips, "domains": domains})
+
+    # -------------------------------------------------------------- replication (Docker)
+
+    if settings.replica_secret_file is not None:
+        @app.post("/replica/snapshot")
+        def receive_snapshot():
+            """The leader sends a gzip snapshot every minute. nginx lets only the other server in."""
+            caller = request.remote_addr or "unknown"
+            header = request.headers.get("Authorization", "")
+            given = header[7:].strip() if header[:7].lower() == "bearer " else ""
+            if not replica.secret_matches(settings.replica_secret_file, given):  # type: ignore[arg-type]
+                log.warning("Refused a snapshot from %s: wrong replication secret.", caller)
+                return _error("unauthorized", "The replication secret is missing or wrong.", 401)
+            request.max_content_length = replica.MAX_SNAPSHOT_BYTES
+            try:
+                counts = replica.receive_snapshot(settings, request.stream)
+            except replica.ReplicaError as exc:
+                log.warning("Refused a snapshot from %s: %s", caller, exc)
+                return _error("rejected", str(exc), 409 if settings.is_leader() else 422)
+            return jsonify({"status": "ok", "applied": counts})
 
     # -------------------------------------------------------------- IPs
 

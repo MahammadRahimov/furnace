@@ -79,6 +79,7 @@ class Settings:
     lock_timeout: int = 30
     lockout_failures: int = 10    # this many wrong tokens from one IP ...
     lockout_minutes: int = 15     # ... within this time lock that IP for this time
+    replica_secret_file: Path | None = None  # Docker: HTTPS replication on; the secret both servers share
 
     @property
     def db_path(self) -> Path:
@@ -99,6 +100,10 @@ class Settings:
     @property
     def archive_csv_path(self) -> Path:
         return self.archive_dir / "archive.csv"
+
+    @property
+    def incoming_dir(self) -> Path:
+        return self.data_dir / "incoming"  # snapshots received over HTTPS (Docker)
 
     @property
     def edl_users_path(self) -> Path:
@@ -134,6 +139,8 @@ class Settings:
             lock_timeout=_int("FURNACE_LOCK_TIMEOUT", env.get("FURNACE_LOCK_TIMEOUT"), 30, minimum=1),
             lockout_failures=_int("FURNACE_LOCKOUT_FAILURES", env.get("FURNACE_LOCKOUT_FAILURES"), 10, minimum=1),
             lockout_minutes=_int("FURNACE_LOCKOUT_MINUTES", env.get("FURNACE_LOCKOUT_MINUTES"), 15, minimum=1),
+            replica_secret_file=(Path(env["FURNACE_REPLICA_SECRET_FILE"])
+                                 if env.get("FURNACE_REPLICA_SECRET_FILE") else None),
         )
 
     @classmethod

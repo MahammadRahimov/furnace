@@ -4,12 +4,21 @@ The leader pushes a full database snapshot every minute. The follower
 checks it, copies it into its own database with the SQLite backup
 function (one step, safe with WAL), and rebuilds its EDL files.
 A leader never applies a snapshot, so a late push cannot overwrite it.
+
+On servers the snapshot comes over SSH. In Docker it comes over HTTPS
+(receive_snapshot, called by the API) with a secret both servers share.
 """
 
 from __future__ import annotations
 
+import gzip
+import hmac
+import os
 import sqlite3
+import tempfile
+import zlib
 from pathlib import Path
+from typing import BinaryIO
 
 from . import db, edl
 from .config import Settings
@@ -19,8 +28,64 @@ REQUIRED_TABLES = {"blocked_ips", "archived_ips", "blocked_domains", "whitelist_
                    "whitelist_domains", "audit_log", "meta"}
 
 
+MAX_SNAPSHOT_BYTES = 2 * 1024 ** 3  # 2 GB, so a broken sender cannot fill the disk
+SNAPSHOT_MAGIC = b"SQLite format 3\x00"
+
+
 class ReplicaError(Exception):
     pass
+
+
+def read_secret(path: Path) -> str:
+    try:
+        secret = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ReplicaError(f"Cannot read the replication secret {path}: {exc.strerror}.") from None
+    if len(secret) < 32:
+        raise ReplicaError(f"The replication secret in {path} is too short.")
+    return secret
+
+
+def secret_matches(path: Path, given: str) -> bool:
+    try:
+        expected = read_secret(path)
+    except ReplicaError:
+        return False
+    return bool(given) and hmac.compare_digest(given.encode(), expected.encode())
+
+
+def receive_snapshot(settings: Settings, stream: BinaryIO, limit: int = MAX_SNAPSHOT_BYTES) -> dict[str, int]:
+    """Unpack a gzip snapshot from the leader into the incoming folder, then apply it."""
+    folder = settings.incoming_dir
+    folder.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=folder, prefix=".snapshot.", suffix=".tmp")
+    tmp = Path(name)
+    try:
+        size = 0
+        with os.fdopen(fd, "wb") as out:
+            try:
+                with gzip.GzipFile(fileobj=stream, mode="rb") as unpacked:
+                    while True:
+                        chunk = unpacked.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > limit:
+                            raise ReplicaError("The snapshot is too large. It was dropped.")
+                        out.write(chunk)
+            except (OSError, EOFError, zlib.error):
+                raise ReplicaError("The snapshot is not valid gzip data. It was dropped.") from None
+        with open(tmp, "rb") as check:
+            if check.read(len(SNAPSHOT_MAGIC)) != SNAPSHOT_MAGIC:
+                raise ReplicaError("The received data is not a SQLite database. It was dropped.")
+        target = folder / "snapshot.db"
+        os.replace(tmp, target)
+        try:
+            return apply_snapshot(settings, target)
+        finally:
+            target.unlink(missing_ok=True)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def apply_snapshot(settings: Settings, source: Path) -> dict[str, int]:
