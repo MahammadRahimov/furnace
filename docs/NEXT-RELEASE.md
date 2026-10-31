@@ -6,8 +6,9 @@ The process (user decision 2026-11-01):
 1. Every finished change is added to this list.
 2. The lab (test environment) is updated with the new code.
 3. The user and Claude test in the lab.
-4. Only when everything is OK: check this list, then update the version on GitHub and publish the release
-   with the packages. After the release, this list starts again for the version after it.
+4. Even when everything is OK, nothing is released yet. Only when the user says "update" or "new version":
+   check this list, then update the version on GitHub and publish the release with the packages.
+   After the release, this list starts again for the version after it.
 
 ## Changes
 
