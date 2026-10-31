@@ -18,6 +18,7 @@ so the work can continue later exactly where it stopped.
 | 2026-10-30 | **Same IP or domain again:** if it is in the list, nothing changes, whatever `permanent` says (no upgrade). If it is not in the list, it is added. |
 | 2026-10-30 | **Two lists.** The EDL list is what is blocked now. The archive is a record of every different IP and domain ever blocked: written when it is first blocked, one row each, no duplicates, never removed. The row keeps first blocked, last blocked and times blocked. |
 | 2026-10-30 | **Domains never expire** (domains are not dynamic like IPs). No `permanent` field for domains. Domains get the archive record too. |
+| 2026-10-31 | **Docker, step 1 choices.** One container per server with everything inside (API, nginx, keepalived, timers, replication); a small built-in process manager replaces systemd. Replication in Docker goes **over HTTPS** (the leader sends the snapshot to the follower's Furnace with a replication secret), no SSH. The servers (`.deb`/`.rpm`) keep SSH replication for now. The first API token and the list login are made with `docker exec` commands and shown once, never in `docker logs`. The image comes as a file on the GitHub release (`docker load`) plus the Dockerfile in the repo; no registry. |
 
 ## Done
 
@@ -41,12 +42,27 @@ so the work can continue later exactly where it stopped.
 
 Starts after the v0.7.0 test round and release. Containers are not supported until then (the README says so).
 
-1. **Shared base + option A** (about 2 to 3 sessions, released on its own):
-   - An official Furnace image: API, nginx and the timers without systemd.
-   - Settings from environment variables instead of setup questions. Volumes for the database and the certificate.
-   - No host firewall changes from inside a container.
-   - Failover as today: keepalived on the host network (`NET_ADMIN`), two hosts, one shared IP, SSH snapshots.
-   - A `docker-compose.yml` example. Tests for the image.
+1. **Shared base + option A** (v0.8.0, about 2 to 3 sessions, released on its own; started 2026-11-01):
+   - One Furnace image (Debian 12 slim, the same bundled Flask and gunicorn). One container per server runs the
+     API, nginx, keepalived and the timers. A small process manager (`furnace/container.py`) replaces systemd:
+     it starts them, restarts what dies, runs replication every minute, backup at 01:30 and cleanup at 02:30
+     (leader only), and stops everything cleanly.
+   - Settings from environment variables (`FURNACE_ROLE`, `FURNACE_THIS_IP`, `FURNACE_PEER_IP`,
+     `FURNACE_SHARED_IP`, ...) instead of setup questions. They are checked at start; a wrong value stops the
+     container with a clear message. Two volumes: `/etc/furnace` (certificate and secrets) and
+     `/var/lib/furnace` (database, lists, backups).
+   - First start on the leader: certificate, keepalived password and replication secret are made, plus the
+     follower bundle file. The follower starts only with that bundle in its `/etc/furnace` volume.
+   - Replication over HTTPS: every minute the leader sends a gzip snapshot to `https://PEER_IP/replica/snapshot`
+     with the replication secret. Only the peer IP may call it (nginx). The follower checks the secret, saves
+     the snapshot and loads it. The servers (`.deb`/`.rpm`) keep SSH.
+   - The first API token and the list login: `docker exec -it furnace furnace token add ...` and
+     `furnace edl-user ...`. Secrets are shown once, never in `docker logs`.
+   - No host firewall changes from inside a container (the README lists the ports to open).
+   - Failover as today: keepalived on the host network (`NET_ADMIN`, `NET_RAW`), two hosts, one shared IP.
+   - `docker/docker-compose.yml` example. A Docker test (`tests/docker/run.sh`): two containers without
+     `--privileged`, a fake list reader and a fake caller, replication, failover and restart with the volumes.
+   - Release: `furnace-image-0.8.0.tar.gz` (`docker load`) next to the `.deb` and `.rpm`.
 2. **Option B: Kubernetes** (about 2 to 3 more sessions, with the high-availability phase):
    - The leader decision becomes pluggable: the role file from keepalived (today) or a Kubernetes lease.
    - Clients reach the leader through a Kubernetes Service.
