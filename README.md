@@ -385,7 +385,9 @@ CA=furnace.crt                       # the Furnace certificate file
 | `ip` or `domain` | yes | - | The indicator. One IP or one exact domain. |
 | `added_by` | recommended | 100 | The analyst's name or user name (who clicked the button). |
 | `reason` | recommended | 500 | Short reason, for example "Phishing C2 server". |
-| `incident_id` | recommended | 100 | The incident or ticket number in the caller. Text or number. |
+
+`incident_id` was removed in 0.8: a request that still sends it gets `400`. Put an incident number into `reason`
+if you need it.
 
 `removed_by` (optional) can be sent on DELETE as a query parameter: `?removed_by=analyst.name`.
 All of this is stored with the entry and in the audit log.
@@ -431,7 +433,7 @@ Reason codes for `422` (`reason_code`):
 | `ip_not_allowed` | An IP was sent to the domain endpoint. |
 | `invalid_cidr` | Whitelist: not a valid IP or range. |
 | `range_too_wide` | Whitelist: shorter than /8 (IPv4) or /16 (IPv6). |
-| `field_too_long` | `reason`, `added_by` or `incident_id` is too long, or not text. |
+| `field_too_long` | `reason` or `added_by` is too long, or not text. |
 | `invalid_permanent` | `permanent` is not `true` or `false`. |
 
 How the caller should read an answer:
@@ -451,7 +453,7 @@ How the caller should read an answer:
 ```bash
 curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"ip":"203.0.113.45","reason":"Phishing C2 server","added_by":"analyst.one","incident_id":"4521"}'
+  -d '{"ip":"203.0.113.45","reason":"Phishing C2 server","added_by":"analyst.one"}'
 ```
 
 Optional: `"permanent": true` blocks the IP for ever. Without it (or with `false`) the IP is temporary: it leaves
@@ -462,10 +464,10 @@ Answer `201`:
 ```json
 {"status": "added", "message": "The IP is now blocked for 30 days.",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
-           "reason": "Phishing C2 server", "incident_id": "4521",
+           "reason": "Phishing C2 server",
            "permanent": false, "expires_at": "2026-11-25T09:15:02Z"},
  "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "last_blocked_at": "2026-10-26T09:15:02Z",
-            "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server", "incident_id": "4521"}}
+            "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server"}}
 ```
 
 Answer `200` when it was already there:
@@ -510,7 +512,7 @@ curl --cacert "$CA" "$FURNACE/api/v1/ips/203.0.113.45" -H "Authorization: Bearer
 ```json
 {"status": "found", "message": "This IP is blocked.", "list": "active",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
-           "reason": "Phishing C2 server", "incident_id": "4521", "permanent": false,
+           "reason": "Phishing C2 server", "permanent": false,
            "expires_at": "2026-11-25T09:15:02Z"},
  "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "...": "..."},
  "whitelisted_by": null}
@@ -531,7 +533,7 @@ curl --cacert "$CA" "$FURNACE/api/v1/domains/bad.example.com" -H "Authorization:
 ```bash
 curl --cacert "$CA" -X POST "$FURNACE/api/v1/domains" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"domain":"bad.example.com","reason":"Malware download site","added_by":"analyst.one","incident_id":"4522"}'
+  -d '{"domain":"bad.example.com","reason":"Malware download site","added_by":"analyst.one"}'
 
 curl --cacert "$CA" -X DELETE "$FURNACE/api/v1/domains/bad.example.com?removed_by=analyst.one" \
   -H "Authorization: Bearer $TOKEN"
@@ -763,7 +765,7 @@ sudo furnace import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
   only an unblock removes it.
 - Already active: nothing changes (also not temporary or permanent), the old date is kept, and the answer says so.
 - In the archive and added again: back in the list with a new date.
-- Stored for each IP: date added, who added it, reason, incident number, temporary or permanent.
+- Stored for each IP: date added, who added it, reason, temporary or permanent.
 - `furnace status` warns when permanent IPs fill half of `MAX_IPS`, because they never leave the list.
 
 **Domains**
@@ -787,7 +789,7 @@ Furnace keeps two lists:
 - **The EDL lists** (`blocklist.txt`, `domains.txt`): what is blocked now.
 - **The archive**: a record of every different IP and domain that was ever blocked. One row each, never a
   duplicate, never removed. It is written when an IP or domain is blocked for the first time. The row keeps the
-  first details (date, who, reason, incident), the last block date and how many times it was blocked.
+  first details (date, who, reason), the last block date and how many times it was blocked.
   Expiry, unblock and the whitelist remove an entry only from the EDL list, never from the archive.
 
 The nightly cleanup:
@@ -893,6 +895,9 @@ if its settings changed, so an upgrade does not move the shared IP. If you chang
 the certificate key both servers already share, so no new bundle is needed. While one server is upgraded and the
 other is not yet, the leader uses SSH as before; when both run 0.8 it uses HTTPS. Port 443 between the servers is
 already open (the health check uses it). New: blocklist files through the API (section 6.9).
+**Change your callers first:** the field `incident_id` is gone. A request that still sends it gets `400`, so remove
+it from your SOAR playbooks and scripts before the upgrade. The upgrade deletes every stored incident number (old
+backups still have them). The exports and the archive CSV no longer have the `incident_id` column.
 
 **From 0.6 to 0.7:** nothing to do. The database gets the archive record: every IP and domain in the lists, and
 every IP of the old archive, gets a record row. IPs in the list stay temporary with their dates. Domains stay as they
@@ -1093,7 +1098,8 @@ Dynamic Lists, it uses that interface. That matters only if you limit `LISTS_ALL
   XSOAR changes the whitelist).
 - Furnace does not need an XSOAR integration or pack. Use plain HTTP calls (for example the generic HTTP
   integration or a script) as described in [section 6](#6-api-guide).
-- Send the analyst's name in `added_by` and the XSOAR incident number in `incident_id`.
+- Send the analyst's name in `added_by`. If you want the XSOAR incident number in Furnace, put it into
+  `reason` (for example `Phishing C2 (incident 4521)`).
 - Trust the certificate: add `furnace.crt` as a trusted custom certificate for the server or engine that makes the
   call. Look for "custom certificates" or "trusted certificates" in the XSOAR documentation for your version.
 - If XSOAR uses engines, the calls come from the engines' IPs. That matters only if you limit `API_ALLOW_FROM`.

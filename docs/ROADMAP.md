@@ -23,6 +23,7 @@ so the work can continue later exactly where it stopped.
 | 2026-11-01 | **Bulk upload of blocked IPs and domains through the API** (changes the 2026-10-28 "no bulk block endpoint" decision). `POST /api/v1/ips/bulk` and `/api/v1/domains/bulk`, blocklist write, the same rules as `furnace import-ips` (dates, whitelist, archive, backup, all or nothing, `MAX_IPS`), `dry_run` and `permanent`. Still one token per program. |
 | 2026-11-01 | **The servers replicate over HTTPS too, in v0.8.0** (option a). The leader sends the snapshot to `https://PEER_IP/replica/snapshot`; the secret is derived from the TLS key both servers already share, so an upgrade needs no new bundle. For one version the leader falls back to SSH when HTTPS does not work (an old follower during the upgrade). The version after v0.8.0 removes SSH replication. |
 | 2026-11-01 | **No Docker image in v0.8.0.** The Docker work moves to the branch `docker` (kept, parked); `main` and the release have no Docker files or Docker docs. The shared parts (HTTPS replication, the notify script without systemd) stay. |
+| 2026-11-01 | **`incident_id` is removed** (it can mean different things to different callers). A request that still sends it is refused (`400`). The upgrade deletes the stored values (schema 5); the columns stay empty so older followers and backups still fit. |
 
 ## Done
 

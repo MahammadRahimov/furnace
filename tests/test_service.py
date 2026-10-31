@@ -39,18 +39,17 @@ def test_startup_creates_empty_files(settings):
 
 
 def test_add_ip_stores_fields_and_publishes(furnace, settings):
-    r = furnace.add_ip("198.51.100.7", reason="Phishing host", added_by="analyst.one",
-                       incident_id="1234", now=T0)
+    r = furnace.add_ip("198.51.100.7", reason="Phishing host", added_by="analyst.one", now=T0)
     assert r.status == "added"
     assert blocklist(settings) == ["198.51.100.7"]
     found = furnace.get_ip("198.51.100.7")
     assert found.status == "found"
     assert found.data["entry"] == {"ip": "198.51.100.7", "added_at": "2026-01-10T12:00:00Z",
                                    "added_by": "analyst.one", "reason": "Phishing host",
-                                   "incident_id": "1234", "permanent": False,
+                                   "permanent": False,
                                    "expires_at": "2026-02-09T12:00:00Z"}
     assert found.data["record"]["times_blocked"] == 1
-    assert audit_rows(settings, action="add", result="added")[0]["incident_id"] == "1234"
+    assert audit_rows(settings, action="add", result="added")[0]["incident_id"] == ""
 
 
 def test_duplicate_keeps_old_date(furnace):
@@ -64,7 +63,7 @@ def test_duplicate_keeps_old_date(furnace):
 
 
 def test_rejected_requests_are_audited(furnace, settings):
-    r = furnace.add_ip("10.0.0.1", added_by="analyst", incident_id="99")
+    r = furnace.add_ip("10.0.0.1", added_by="analyst")
     assert (r.status, r.code) == ("rejected", "private_ip")
     rows = audit_rows(settings, result="rejected")
     assert rows[-1]["reason_code"] == "private_ip"
@@ -92,7 +91,7 @@ def test_restore_from_archive(furnace, settings):
     assert got.data["list"] == "active"
     assert got.data["entry"]["added_at"] == db.to_iso(later)
     assert got.data["record"] == {"first_blocked_at": db.to_iso(T0), "last_blocked_at": db.to_iso(later),
-                                  "times_blocked": 2, "added_by": "", "reason": "old", "incident_id": ""}
+                                  "times_blocked": 2, "added_by": "", "reason": "old"}
     conn = db.connect(settings.db_path)
     assert conn.execute("SELECT COUNT(*) FROM ip_records").fetchone()[0] == 1  # never a duplicate
     conn.close()
@@ -118,7 +117,7 @@ def test_ip_limit(furnace, settings):
 
 
 def test_domains(furnace, settings):
-    r = furnace.add_domain("Bad.Example.COM", reason="C2", added_by="a", incident_id="7")
+    r = furnace.add_domain("Bad.Example.COM", reason="C2", added_by="a")
     assert r.status == "added"
     assert settings.domains_path.read_text() == "bad.example.com\n"
     assert furnace.add_domain("bad.example.com").status == "already_exists"

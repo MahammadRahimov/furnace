@@ -59,8 +59,8 @@ def write_domains(conn: sqlite3.Connection, settings: Settings) -> int:
 
 
 ARCHIVE_COLUMNS = ["type", "value", "first_blocked_at", "last_blocked_at", "times_blocked", "blocked_now",
-                   "added_by", "reason", "incident_id"]
-_RECORD_FIELDS = "first_blocked_at, last_blocked_at, times_blocked, {now}, added_by, reason, incident_id"
+                   "added_by", "reason"]
+_RECORD_FIELDS = "first_blocked_at, last_blocked_at, times_blocked, {now}, added_by, reason"
 
 
 def write_archive_csv(conn: sqlite3.Connection, settings: Settings) -> int:

@@ -102,7 +102,7 @@ def test_api_permanent_field(settings):
 # ---------------------------------------------------------------------- the archive record
 
 def test_every_block_is_recorded_once(furnace, settings):
-    furnace.add_ip("198.51.100.1", reason="first", added_by="one", incident_id="7", now=NOW)
+    furnace.add_ip("198.51.100.1", reason="first", added_by="one", now=NOW)
     assert record(settings, "ip_records", "198.51.100.1")["first_blocked_at"] == db.to_iso(NOW)
     furnace.add_ip("198.51.100.1", now=NOW + timedelta(days=1))  # still in the list: nothing changes
     furnace.remove_ip("198.51.100.1")
@@ -112,7 +112,7 @@ def test_every_block_is_recorded_once(furnace, settings):
     rec = record(settings, "ip_records", "198.51.100.1")
     assert rec == {"ip": "198.51.100.1", "version": 4, "first_blocked_at": db.to_iso(NOW),
                    "last_blocked_at": db.to_iso(later), "times_blocked": 2, "added_by": "one",
-                   "reason": "first", "incident_id": "7"}
+                   "reason": "first", "incident_id": ""}  # the column stays, always empty (0.8)
     assert count(settings, "ip_records") == 1
 
 
@@ -236,7 +236,9 @@ def make_0_6_database(path):
 def check_upgraded(s):
     conn = db.connect(s.db_path)
     try:
-        assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "4"
+        assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "5"
+        for table in db.INCIDENT_TABLES:  # 0.8: every stored incident_id is deleted
+            assert conn.execute(f"SELECT COUNT(*) FROM {table} WHERE incident_id <> ''").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM archived_ips").fetchone()[0] == 0
         ips = {r["ip"]: dict(r) for r in conn.execute("SELECT * FROM ip_records")}
         assert ips["198.51.100.1"]["first_blocked_at"] == "2026-05-20T00:00:00Z"

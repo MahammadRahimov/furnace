@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS blocked_ips (
 CREATE INDEX IF NOT EXISTS idx_blocked_ips_aging ON blocked_ips(aging_from);
 
 -- The archive: a record of every different IP and domain ever blocked. One row each,
--- written when it is first blocked, never removed. added_by, reason and incident_id are
+-- written when it is first blocked, never removed. added_by and reason are
 -- the details of the first block. Blocked now = also in blocked_ips / blocked_domains.
 CREATE TABLE IF NOT EXISTS ip_records (
     ip               TEXT PRIMARY KEY,
@@ -202,7 +202,19 @@ def migrate(conn: sqlite3.Connection) -> None:
     row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     if row is None or int(row[0]) < 4:
         fill_records(conn)
+    if row is None or int(row[0]) < 5:
+        clear_incident_ids(conn)
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+
+
+# Version 0.8 removed incident_id (user decision 2026-11-01). The columns stay, so older followers and
+# backups still fit, but they are always empty: the upgrade deletes every stored value once.
+INCIDENT_TABLES = ("blocked_ips", "blocked_domains", "ip_records", "domain_records", "archived_ips", "audit_log")
+
+
+def clear_incident_ids(conn: sqlite3.Connection) -> None:
+    for table in INCIDENT_TABLES:
+        conn.execute(f"UPDATE {table} SET incident_id = '' WHERE incident_id <> ''")
 
 
 def fill_records(conn: sqlite3.Connection) -> None:

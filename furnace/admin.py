@@ -26,18 +26,18 @@ from .replica import ReplicaError, apply_snapshot, send_snapshot
 from .service import Furnace
 
 EXPORTS = {
-    "ips": ("SELECT ip, added_at, added_by, reason, incident_id,"
+    "ips": ("SELECT ip, added_at, added_by, reason,"
             " CASE permanent WHEN 1 THEN 'yes' ELSE 'no' END AS permanent FROM blocked_ips", "ip"),
     "archive": ("SELECT 'ip' AS type, ip AS value, first_blocked_at, last_blocked_at, times_blocked,"
                 " CASE WHEN EXISTS(SELECT 1 FROM blocked_ips b WHERE b.ip = r.ip) THEN 'yes' ELSE 'no' END"
-                " AS blocked_now, added_by, reason, incident_id FROM ip_records r UNION ALL"
+                " AS blocked_now, added_by, reason FROM ip_records r UNION ALL"
                 " SELECT 'domain', domain, first_blocked_at, last_blocked_at, times_blocked,"
                 " CASE WHEN EXISTS(SELECT 1 FROM blocked_domains b WHERE b.domain = r.domain) THEN 'yes' ELSE 'no'"
-                " END, added_by, reason, incident_id FROM domain_records r", "type, value"),
-    "domains": ("SELECT domain, added_at, added_by, reason, incident_id FROM blocked_domains", "domain"),
+                " END, added_by, reason FROM domain_records r", "type, value"),
+    "domains": ("SELECT domain, added_at, added_by, reason FROM blocked_domains", "domain"),
     "whitelist-ips": ("SELECT cidr, added_at, added_by, reason FROM whitelist_ips", "cidr"),
     "whitelist-domains": ("SELECT domain, added_at, added_by, reason FROM whitelist_domains", "domain"),
-    "audit": ("SELECT id, ts, action, object_type, value, result, reason_code, actor, incident_id, source,"
+    "audit": ("SELECT id, ts, action, object_type, value, result, reason_code, actor, source,"
               " details FROM audit_log", "id"),
 }
 

@@ -100,6 +100,6 @@ def test_whitelist_cidr():
 def test_clean_text():
     assert clean_text(None, "reason", 10) == ""
     assert clean_text("  two   words ", "reason", 20) == "two words"
-    assert clean_text(4521, "incident_id", 20) == "4521"
+    assert clean_text(4521, "reason", 20) == "4521"
     assert code_of(clean_text, "x" * 11, "reason", 10) == "field_too_long"
     assert code_of(clean_text, ["list"], "reason", 10) == "field_too_long"

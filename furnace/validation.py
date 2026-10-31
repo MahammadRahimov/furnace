@@ -154,7 +154,7 @@ def validate_whitelist_cidr(value: object) -> IPNetwork:
 
 
 def clean_text(value: object, field: str, limit: int) -> str:
-    """Optional free-text field (reason, added_by, incident_id)."""
+    """Optional free-text field (reason, added_by, removed_by)."""
     if value is None:
         return ""
     if isinstance(value, (int, float)) and not isinstance(value, bool):

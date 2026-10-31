@@ -100,7 +100,7 @@ addresses get a `403` page from nginx (not JSON).
 | List file rate | 2 requests per second per address, burst 10 | `429` page from nginx |
 | Request body | 20 MB | `413` `too_large` |
 | Bulk entries | 200,000 per request | `400` `bad_request` |
-| `added_by`, `removed_by`, `incident_id` | 100 characters | `422` `field_too_long` |
+| `added_by`, `removed_by` | 100 characters | `422` `field_too_long` |
 | `reason` | 500 characters | `422` `field_too_long` |
 | Whitelist list page | `limit` 1 to 10,000 (default 1,000) | Clamped to the range |
 | Blocked IPs | `MAX_IPS` setting (the list reader's limit) | `422` `limit_reached` |
@@ -157,7 +157,7 @@ Example of a refusal:
 | `ip_not_allowed` | domains | An IP was sent to a domain endpoint. |
 | `invalid_cidr` | whitelist IPs | Not a valid IP or range. |
 | `range_too_wide` | whitelist IPs | Shorter than /8 (IPv4) or /16 (IPv6). |
-| `field_too_long` | all | `reason`, `added_by`, `removed_by` or `incident_id` is too long, or not text. |
+| `field_too_long` | all | `reason`, `added_by` or `removed_by` is too long, or not text. |
 | `invalid_permanent` | IPs | `permanent` is not `true` or `false`. |
 | `not_leader` | all changes | This server is the follower (HTTP 503). |
 
@@ -198,13 +198,13 @@ Body:
 | `ip` | yes | - | One public IPv4 or IPv6 address. |
 | `reason` | recommended | 500 | Short reason, for example "Phishing C2 server". |
 | `added_by` | recommended | 100 | The person who asked for the block. |
-| `incident_id` | recommended | 100 | The incident or ticket number. Text or number. |
 | `permanent` | no | - | `true`: the IP never expires. `false` or missing: temporary, it leaves the list after `ARCHIVE_AFTER_DAYS`. |
+| `incident_id` | **no longer allowed** | - | Removed in 0.8. A request that still sends it gets `400` `bad_request`. Put an incident number into `reason` if you need it. |
 
 ```bash
 curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"ip":"203.0.113.45","reason":"Phishing C2 server","added_by":"analyst.one","incident_id":"4521"}'
+  -d '{"ip":"203.0.113.45","reason":"Phishing C2 server","added_by":"analyst.one"}'
 ```
 
 A permanent block:
@@ -220,10 +220,10 @@ curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips" \
 ```json
 {"status": "added", "message": "The IP is now blocked for 30 days.",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
-           "reason": "Phishing C2 server", "incident_id": "4521",
+           "reason": "Phishing C2 server",
            "permanent": false, "expires_at": "2026-11-25T09:15:02Z"},
  "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "last_blocked_at": "2026-10-26T09:15:02Z",
-            "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server", "incident_id": "4521"}}
+            "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server"}}
 ```
 
 - `entry.permanent` is `true` or `false`. `entry.expires_at` is the expiry of a temporary IP, `null` when permanent.
@@ -259,10 +259,10 @@ curl --cacert "$CA" "$FURNACE/api/v1/ips/203.0.113.45" -H "Authorization: Bearer
 ```json
 {"status": "found", "message": "This IP is blocked.", "list": "active",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
-           "reason": "Phishing C2 server", "incident_id": "4521",
+           "reason": "Phishing C2 server",
            "permanent": false, "expires_at": "2026-11-25T09:15:02Z"},
  "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "last_blocked_at": "2026-10-26T09:15:02Z",
-            "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server", "incident_id": "4521"},
+            "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server"},
  "whitelisted_by": null}
 ```
 
@@ -272,7 +272,7 @@ An IP that was blocked before, but not now:
 {"status": "found", "message": "This IP is in the archive: it was blocked before. It is not blocked now.",
  "list": "archive",
  "entry": {"ip": "203.0.113.45", "first_blocked_at": "2026-10-26T09:15:02Z", "last_blocked_at": "...",
-           "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server", "incident_id": "4521"},
+           "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server"},
  "record": {"...": "..."}, "whitelisted_by": null}
 ```
 
@@ -312,7 +312,7 @@ The archive is a record of every different IP and domain that was ever blocked:
 
 - One row per IP or domain. Never a duplicate, never removed.
 - Written when it is blocked for the first time, at the same time as the list.
-- It keeps the details of the first block (`added_by`, `reason`, `incident_id`), `first_blocked_at`,
+- It keeps the details of the first block (`added_by`, `reason`), `first_blocked_at`,
   `last_blocked_at` and `times_blocked`.
 - Expiry, unblock and the whitelist remove an entry only from the list, never from the archive.
 - Blocked again later: back in the list with a new date, `last_blocked_at` is new and `times_blocked` goes up by one.
@@ -324,7 +324,7 @@ Fields of `record`:
 | `first_blocked_at` | When it was blocked for the first time. |
 | `last_blocked_at` | When it was blocked the last time. |
 | `times_blocked` | How many times it went into the list. |
-| `added_by`, `reason`, `incident_id` | The details of the first block. |
+| `added_by`, `reason` | The details of the first block. |
 
 The archive is not served as a file. The admin gets it with `sudo furnace export archive`.
 
@@ -338,12 +338,12 @@ Only exact domains are accepted: no wildcards, no URLs, no IPs.
 
 `POST /api/v1/domains`
 
-Body: `domain` (required), `reason`, `added_by`, `incident_id` (same limits as [7.1](#71-block-an-ip)).
+Body: `domain` (required), `reason`, `added_by` (same limits as [7.1](#71-block-an-ip)).
 
 ```bash
 curl --cacert "$CA" -X POST "$FURNACE/api/v1/domains" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"domain":"bad.example.com","reason":"Malware download site","added_by":"analyst.one","incident_id":"4522"}'
+  -d '{"domain":"bad.example.com","reason":"Malware download site","added_by":"analyst.one"}'
 ```
 
 Answers: `201` `added`, `200` `already_exists`, `422` `rejected`, `503`.

@@ -102,6 +102,12 @@ def create_app(settings: Settings | None = None) -> Flask:
             raise _BadRequest("The body must be a JSON object.")
         return data
 
+    def no_incident(data: dict[str, Any]) -> None:
+        """incident_id was removed in 0.8: a caller that still sends it is told so (user decision)."""
+        if "incident_id" in data:
+            raise _BadRequest("The field incident_id is no longer supported (removed in Furnace 0.8). "
+                              "Remove it from the request. Put the incident number into reason if you need it.")
+
     def actor() -> Any:
         data = request.get_json(silent=True) if request.data else None
         if isinstance(data, dict) and data.get("removed_by"):
@@ -154,8 +160,9 @@ def create_app(settings: Settings | None = None) -> Flask:
     @require("blocklist", "write")
     def add_ip():
         d = body()
+        no_incident(d)
         return _reply(furnace.add_ip(d.get("ip"), d.get("reason"), d.get("added_by"),
-                                     d.get("incident_id"), source=g.source, permanent=d.get("permanent")))
+                                     source=g.source, permanent=d.get("permanent")))
 
     @app.get("/api/v1/ips/<ip>")
     @require("blocklist", "read")
@@ -173,8 +180,8 @@ def create_app(settings: Settings | None = None) -> Flask:
     @require("blocklist", "write")
     def add_domain():
         d = body()
-        return _reply(furnace.add_domain(d.get("domain"), d.get("reason"), d.get("added_by"),
-                                         d.get("incident_id"), source=g.source))
+        no_incident(d)
+        return _reply(furnace.add_domain(d.get("domain"), d.get("reason"), d.get("added_by"), source=g.source))
 
     @app.get("/api/v1/domains/<domain>")
     @require("blocklist", "read")
@@ -238,9 +245,11 @@ def create_app(settings: Settings | None = None) -> Flask:
                 raise _BadRequest("The field entries must be a list of lines (strings).")
             text = "\n".join(entries)
             options: dict[str, Any] = d
+            no_incident(d)
         else:
             text = request.get_data(as_text=True)
             options = dict(request.args)
+            no_incident(options)
         lines = sum(1 for line in text.splitlines() if line.strip())
         if lines > MAX_BULK_ENTRIES:
             raise _BadRequest(f"Send at most {MAX_BULK_ENTRIES} lines per request.")

@@ -51,11 +51,12 @@ def test_bad_tokens(client, headers):
 
 
 def test_add_ip_flow(client, settings):
-    payload = {"ip": "198.51.100.20", "reason": "Malware C2", "added_by": "analyst.one", "incident_id": "4521"}
+    payload = {"ip": "198.51.100.20", "reason": "Malware C2 (incident 4521)", "added_by": "analyst.one"}
     r = client.post("/api/v1/ips", json=payload, headers=BLOCK)
     assert r.status_code == 201
     j = r.get_json()
-    assert j["status"] == "added" and j["entry"]["incident_id"] == "4521"
+    assert j["status"] == "added" and j["entry"]["reason"] == "Malware C2 (incident 4521)"
+    assert "incident_id" not in j["entry"] and "incident_id" not in j["record"]
     assert settings.blocklist_path.read_text() == "198.51.100.20\n"
 
     r = client.post("/api/v1/ips", json=payload, headers=BLOCK)
@@ -212,3 +213,17 @@ def test_many_processes_at_the_same_time(settings):
     assert flat.count("added") == 50 and flat.count("already_exists") == 50
     assert len(settings.blocklist_path.read_text().splitlines()) == 50
     assert leftover_temp_files(settings.edl_dir) == []
+
+
+def test_incident_id_is_refused(client, settings):
+    """Removed in 0.8 (user decision): a caller that still sends it gets a clear 400."""
+    for path, body in (("/api/v1/ips", {"ip": "198.51.100.21", "incident_id": "7"}),
+                       ("/api/v1/domains", {"domain": "bad.example.com", "incident_id": ""}),
+                       ("/api/v1/ips/bulk", {"entries": ["198.51.100.22"], "incident_id": "7"})):
+        r = client.post(path, json=body, headers=BLOCK)
+        assert r.status_code == 400, path
+        assert "incident_id is no longer supported" in r.get_json()["message"]
+    r = client.post("/api/v1/ips/bulk?incident_id=7", data="198.51.100.23\n", headers=BLOCK,
+                    content_type="text/plain")
+    assert r.status_code == 400
+    assert settings.blocklist_path.read_text() == ""

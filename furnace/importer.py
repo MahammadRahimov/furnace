@@ -293,7 +293,7 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
 
                 if permanent:
                     stamp = db.to_iso(when or now)
-                    dated_active.append((ip_text, ip.version, stamp, stamp, added_by, line_reason, "", 1))
+                    dated_active.append((ip_text, ip.version, stamp, stamp, added_by, line_reason, 1))
                 elif when is not None and when < cutoff:
                     if old_ips == "fresh":
                         undated.append((ip_text, ip.version, line_reason))
@@ -302,10 +302,10 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
                         report.skipped.append(Skipped(number, text, "already_archived"))
                     else:
                         stamp = db.to_iso(when)
-                        to_archive.append((ip_text, ip.version, stamp, stamp, added_by, line_reason, ""))
+                        to_archive.append((ip_text, ip.version, stamp, stamp, added_by, line_reason))
                 elif when is not None:
                     stamp = db.to_iso(when)
-                    dated_active.append((ip_text, ip.version, stamp, stamp, added_by, line_reason, "", 0))
+                    dated_active.append((ip_text, ip.version, stamp, stamp, added_by, line_reason, 0))
                 else:
                     undated.append((ip_text, ip.version, line_reason))
 
@@ -315,7 +315,7 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
             for index, (ip_text, version, line_reason) in enumerate(undated):
                 offset = timedelta(seconds=(index + 1) * days * 86400 / (len(undated) + 1))
                 aging = db.to_iso(now - timedelta(days=days) + offset)
-                spread.append((ip_text, version, stamp_now, aging, added_by, line_reason, "", 0))
+                spread.append((ip_text, version, stamp_now, aging, added_by, line_reason, 0))
 
             new_active = dated_active + spread
             restored = [row[0] for row in new_active if row[0] in recorded]
@@ -330,13 +330,13 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
                 _backup_first(settings, report)
                 with db.transaction(conn):
                     conn.executemany(
-                        "INSERT INTO blocked_ips(ip, version, added_at, aging_from, added_by, reason, incident_id,"
-                        " permanent) VALUES (?,?,?,?,?,?,?,?)", new_active)
+                        "INSERT INTO blocked_ips(ip, version, added_at, aging_from, added_by, reason,"
+                        " permanent) VALUES (?,?,?,?,?,?,?)", new_active)
                     for row in new_active:
-                        Furnace.record_ip(conn, row[0], row[1], row[2], row[4], row[5], row[6])
+                        Furnace.record_ip(conn, row[0], row[1], row[2], row[4], row[5])
                     conn.executemany(
-                        "INSERT INTO ip_records(ip, version, first_blocked_at, last_blocked_at, added_by, reason,"
-                        " incident_id) VALUES (?,?,?,?,?,?,?)", to_archive)
+                        "INSERT INTO ip_records(ip, version, first_blocked_at, last_blocked_at, added_by, reason)"
+                        " VALUES (?,?,?,?,?,?)", to_archive)
                     audit_rows = [(stamp_now, "import", "ip", row[0], "added", added_by, "import")
                                   for row in new_active]
                     audit_rows += [(stamp_now, "import", "ip", row[0], "archived", added_by, "import")
@@ -394,7 +394,7 @@ def import_domains(settings: Settings, source: Path, dry_run: bool = False, adde
                     report.skipped.append(Skipped(number, text, "already_active"))
                 else:
                     seen.add(domain)
-                    rows.append((domain, stamp, added_by, line_reason, ""))
+                    rows.append((domain, stamp, added_by, line_reason))
             report.added_active = len(rows)
             report.restored = sum(1 for r in rows if r[0] in recorded)
             final_count = len(active) + len(rows)
@@ -404,10 +404,10 @@ def import_domains(settings: Settings, source: Path, dry_run: bool = False, adde
             if not dry_run:
                 _backup_first(settings, report)
                 with db.transaction(conn):
-                    conn.executemany("INSERT INTO blocked_domains(domain, added_at, added_by, reason, incident_id)"
-                                     " VALUES (?,?,?,?,?)", rows)
+                    conn.executemany("INSERT INTO blocked_domains(domain, added_at, added_by, reason)"
+                                     " VALUES (?,?,?,?)", rows)
                     for r in rows:
-                        Furnace.record_domain(conn, r[0], r[1], r[2], r[3], r[4])
+                        Furnace.record_domain(conn, r[0], r[1], r[2], r[3])
                     conn.executemany("INSERT INTO audit_log(ts, action, object_type, value, result, actor, source)"
                                      " VALUES (?,?,?,?,?,?,?)",
                                      [(stamp, "import", "domain", r[0], "added", added_by, "import") for r in rows])

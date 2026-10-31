@@ -21,8 +21,12 @@ How a release happens (user decision 2026-11-01):
    whether it worked. The secret comes from the certificate key both servers already share, so an upgrade needs no
    new bundle. For this version the leader falls back to SSH when HTTPS does not work (an older follower during an
    upgrade); the version after 0.8 removes SSH replication.
-3. **Small changes on the servers:** nginx no longer logs `/health` (asked every 5 seconds), the keepalived notify
+3. **`incident_id` is removed.** It can mean different things to different callers. A request that still sends
+   it gets `400` with a clear message (callers must remove it before the upgrade). The upgrade deletes every stored
+   incident number; the API answers, the exports and the archive CSV no longer have it. An incident number can go
+   into `reason`.
+4. **Small changes on the servers:** nginx no longer logs `/health` (asked every 5 seconds), the keepalived notify
    script also works without systemd, and `furnace status` shows the last replication result.
-4. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
+5. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
 
 Not in this release: the Docker image. It is kept on the branch `docker` (user decision 2026-11-01).

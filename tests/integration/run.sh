@@ -238,7 +238,7 @@ edl() { docker exec "$FW" curl -sS --cacert /root/furnace.crt -u "lists:$EDL_PW"
 code_from() { docker exec "$1" curl -s -o /dev/null -w '%{http_code}' --cacert /root/furnace.crt "$2"; }
 
 step "API and EDL through the shared IP"
-r="$(api POST /api/v1/ips "{\"ip\":\"$TEST_IP\",\"reason\":\"integration test\",\"added_by\":\"tester\",\"incident_id\":\"1\"}")"
+r="$(api POST /api/v1/ips "{\"ip\":\"$TEST_IP\",\"reason\":\"integration test\",\"added_by\":\"tester\"}")"
 check "XSOAR adds an IP (201)" grep -q ' 201$' <<< "$r"
 check "the firewall sees the IP in blocklist.txt" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
 r="$(api POST /api/v1/domains '{"domain":"bad.example.com","added_by":"tester"}')"
