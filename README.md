@@ -258,7 +258,7 @@ Each question saves one setting in `/etc/furnace/setup.conf`. The same names are
 | Who may call the API | `API_ALLOW_FROM` | `any` | `any` = every address (a token is always needed). Or IPs and ranges, comma-separated, for example a SOAR server and its engines. |
 | Who may download the lists | `LISTS_ALLOW_FROM` | `any` | `any` = every address (the list login is always needed). Or the list readers' IPs; for a firewall HA pair, list both. |
 | Most entries per list | `MAX_IPS`, `MAX_DOMAINS` | `50000` | The list reader's limit per list. Adds beyond it are refused. 0 = no limit. The question sets both; a settings file can set them apart. |
-| Days an IP stays blocked | `ARCHIVE_AFTER_DAYS` | `30` | Days a temporary IP stays in the list before the nightly job removes it. Permanent IPs and domains never expire. |
+| Days an IP stays blocked | `ARCHIVE_AFTER_DAYS` | `90` | Days a temporary IP stays in the list before the nightly job removes it. Permanent IPs and domains never expire. |
 | VRRP router ID | `VRRP_ROUTER_ID` | `51` | 1-255. Same on both servers. Must be unique in the network segment. |
 | SSH allowed from | `SSH_ALLOW_FROM` | `any` | Who may use SSH. `any` or a list of IPs. The other server is always allowed. |
 | Set up the host firewall? | `HOST_FIREWALL` | `ufw` or `firewalld` | The tool on this server (`ufw` on the Debian family, `firewalld` on the Red Hat family) = configure it. `none` = leave it alone. |
@@ -462,10 +462,10 @@ the list after `ARCHIVE_AFTER_DAYS`.
 Answer `201`:
 
 ```json
-{"status": "added", "message": "The IP is now blocked for 30 days.",
+{"status": "added", "message": "The IP is now blocked for 90 days.",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
            "reason": "Phishing C2 server",
-           "permanent": false, "expires_at": "2026-11-25T09:15:02Z"},
+           "permanent": false, "expires_at": "2027-01-24T09:15:02Z"},
  "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "last_blocked_at": "2026-10-26T09:15:02Z",
             "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server"}}
 ```
@@ -513,7 +513,7 @@ curl --cacert "$CA" "$FURNACE/api/v1/ips/203.0.113.45" -H "Authorization: Bearer
 {"status": "found", "message": "This IP is blocked.", "list": "active",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
            "reason": "Phishing C2 server", "permanent": false,
-           "expires_at": "2026-11-25T09:15:02Z"},
+           "expires_at": "2027-01-24T09:15:02Z"},
  "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "...": "..."},
  "whitelisted_by": null}
 ```

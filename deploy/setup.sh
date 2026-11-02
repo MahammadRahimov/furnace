@@ -295,7 +295,7 @@ new_password() {
 fill_defaults() {
     : "${CFG_SHARED_IP_PREFIX:=24}" "${CFG_VRRP_ROUTER_ID:=51}" "${CFG_USE_HTTPS:=yes}"
     : "${CFG_MAX_IPS:=50000}" "${CFG_MAX_DOMAINS:=50000}" "${CFG_SSH_ALLOW_FROM:=any}"
-    : "${CFG_HOST_FIREWALL:=$HOST_FW_TOOL}" "${CFG_ARCHIVE_AFTER_DAYS:=30}" "${CFG_API_ALLOW_FROM:=any}" "${CFG_LISTS_ALLOW_FROM:=any}"
+    : "${CFG_HOST_FIREWALL:=$HOST_FW_TOOL}" "${CFG_ARCHIVE_AFTER_DAYS:=90}" "${CFG_API_ALLOW_FROM:=any}" "${CFG_LISTS_ALLOW_FROM:=any}"
     : "${CFG_TOKEN_NAME:=api}" "${CFG_TOKEN_ALLOW:=all}" "${CFG_TOKEN_EXPIRES_DAYS:=0}"
     if [ -z "$CFG_INTERFACE" ]; then
         if [ -n "$CFG_THIS_IP" ]; then CFG_INTERFACE="$(card_of_ip "$CFG_THIS_IP")"; else CFG_INTERFACE="$(default_card)"; fi
@@ -467,7 +467,7 @@ ask_all() {
     note "The firewall's EDL limit. Adds beyond it are refused. 0 = no limit. Used for both lists."
     ask MAX_IPS "Most entries per list" "${CFG_MAX_IPS:-50000}"
     CFG_MAX_DOMAINS="$CFG_MAX_IPS"
-    ask ARCHIVE_AFTER_DAYS "Days an IP stays blocked (permanent IPs never expire)" "${CFG_ARCHIVE_AFTER_DAYS:-30}"
+    ask ARCHIVE_AFTER_DAYS "Days an IP stays blocked (permanent IPs never expire)" "${CFG_ARCHIVE_AFTER_DAYS:-90}"
     note "VRRP router ID: the same on both servers, unique in this network. Keep 51 if you are not sure."
     ask VRRP_ROUTER_ID "VRRP router ID (1-255)" "${CFG_VRRP_ROUTER_ID:-51}"
     note "Who may log in with SSH: 'any', or IPs separated by commas. The other server is always allowed."
@@ -1140,14 +1140,22 @@ if [ "$CFG_ROLE" = "leader" ]; then
         fi
     fi
 else
-    c="$(code_of -X POST -H @"$HDR" -H 'Content-Type: application/json' -d "{\"ip\":\"$TEST_IP\"}" "$BASE/api/v1/ips")"
+    # Check the role first: a follower that owns the shared IP accepts changes, and the test
+    # IP must never land on the real list.
     if [ "$(current_role)" = "leader" ]; then
         warn "This follower owns the shared IP right now (the leader is down or not set up yet)."
+        warn "The 'follower refuses changes' test is skipped, so no test IP is added to the list."
         init_secrets
-    elif [ "$c" = "503" ]; then
-        pass "the follower refuses changes while it is not the leader (503)"
     else
-        fail "the follower answered $c to a change (expected 503)"
+        c="$(code_of -X POST -H @"$HDR" -H 'Content-Type: application/json' -d "{\"ip\":\"$TEST_IP\"}" "$BASE/api/v1/ips")"
+        if [ "$c" = "503" ]; then
+            pass "the follower refuses changes while it is not the leader (503)"
+        else
+            fail "the follower answered $c to a change (expected 503)"
+            # It was accepted after all (the role changed a moment ago): take the test IP out again.
+            [ "$c" = "201" ] || [ "$c" = "200" ] && code_of -X DELETE -H @"$HDR" \
+                "$BASE/api/v1/ips/$TEST_IP?removed_by=furnace%20setup" >/dev/null || true
+        fi
     fi
 fi
 rm -f "$HDR" "$STATE_DIR/selftest"; HDR=""

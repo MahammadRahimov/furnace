@@ -218,10 +218,10 @@ curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips" \
 `201` (new):
 
 ```json
-{"status": "added", "message": "The IP is now blocked for 30 days.",
+{"status": "added", "message": "The IP is now blocked for 90 days.",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
            "reason": "Phishing C2 server",
-           "permanent": false, "expires_at": "2026-11-25T09:15:02Z"},
+           "permanent": false, "expires_at": "2027-01-24T09:15:02Z"},
  "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "last_blocked_at": "2026-10-26T09:15:02Z",
             "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server"}}
 ```
@@ -260,7 +260,7 @@ curl --cacert "$CA" "$FURNACE/api/v1/ips/203.0.113.45" -H "Authorization: Bearer
 {"status": "found", "message": "This IP is blocked.", "list": "active",
  "entry": {"ip": "203.0.113.45", "added_at": "2026-10-26T09:15:02Z", "added_by": "analyst.one",
            "reason": "Phishing C2 server",
-           "permanent": false, "expires_at": "2026-11-25T09:15:02Z"},
+           "permanent": false, "expires_at": "2027-01-24T09:15:02Z"},
  "record": {"first_blocked_at": "2026-10-26T09:15:02Z", "last_blocked_at": "2026-10-26T09:15:02Z",
             "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing C2 server"},
  "whitelisted_by": null}

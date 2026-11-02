@@ -39,6 +39,13 @@ How a release happens (user decision 2026-11-01):
 6. **Replication every 20 seconds** (was every minute). If the leader dies, at most about 20 seconds of changes
    can be lost instead of a minute, and a deleted or broken list file on the leader is rebuilt sooner. One copy is
    small (lab: 247 KB, about 0.25 s). Real-time replication stays a later idea (roadmap, high-availability phase).
-7. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
+7. **IPs stay blocked 90 days by default** (was 30). The setup question "Days an IP stays blocked" now suggests
+   90. Servers that are already set up keep their saved answer on upgrade; to change it, run `sudo furnace setup`
+   on both servers with the new number. A longer time also applies to the IPs already on the list (their expiry
+   is counted from their block date); IPs that were already moved to the archive stay there.
+8. **Fix: setup no longer leaves its test IP on the list.** When setup ran on the follower while that follower held
+   the shared IP (after a failover, for example during an upgrade), its "follower refuses changes" test added
+   `192.0.2.123` to the real list and never removed it. Setup now checks the role first and skips that test.
+9. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
 
 Not in this release: the Docker image. It is kept on the branch `docker` (user decision 2026-11-01).

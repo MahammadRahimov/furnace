@@ -67,7 +67,7 @@ class Settings:
     archive_dir: Path = Path("/var/lib/furnace/archive")
     auth_dir: Path = Path("/var/lib/furnace/auth")  # the EDL users file
     backup_dir: Path = Path("/var/lib/furnace/backups")
-    archive_after_days: int = 30
+    archive_after_days: int = 90
     allow_test_ranges: bool = False
     max_ips: int = 50000          # 0 means no limit
     max_domains: int = 50000      # 0 means no limit
@@ -125,7 +125,7 @@ class Settings:
             auth_dir=Path(env.get("FURNACE_AUTH_DIR") or data_dir / "auth"),
             backup_dir=Path(env.get("FURNACE_BACKUP_DIR") or data_dir / "backups"),
             archive_after_days=_int("FURNACE_ARCHIVE_AFTER_DAYS",
-                                    env.get("FURNACE_ARCHIVE_AFTER_DAYS"), 30, minimum=1),
+                                    env.get("FURNACE_ARCHIVE_AFTER_DAYS"), 90, minimum=1),
             allow_test_ranges=_bool(env.get("FURNACE_ALLOW_TEST_RANGES"), False),
             max_ips=_int("FURNACE_MAX_IPS", env.get("FURNACE_MAX_IPS"), 50000),
             max_domains=_int("FURNACE_MAX_DOMAINS", env.get("FURNACE_MAX_DOMAINS"), 50000),
