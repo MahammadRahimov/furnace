@@ -152,7 +152,7 @@ Example of a refusal:
 | `range_not_allowed` | IPs | A range (CIDR or a-b) was sent. Send one IP. |
 | `private_ip`, `loopback_ip`, `link_local_ip`, `shared_address_space`, `multicast_ip`, `reserved_ip`, `unspecified_ip`, `not_public`, `ipv4_mapped_not_allowed` | IPs | Not a single public IP. |
 | `documentation_range` | IPs | 192.0.2.0/24, 198.51.100.0/24 or 203.0.113.0/24, and test ranges are switched off. |
-| `whitelisted` | IPs, domains, URLs | The value is on the whitelist. The message names the whitelist entry. |
+| `whitelisted` | IPs, domains, URLs | The value is on the whitelist, or a parent domain of it is. The message names the whitelist entry. |
 | `limit_reached` | IPs, domains, URLs | The list is full (`MAX_IPS`, `MAX_DOMAINS`, `MAX_URLS`). |
 | `invalid_domain` | domains | Not a valid domain name. |
 | `wildcard_not_allowed` | domains | A wildcard like `*.example.com` was sent. |
@@ -166,6 +166,7 @@ Example of a refusal:
 | `wildcard_too_wide` | URLs | The wildcard covers too much (`*.com/`, `example.*/`, `*.co.uk/`). |
 | `ipv6_url_not_allowed` | URLs | The host is an IPv6 address. Block it in the IP list. |
 | `private_ip` and the other IP codes | URLs | The host is an IP that may not be blocked. |
+| `whitelist_not_allowed` | whitelist domains | A shared platform (`github.io`), a public name (`co.uk`), a name that covers one (`amazonaws.com`), or a name of the local refuse file. The message says which. |
 | `invalid_cidr` | whitelist IPs | Not a valid IP or range. |
 | `range_too_wide` | whitelist IPs | Shorter than /8 (IPv4) or /16 (IPv6). |
 | `field_too_long` | all | `reason`, `added_by` or `removed_by` is too long, or not text. |
@@ -372,7 +373,8 @@ Answers: `201` `added`, `200` `already_exists`, `422` `rejected`, `503`.
 curl --cacert "$CA" "$FURNACE/api/v1/domains/bad.example.com" -H "Authorization: Bearer $TOKEN"
 ```
 
-Answers: `200` `found` with `entry`, or `404` `not_found`.
+Answers: `200` `found` with `entry`, or `404` `not_found`. Both have `whitelisted` (`true` or `false`) and
+`whitelisted_by`: the whitelist domain that protects it (the domain itself or a parent of it), or `null`.
 
 ### 8.3 Unblock a domain
 
@@ -564,8 +566,43 @@ curl --cacert "$CA" -X DELETE "$FURNACE/api/v1/whitelist/domains/good.example.co
   -H "Authorization: Bearer $WL_TOKEN"
 ```
 
-Adding a domain removes it from the blocklist if it was blocked (`removed_from_blocklist`), and removes the
-blocked URLs it protects: the domain and its subdomains (`urls_removed_from_blocklist`).
+Adding a domain removes it **and its subdomains** from the domain blocklist (`removed_from_blocklist`), and the
+blocked URLs it protects (`urls_removed_from_blocklist`). Blocking the domain or a subdomain of it later is refused
+(`whitelisted`, the message names the whitelist entry).
+
+**What the domain whitelist does and what it refuses** (user decisions 2026-11-02):
+
+- A domain on the whitelist protects **itself and all its subdomains**, in the domain list and in the URL list.
+  With `x.example.com` on the whitelist: the domains `x.example.com`, `mail.x.example.com` and `a.b.x.example.com`
+  and the URLs `x.example.com/...`, `www.x.example.com/...` and `*.x.example.com/` cannot be blocked, and adding the
+  whitelist entry removes the ones already blocked. The parent `example.com` and look-alikes such as
+  `notx.example.com` or `x.example.com.evil.test` are not touched.
+- **Shared platforms and public names cannot be whitelisted** (`whitelist_not_allowed`). Anyone can make a site
+  under them, so whitelisting one would protect attackers' sites too. Furnace uses the **Public Suffix List**
+  (publicsuffix.org, the list browsers use; a copy comes with each Furnace release, no internet needed):
+
+  | Whitelist request | Result |
+  |---|---|
+  | `github.io`, `blogspot.com`, `cloudfront.net`, `azurewebsites.net`, `vercel.app`, `herokuapp.com`, `pages.dev` | refused: a shared platform |
+  | `co.uk`, `com.az`, `gov.az` | refused: a public name |
+  | `amazonaws.com`, `windows.net` | refused: they cover a shared platform (`s3.amazonaws.com`, `blob.core.windows.net`) |
+  | `company.github.io`, `example.co.uk`, `yourcompany.com`, `google.com`, `microsoft.com`, `github.com` | allowed |
+
+- **Your own names** go into `/etc/furnace/whitelist-refuse.txt` (one per line, `#` comments; setup makes it
+  once, empty, and never changes it). A name there is refused, and so is every name that would cover it:
+  `drive.google.com` in the file also refuses `google.com`. Use it for services that host anyone's files under a
+  path, which the Public Suffix List cannot know (`dropbox.com`, `drive.google.com`). Keep the file the same on both
+  servers.
+- Whitelist entries made before 0.8 stay. `furnace status` warns about the ones that would be refused today.
+
+A refused whitelist request answers `422`:
+
+```json
+{"status": "rejected", "reason_code": "whitelist_not_allowed",
+ "message": "github.io is a shared platform: anyone can make a site under it. Whitelist the exact site instead, for example company.github.io."}
+```
+
+In a bulk upload, refused names are listed in `rejected` with the same code; the other entries are added.
 
 ## 11. Bulk whitelist upload
 

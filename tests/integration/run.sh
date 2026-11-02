@@ -305,6 +305,25 @@ docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bear
     "https://$SHARED_IP/api/v1/urls?url=bad.example.net/x" >/dev/null
 check "a URL is removed (gone from urls.txt)" bash -c '! grep -qx bad.example.net/x <<< "$1"' _ "$(edl urls.txt)"
 check "furnace export urls lists them" on "$LEADER" "furnace export urls | grep -q '^bad.example.com/phish/,'"
+
+step "Domain whitelist: subdomains and shared platforms"
+wl() {  # wl METHOD PATH [JSON] with the whitelist token -> prints "BODY HTTP_CODE"
+    local data=()
+    [ -n "${3:-}" ] && data=(-H 'Content-Type: application/json' -d "$3")
+    docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $WL_TOKEN" \
+        -X "$1" "${data[@]}" -w ' %{http_code}' "https://$SHARED_IP$2" | tr -d '\n'
+}
+r="$(wl POST /api/v1/whitelist/domains '{"domain":"github.io"}')"
+check "a shared platform cannot be whitelisted (422)" grep -q 'whitelist_not_allowed.* 422$' <<< "$r"
+check "setup made the local refuse file" on "$LEADER" "[ -f /etc/furnace/whitelist-refuse.txt ]"
+api POST /api/v1/domains '{"domain":"mail.wl.example.com"}' >/dev/null
+api POST /api/v1/urls '{"url":"www.wl.example.com/x"}' >/dev/null
+r="$(wl POST /api/v1/whitelist/domains '{"domain":"wl.example.com"}')"
+check "whitelisting a domain removes its blocked subdomains and URLs (201)" \
+    grep -Eq '"removed_from_blocklist": ?\["mail.wl.example.com"\].*"urls_removed_from_blocklist": ?\["www.wl.example.com/x"\].* 201$' <<< "$r"
+r="$(api POST /api/v1/domains '{"domain":"new.wl.example.com"}')"
+check "a new subdomain of it is refused (422 whitelisted)" grep -q '"whitelisted".* 422$' <<< "$r"
+wl DELETE /api/v1/whitelist/domains/wl.example.com >/dev/null
 check "the test entries are removed again" bash -c "! grep -qx '203.0.113.90' <<< \"\$1\"" _ "$(edl blocklist.txt)"
 
 step "API tokens, expiry and the wrong-token lockout"

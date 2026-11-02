@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 6  # 6: the URL blocklist (new tables only)
+SCHEMA_VERSION = 7  # 6: the URL blocklist (new tables only). 7: a whitelisted domain protects its subdomains
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -224,6 +224,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         fill_records(conn)
     if row is None or int(row[0]) < 5:
         clear_incident_ids(conn)
+    if row is not None and int(row[0]) < 7:
+        apply_whitelist_subdomains(conn)
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
 
 
@@ -235,6 +237,33 @@ INCIDENT_TABLES = ("blocked_ips", "blocked_domains", "ip_records", "domain_recor
 def clear_incident_ids(conn: sqlite3.Connection) -> None:
     for table in INCIDENT_TABLES:
         conn.execute(f"UPDATE {table} SET incident_id = '' WHERE incident_id <> ''")
+
+
+def apply_whitelist_subdomains(conn: sqlite3.Connection) -> None:
+    """Version 0.8 (user decision 2026-11-02): a domain on the whitelist protects itself and all its subdomains.
+    Before, the domain whitelist was exact, so a blocked subdomain of a whitelisted domain could still be in the
+    list. The upgrade removes those once, with an audit entry each, as adding the whitelist entry now would."""
+    from .validation import host_touches_domain  # validation does not import db, so no loop
+
+    whitelist = {row[0] for row in conn.execute("SELECT domain FROM whitelist_domains")}
+    if not whitelist:
+        return
+    stamp = to_iso(utcnow())
+    for (domain,) in conn.execute("SELECT domain FROM blocked_domains").fetchall():
+        labels = domain.split(".")
+        cover = next((".".join(labels[i:]) for i in range(len(labels) - 1) if ".".join(labels[i:]) in whitelist), None)
+        if cover:
+            conn.execute("DELETE FROM blocked_domains WHERE domain = ?", (domain,))
+            conn.execute("INSERT INTO audit_log(ts, action, object_type, value, result, actor, source, details)"
+                         " VALUES (?, 'remove', 'domain', ?, 'removed_by_whitelist', 'upgrade', 'upgrade', ?)",
+                         (stamp, domain, f"Covered by the whitelist entry {cover} (subdomains are protected since 0.8)."))
+    for url, host in conn.execute("SELECT url, host FROM blocked_urls").fetchall():
+        cover = next((w for w in whitelist if host_touches_domain(host, w)), None)
+        if cover:
+            conn.execute("DELETE FROM blocked_urls WHERE url = ?", (url,))
+            conn.execute("INSERT INTO audit_log(ts, action, object_type, value, result, actor, source, details)"
+                         " VALUES (?, 'remove', 'url', ?, 'removed_by_whitelist', 'upgrade', 'upgrade', ?)",
+                         (stamp, url, f"Covered by the whitelist entry {cover}."))
 
 
 def fill_records(conn: sqlite3.Connection) -> None:

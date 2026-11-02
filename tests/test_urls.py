@@ -290,3 +290,100 @@ def test_snapshot_from_a_leader_without_url_tables(settings, tmp_path):
 def test_health_counts_urls(client):
     client.post("/api/v1/urls", json={"url": "bad.example.com"}, headers=ALL)
     assert client.get("/health").get_json()["urls"] == 1
+
+
+# ---------------------------------------------------------------------- whitelist: subdomains and refused names
+# User decisions 2026-11-02: a whitelisted domain protects its subdomains in the domain list too, and shared
+# platforms and public names (Public Suffix List, plus a local file) may not be whitelisted.
+
+def test_whitelisting_removes_and_refuses_subdomains(settings):
+    furnace = Furnace(settings)
+    for d in ("x.example.com", "mail.x.example.com", "a.b.x.example.com", "notx.example.com", "x.example.com.evil.test"):
+        assert furnace.add_domain(d).status == "added", d
+    furnace.add_url("www.x.example.com/login")
+    r = furnace.add_whitelist_domain("x.example.com")
+    assert r.data["removed_from_blocklist"] == ["a.b.x.example.com", "mail.x.example.com", "x.example.com"]
+    assert r.data["urls_removed_from_blocklist"] == ["www.x.example.com/login"]
+    assert settings.domains_path.read_text().split() == ["notx.example.com", "x.example.com.evil.test"]
+    r = furnace.add_domain("new.x.example.com")
+    assert r.code == "whitelisted" and "x.example.com" in r.message
+    r = furnace.get_domain("deep.new.x.example.com")
+    assert (r.data["whitelisted"], r.data["whitelisted_by"]) == (True, "x.example.com")
+    assert furnace.get_domain("notx.example.com").data["whitelisted"] is False
+
+
+def test_bulk_whitelist_dry_run_counts_subdomains(settings):
+    furnace = Furnace(settings)
+    furnace.add_domain("mail.x.example.com")
+    r = furnace.bulk_whitelist_domains(["x.example.com"], dry_run=True)
+    assert r.data["removed_from_blocklist"] == ["mail.x.example.com"]
+    assert settings.domains_path.read_text() == "mail.x.example.com\n"
+
+
+def test_domain_import_skips_whitelisted_subdomains(settings, tmp_path):
+    furnace = Furnace(settings)
+    furnace.add_whitelist_domain("x.example.com")
+    source = tmp_path / "d.txt"
+    source.write_text("mail.x.example.com\nbad.example.com\n")
+    from furnace.importer import import_domains
+    report = import_domains(settings, source)
+    assert report.added_active == 1
+    assert [s.reason for s in report.skipped] == ["whitelisted"]
+
+
+@pytest.mark.parametrize("name, words", [
+    ("github.io", "shared platform"),
+    ("blogspot.com", "shared platform"),
+    ("cloudfront.net", "shared platform"),
+    ("co.uk", "public name"),
+    ("com.az", "public name"),
+    ("amazonaws.com", "covers the shared platform"),
+])
+def test_shared_platforms_and_public_names_cannot_be_whitelisted(settings, name, words):
+    r = Furnace(settings).add_whitelist_domain(name)
+    assert (r.status, r.code) == ("rejected", "whitelist_not_allowed")
+    assert words in r.message
+
+
+@pytest.mark.parametrize("name", ["company.github.io", "example.co.uk", "google.com", "microsoft.com", "github.com"])
+def test_normal_domains_can_be_whitelisted(settings, name):
+    assert Furnace(settings).add_whitelist_domain(name).status == "added"
+
+
+def test_local_refuse_file(settings, tmp_path):
+    local = tmp_path / "whitelist-refuse.txt"
+    local.write_text("# our own rules\ndropbox.com\ndrive.google.com  # files of anyone\n")
+    settings.whitelist_refuse_file = local
+    furnace = Furnace(settings)
+    r = furnace.add_whitelist_domain("dropbox.com")
+    assert r.code == "whitelist_not_allowed" and "local list" in r.message
+    r = furnace.add_whitelist_domain("google.com")  # it would cover drive.google.com
+    assert r.code == "whitelist_not_allowed" and "drive.google.com" in r.message
+    assert furnace.add_whitelist_domain("mail.google.com").status == "added"
+    bulk = furnace.bulk_whitelist_domains(["github.io", "company.example.com"])
+    assert bulk.data["added"] == 1
+    assert [x["reason_code"] for x in bulk.data["rejected"]] == ["whitelist_not_allowed"]
+
+
+def test_upgrade_removes_subdomains_of_old_whitelist_entries(settings):
+    conn = db.connect(settings.db_path)
+    try:
+        with db.transaction(conn):
+            conn.execute("INSERT INTO whitelist_domains(domain, added_at) VALUES ('x.example.com', 't')")
+            for d in ("mail.x.example.com", "other.example.com"):
+                conn.execute("INSERT INTO blocked_domains(domain, added_at) VALUES (?, 't')", (d,))
+            conn.execute("UPDATE meta SET value = '6' WHERE key = 'schema_version'")
+        db.migrate(conn)
+        assert [r[0] for r in conn.execute("SELECT domain FROM blocked_domains")] == ["other.example.com"]
+        row = conn.execute("SELECT result, source FROM audit_log WHERE value = 'mail.x.example.com'").fetchone()
+        assert tuple(row) == ("removed_by_whitelist", "upgrade")
+        assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "7"
+    finally:
+        conn.close()
+
+
+def test_status_warns_about_old_whitelist_entries(settings, conn):
+    with db.transaction(conn):
+        conn.execute("INSERT INTO whitelist_domains(domain, added_at) VALUES ('github.io', 't')")
+    lines = admin.whitelist_warnings(settings, conn)
+    assert len(lines) == 1 and "github.io" in lines[0] and "shared platform" in lines[0]

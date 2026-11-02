@@ -22,7 +22,7 @@ LIB="$PKG/usr/lib/furnace"
 install -d -m 0755 "$PKG/DEBIAN" "$LIB/furnace" "$LIB/templates" "$LIB/bin" "$PKG/usr/bin" \
     "$PKG/lib/systemd/system" "$PKG/usr/lib/tmpfiles.d" "$PKG/usr/share/doc/furnace"
 
-install -m 0644 "$ROOT"/furnace/*.py "$LIB/furnace/"
+install -m 0644 "$ROOT"/furnace/*.py "$ROOT/furnace/public_suffix_list.dat" "$LIB/furnace/"
 install -m 0755 "$ROOT/deploy/setup.sh" "$LIB/setup.sh"
 install -m 0644 "$ROOT/deploy/render.py" "$LIB/render.py"
 install -m 0644 "$ROOT"/deploy/templates/*.tmpl "$LIB/templates/"

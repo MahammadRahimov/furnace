@@ -81,6 +81,8 @@ class Settings:
     lockout_failures: int = 10    # this many wrong tokens from one IP ...
     lockout_minutes: int = 15     # ... within this time lock that IP for this time
     replica_secret_file: Path | None = None  # HTTPS replication on; the secret both servers share
+    # Names that may never be whitelisted, besides the Public Suffix List (one per line). Missing = none.
+    whitelist_refuse_file: Path | None = Path("/etc/furnace/whitelist-refuse.txt")
 
     @property
     def db_path(self) -> Path:
@@ -147,6 +149,7 @@ class Settings:
             lockout_minutes=_int("FURNACE_LOCKOUT_MINUTES", env.get("FURNACE_LOCKOUT_MINUTES"), 15, minimum=1),
             replica_secret_file=(Path(env["FURNACE_REPLICA_SECRET_FILE"])
                                  if env.get("FURNACE_REPLICA_SECRET_FILE") else None),
+            whitelist_refuse_file=Path(env.get("FURNACE_WHITELIST_REFUSE_FILE") or "/etc/furnace/whitelist-refuse.txt"),
         )
 
     @classmethod

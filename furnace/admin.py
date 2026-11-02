@@ -17,7 +17,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Iterable
 
-from . import __version__, auth, backup, db, edl
+from . import __version__, auth, backup, db, edl, psl
 from .cleanup import run_cleanup
 from .config import ConfigError, Settings, read_env_file
 from .importer import ImportError_, import_domains, import_ips, import_urls, import_whitelist
@@ -297,6 +297,18 @@ def permanent_warnings(settings: Settings, permanent: int) -> list[str]:
             f"{settings.max_ips}. They never expire. Unblock the ones that are no longer needed."]
 
 
+def whitelist_warnings(settings: Settings, conn: sqlite3.Connection) -> list[str]:
+    """Whitelist domains from before 0.8 that are shared platforms or public names. They are kept (nothing is
+    removed on its own), but they protect every site under them, so the admin should replace them."""
+    lines = []
+    for (domain,) in conn.execute("SELECT domain FROM whitelist_domains ORDER BY domain"):
+        why = psl.refusal(domain, settings.whitelist_refuse_file)
+        if why:
+            lines.append(f"WARNING: the whitelist entry {domain} would not be allowed today: {why} "
+                         f"Remove it with the API (DELETE /api/v1/whitelist/domains/{domain}) and whitelist the exact sites.")
+    return lines
+
+
 def cmd_edl_user(settings: Settings, args: argparse.Namespace) -> int:
     with Furnace(settings).locked() as conn:
         if args.action == "list":
@@ -433,7 +445,7 @@ def cmd_stats(settings: Settings) -> int:
             "urls_txt_bytes": settings.urls_path.stat().st_size if settings.urls_path.exists() else None,
             "backups": len(list(settings.backup_dir.glob("furnace-*.db"))) if settings.backup_dir.exists() else 0,
         }
-        warnings = token_warnings(conn) + permanent_warnings(settings, permanent)
+        warnings = token_warnings(conn) + permanent_warnings(settings, permanent) + whitelist_warnings(settings, conn)
     finally:
         conn.close()
     width = max(len(k) for k in stats)
@@ -491,7 +503,8 @@ def main(argv: list[str] | None = None) -> int:
             conn = db.connect(settings.db_path)
             try:
                 permanent = conn.execute("SELECT COUNT(*) FROM blocked_ips WHERE permanent = 1").fetchone()[0]
-                for line in token_warnings(conn) + permanent_warnings(settings, permanent):  # into the journal
+                for line in (token_warnings(conn) + permanent_warnings(settings, permanent)  # into the journal
+                             + whitelist_warnings(settings, conn)):
                     print(line)
             finally:
                 conn.close()

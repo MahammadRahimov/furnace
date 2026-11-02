@@ -369,6 +369,11 @@ def import_domains(settings: Settings, source: Path, dry_run: bool = False, adde
         try:
             whitelist = {row[0] for row in conn.execute("SELECT domain FROM whitelist_domains")}
             active = {row[0] for row in conn.execute("SELECT domain FROM blocked_domains")}
+
+            def protected(name: str) -> bool:  # the domain or a parent of it is whitelisted
+                labels = name.split(".")
+                return any(".".join(labels[i:]) in whitelist for i in range(len(labels) - 1))
+
             recorded = {row[0] for row in conn.execute("SELECT domain FROM domain_records")}
             rows: list[tuple] = []
             seen: set[str] = set()
@@ -386,7 +391,7 @@ def import_domains(settings: Settings, source: Path, dry_run: bool = False, adde
                     header = is_first and fields[0].lower() in ("domain", "domains", "name", "fqdn", "host")
                     report.skipped.append(Skipped(number, text, "header" if header else error.code))
                     continue
-                if domain in whitelist:
+                if protected(domain):
                     report.skipped.append(Skipped(number, text, "whitelisted"))
                 elif domain in seen:
                     report.skipped.append(Skipped(number, text, "duplicate_in_file"))

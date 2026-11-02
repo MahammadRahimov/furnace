@@ -60,6 +60,17 @@ How a release happens (user decision 2026-11-01):
      whitelist entry removes the URLs it protects.
    - The limit `MAX_URLS` (setup uses the same number as the other lists). Archive record, export, stats,
      replication and the health check include URLs. Schema 6 (new tables only).
-10. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
+10. **The domain whitelist protects subdomains, and shared platforms cannot be whitelisted.**
+    - A domain on the whitelist now protects itself **and all its subdomains** in the domain list (before: exact
+      only), as it already does in the URL list. Adding it removes the blocked subdomains; blocking one later is
+      refused. The upgrade does this once for the whitelist entries that already exist (audit source `upgrade`).
+    - Shared platforms and public names cannot be whitelisted (`422` `whitelist_not_allowed`): `github.io`,
+      `blogspot.com`, `co.uk`, and names that cover one, such as `amazonaws.com`. Furnace uses the Public Suffix
+      List (publicsuffix.org, MPL 2.0), bundled in the package and updated with each release.
+    - Your own names: `/etc/furnace/whitelist-refuse.txt` (setup makes it empty once). A name there also refuses
+      every name that covers it.
+    - `furnace status` warns about old whitelist entries that would be refused today. They are not removed.
+    - IPs: no change. A whitelisted range already protects every IP in it.
+11. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
 
 Not in this release: the Docker image. It is kept on the branch `docker` (user decision 2026-11-01).

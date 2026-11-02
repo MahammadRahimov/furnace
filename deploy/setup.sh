@@ -827,6 +827,21 @@ EOF
 chmod 0644 "$ETC/install.env"
 ok "Wrote $ETC/furnace.env and $ETC/install.env"
 
+# The admin's own names that may never be whitelisted. Made once, empty; setup never changes it afterwards.
+if [ ! -e "$ETC/whitelist-refuse.txt" ]; then
+    cat > "$ETC/whitelist-refuse.txt" <<'EOF'
+# Names that may never go on the domain whitelist, one per line. Furnace also refuses every shared platform
+# and public name of the Public Suffix List (github.io, blogspot.com, co.uk, ...), which comes with Furnace.
+# A name here also refuses every name above it: drive.google.com here refuses google.com too, because a
+# whitelisted domain protects all its subdomains. Keep this file the same on both servers.
+# Examples (remove the # to use them):
+# dropbox.com
+# drive.google.com
+EOF
+    chmod 0644 "$ETC/whitelist-refuse.txt"
+    ok "Wrote $ETC/whitelist-refuse.txt (your own names that may never be whitelisted; empty)"
+fi
+
 PUBKEY="$(cat "$ETC/ssh/replica_key.pub")"
 printf 'restrict,command="%s/bin/furnace-receive-replica" %s\n' "$LIB" "$PUBKEY" > "$SYNC_HOME/.ssh/authorized_keys"
 chown furnace-sync:furnace-sync "$SYNC_HOME/.ssh/authorized_keys"

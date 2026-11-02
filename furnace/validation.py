@@ -55,6 +55,7 @@ REASON_TEXT = {
     "wildcard_too_wide": "This wildcard is too wide: the name before the end must be written out, "
                          "for example *.example.com/, not *.com/ or example.*/.",
     "ipv6_url_not_allowed": "URLs with an IPv6 address are not supported. Block the IP in the IP list.",
+    "whitelist_not_allowed": "This name may not be whitelisted: it is a shared platform or a public name.",
 }
 
 

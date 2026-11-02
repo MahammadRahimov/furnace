@@ -321,6 +321,8 @@ Setup cannot do these things for you.
 - [ ] Check its limit per list. Set `MAX_IPS` to it (default 50,000). Furnace refuses new adds when a list is full
       (`limit_reached`).
 - [ ] Furnace stores exact domains. Decide whether the reader should also match sub-domains.
+- [ ] Put the names your team must never whitelist into `/etc/furnace/whitelist-refuse.txt` on both servers
+      (optional; shared platforms like `github.io` are refused anyway).
 
 If both Furnace servers are down, the list reader keeps using the last list it downloaded.
 Palo Alto steps: [section 15.1](#151-palo-alto-firewall-list-reader).
@@ -809,8 +811,8 @@ sudo furnace import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
 - Exact domains only. Refused: wildcards, URLs, IPs, invalid names. Stored in lower case.
   Non-ASCII names are stored as punycode (`xn--...`).
 - No expiry: a domain stays until someone removes it.
-- Refused when on the domain whitelist. The domain whitelist is exact: whitelisting `example.com` does not
-  whitelist `www.example.com`.
+- Refused when the domain or a parent of it is on the domain whitelist: whitelisting `example.com` protects
+  `www.example.com` and every other subdomain too.
 
 **URLs**
 - The form of a firewall URL list: `host[:port]` and an optional path and query. `http://` and `https://` are
@@ -832,9 +834,35 @@ sudo furnace import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
   so only host entries (`bad.example.com/`, `*.bad.example.com/`) work for HTTPS.
 
 **Whitelist**
-- IPs and CIDR (Classless Inter-Domain Routing) ranges, and exact domains.
-- Ranges shorter than /8 (IPv4) or /16 (IPv6) are refused.
-- Adding an entry removes the blocked IPs, domains and URLs it covers, with an audit entry.
+- IPs and CIDR (Classless Inter-Domain Routing) ranges, and domains.
+- Ranges shorter than /8 (IPv4) or /16 (IPv6) are refused. A range protects every IP in it (and URLs with those IPs).
+- Adding an entry removes the blocked IPs, domains and URLs it covers, with an audit entry. Removing it later does
+  not block them again.
+
+**What the domain whitelist does and what it refuses** (user decisions 2026-11-02):
+
+- A domain on the whitelist protects **itself and all its subdomains**, in the domain list and in the URL list.
+  With `x.example.com` on the whitelist: the domains `x.example.com`, `mail.x.example.com` and `a.b.x.example.com`
+  and the URLs `x.example.com/...`, `www.x.example.com/...` and `*.x.example.com/` cannot be blocked, and adding the
+  whitelist entry removes the ones already blocked. The parent `example.com` and look-alikes such as
+  `notx.example.com` or `x.example.com.evil.test` are not touched.
+- **Shared platforms and public names cannot be whitelisted** (`whitelist_not_allowed`). Anyone can make a site
+  under them, so whitelisting one would protect attackers' sites too. Furnace uses the **Public Suffix List**
+  (publicsuffix.org, the list browsers use; a copy comes with each Furnace release, no internet needed):
+
+  | Whitelist request | Result |
+  |---|---|
+  | `github.io`, `blogspot.com`, `cloudfront.net`, `azurewebsites.net`, `vercel.app`, `herokuapp.com`, `pages.dev` | refused: a shared platform |
+  | `co.uk`, `com.az`, `gov.az` | refused: a public name |
+  | `amazonaws.com`, `windows.net` | refused: they cover a shared platform (`s3.amazonaws.com`, `blob.core.windows.net`) |
+  | `company.github.io`, `example.co.uk`, `yourcompany.com`, `google.com`, `microsoft.com`, `github.com` | allowed |
+
+- **Your own names** go into `/etc/furnace/whitelist-refuse.txt` (one per line, `#` comments; setup makes it
+  once, empty, and never changes it). A name there is refused, and so is every name that would cover it:
+  `drive.google.com` in the file also refuses `google.com`. Use it for services that host anyone's files under a
+  path, which the Public Suffix List cannot know (`dropbox.com`, `drive.google.com`). Keep the file the same on both
+  servers.
+- Whitelist entries made before 0.8 stay. `furnace status` warns about the ones that would be refused today.
 - Look-ups use merged, sorted ranges and binary search. Checking 30,000 IPs against thousands of ranges takes
   milliseconds.
 
@@ -924,6 +952,8 @@ shared IP as the leader, and then starts the service again. Afterwards the other
 | `/etc/furnace/setup.conf` | Your setup answers. Readable by root only. |
 | `/etc/furnace/furnace.env` | Program settings (no secrets). |
 | `/etc/furnace/tls/` | Certificate and private key. |
+| `/etc/furnace/whitelist-refuse.txt` | Your own names that may never be whitelisted (optional, the same on both servers). |
+| `/usr/lib/furnace/furnace/public_suffix_list.dat` | The Public Suffix List (shared platforms and public names), MPL 2.0, updated with each release. |
 | `/etc/furnace/secrets/replica-secret` | The replication secret (from the certificate key). Root and the furnace group. |
 | `/etc/furnace/ssh/` | SSH replication key (the fallback in this version). |
 | `/var/lib/furnace/furnace.db` | The database (master record), with the API tokens and list logins as hashes. |
@@ -961,6 +991,11 @@ other is not yet, the leader uses SSH as before; when both run 0.8 it uses HTTPS
 already open (the health check uses it). New: blocklist files through the API (section 6.9), and the URL
 blocklist (section 6.7.1): the upgrade adds `/edl/urls.txt` (empty until you add URLs) and `FURNACE_MAX_URLS`
 (the same limit as the other lists).
+**The domain whitelist changes in 0.8:** a whitelisted domain now also protects its subdomains, and shared
+platforms (`github.io`) and public names (`co.uk`) can no longer be whitelisted (section 8). The upgrade removes,
+once, the blocked domains that are subdomains of a domain already on the whitelist (audit source `upgrade`). Check
+first: `sudo furnace export whitelist-domains`. Old whitelist entries that would be refused today stay;
+`furnace status` names them.
 **Change your callers first:** the field `incident_id` is gone. A request that still sends it gets `400`, so remove
 it from your SOAR playbooks and scripts before the upgrade. The upgrade deletes every stored incident number (old
 backups still have them). The exports and the archive CSV no longer have the `incident_id` column.

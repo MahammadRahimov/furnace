@@ -186,8 +186,10 @@ def test_domain_whitelist(furnace, settings):
     assert r.data["removed_from_blocklist"] == ["bad.example.com"]
     assert settings.domains_path.read_text() == "worse.example.net\n"
     assert furnace.add_domain("bad.example.com").code == "whitelisted"
-    # exact only: a sub-domain is still allowed
-    assert furnace.add_domain("x.bad.example.com").status == "added"
+    # a whitelisted domain protects its subdomains too (user decision 2026-11-02), not its parent
+    r = furnace.add_domain("x.bad.example.com")
+    assert r.code == "whitelisted" and "bad.example.com" in r.message
+    assert furnace.add_domain("example.com").status == "added"
     bulk = furnace.bulk_whitelist_domains(["worse.example.net", "*.example.org", "good.example.org"])
     assert bulk.data["added"] == 2 and bulk.data["removed_from_blocklist"] == ["worse.example.net"]
     assert furnace.list_whitelist_domains().data["total"] == 3

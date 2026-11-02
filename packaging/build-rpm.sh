@@ -22,7 +22,7 @@ LIB="$STAGE/usr/lib/furnace"
 
 install -d -m 0755 "$LIB/furnace" "$LIB/templates" "$LIB/bin" "$STAGE/usr/bin" \
     "$STAGE/usr/lib/systemd/system" "$STAGE/usr/lib/tmpfiles.d" "$STAGE/usr/share/doc/furnace"
-install -m 0644 "$ROOT"/furnace/*.py "$LIB/furnace/"
+install -m 0644 "$ROOT"/furnace/*.py "$ROOT/furnace/public_suffix_list.dat" "$LIB/furnace/"
 install -m 0755 "$ROOT/deploy/setup.sh" "$LIB/setup.sh"
 install -m 0644 "$ROOT/deploy/render.py" "$LIB/render.py"
 install -m 0644 "$ROOT"/deploy/templates/*.tmpl "$LIB/templates/"

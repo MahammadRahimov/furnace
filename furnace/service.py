@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Iterator
 
-from . import db, edl
+from . import db, edl, psl
 from .config import Settings
 from .locking import FileLock
 from .rangeset import RangeSet
@@ -176,8 +176,20 @@ class Furnace:
         return row[0] if row else None
 
     @staticmethod
-    def _domain_whitelisted(conn: sqlite3.Connection, domain: str) -> bool:
-        return conn.execute("SELECT 1 FROM whitelist_domains WHERE domain=?", (domain,)).fetchone() is not None
+    def _domain_whitelisted(conn: sqlite3.Connection, domain: str) -> str | None:
+        """The whitelist entry that protects this domain: the domain itself or a parent of it
+        (user decision 2026-11-02: a whitelisted domain protects all its subdomains)."""
+        labels = domain.split(".")
+        names = [".".join(labels[i:]) for i in range(len(labels) - 1)]
+        row = conn.execute(f"SELECT domain FROM whitelist_domains WHERE domain IN ({','.join('?' * len(names))})"
+                           " ORDER BY length(domain) LIMIT 1", names).fetchone()
+        return row[0] if row else None
+
+    def _whitelist_check(self, domain: str) -> None:
+        """Shared platforms and public names may not be whitelisted (Public Suffix List + local file)."""
+        why = psl.refusal(domain, self.settings.whitelist_refuse_file)
+        if why:
+            raise Rejected("whitelist_not_allowed", why)
 
     @staticmethod
     def whitelist_rangeset(conn: sqlite3.Connection) -> RangeSet:
@@ -309,8 +321,10 @@ class Furnace:
                 return self._reject(conn, "add", "domain", raw, error, "", source, now)
             try:
                 domain = normalize_domain(value)
-                if self._domain_whitelisted(conn, domain):
-                    raise Rejected("whitelisted")
+                protected = self._domain_whitelisted(conn, domain)
+                if protected:
+                    raise Rejected("whitelisted", f"This domain is covered by the whitelist entry {protected}. "
+                                                  "It cannot be blocked.")
             except Rejected as error:
                 return self._reject(conn, "add", "domain", raw, error, actor, source, now)
             stamp = db.to_iso(now)
@@ -375,7 +389,8 @@ class Furnace:
         except Rejected as error:
             return Result("rejected", error.message, code=error.code)
         with self._reader() as conn:
-            whitelisted = self._domain_whitelisted(conn, domain)
+            protected = self._domain_whitelisted(conn, domain)
+            whitelisted = {"whitelisted": protected is not None, "whitelisted_by": protected}
             row = conn.execute("SELECT * FROM blocked_domains WHERE domain=?", (domain,)).fetchone()
             record = self._record(conn.execute("SELECT * FROM domain_records WHERE domain=?",
                                                (domain,)).fetchone())
@@ -383,12 +398,12 @@ class Furnace:
             return Result("found", "This domain is blocked.",
                           data={"list": "active",
                                 "entry": {k: row[k] for k in ("domain", "added_at", "added_by", "reason")},
-                                "record": record, "whitelisted": whitelisted})
+                                "record": record, **whitelisted})
         if record:
             return Result("found", "This domain is in the archive: it was blocked before. It is not blocked now.",
                           data={"list": "archive", "entry": {"domain": domain, **record}, "record": record,
-                                "whitelisted": whitelisted})
-        return Result("not_found", "This domain was never blocked.", data={"whitelisted": whitelisted})
+                                **whitelisted})
+        return Result("not_found", "This domain was never blocked.", data=whitelisted)
 
     # ------------------------------------------------------------------ URLs
     #
@@ -685,10 +700,11 @@ class Furnace:
             try:
                 reason_t, actor = self._texts(reason, added_by)
                 domain = normalize_domain(value)
+                self._whitelist_check(domain)
             except Rejected as error:
                 return self._reject(conn, "add", "whitelist_domain", raw, error, "", source, now)
             with db.transaction(conn):
-                if self._domain_whitelisted(conn, domain):
+                if conn.execute("SELECT 1 FROM whitelist_domains WHERE domain=?", (domain,)).fetchone():
                     db.audit(conn, "add", "whitelist_domain", domain, "already_exists", "", actor, "", source, "", now)
                     return Result("already_exists", "This domain is already on the whitelist. Nothing changed.",
                                   data={"domain": domain})
@@ -704,12 +720,25 @@ class Furnace:
 
     def _purge_domains(self, conn: sqlite3.Connection, domains: set[str], actor: str, source: str,
                        now: datetime) -> list[str]:
-        hit = sorted(row[0] for row in conn.execute("SELECT domain FROM blocked_domains") if row[0] in domains)
+        hit = self.domains_covered(conn, domains)
         for domain in hit:
             conn.execute("DELETE FROM blocked_domains WHERE domain=?", (domain,))
             db.audit(conn, "remove", "domain", domain, "removed_by_whitelist", "", actor, "", source,
                      "Whitelisted.", now)
         return hit
+
+    @staticmethod
+    def domains_covered(conn: sqlite3.Connection, domains: Iterable[str]) -> list[str]:
+        """The blocked domains that these whitelist domains protect: each one and its subdomains."""
+        wanted = set(domains)
+        if not wanted:
+            return []
+        hit = []
+        for (blocked,) in conn.execute("SELECT domain FROM blocked_domains"):
+            labels = blocked.split(".")
+            if any(".".join(labels[i:]) in wanted for i in range(len(labels) - 1)):
+                hit.append(blocked)
+        return sorted(hit)
 
     def remove_whitelist_domain(self, value: object, removed_by: object = "", source: str = "api",
                                 now: datetime | None = None) -> Result:
@@ -755,7 +784,9 @@ class Furnace:
         domains: set[str] = set()
         for value in values:
             try:
-                domains.add(normalize_domain(value))
+                domain = normalize_domain(value)
+                self._whitelist_check(domain)
+                domains.add(domain)
             except Rejected as error:
                 rejected.append({"value": self._raw(value), "reason_code": error.code, "message": error.message})
 
@@ -763,8 +794,7 @@ class Furnace:
             existing = {row[0] for row in conn.execute("SELECT domain FROM whitelist_domains")}
             new = sorted(domains - existing)
             if dry_run:
-                removed = sorted(row[0] for row in conn.execute("SELECT domain FROM blocked_domains")
-                                 if row[0] in set(new))
+                removed = self.domains_covered(conn, new)
                 urls = self.urls_covered(conn, domains=new)
             else:
                 stamp = db.to_iso(now)
