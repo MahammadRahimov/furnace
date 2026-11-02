@@ -291,6 +291,20 @@ r="$(docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization:
 check "the whitelist token may not upload a blocklist (401)" grep -q ' 401$' <<< "$r"
 for ip in 203.0.113.90 203.0.113.91; do api DELETE "/api/v1/ips/$ip" >/dev/null; done
 for d in bulk1.example.com bulk2.example.org; do api DELETE "/api/v1/domains/$d" >/dev/null; done
+
+step "URL blocklist"
+r="$(api POST /api/v1/urls '{"url":"https://Bad.Example.com/Phish/","reason":"phishing"}')"
+check "XSOAR adds a URL; https:// is removed (201)" grep -Eq '"url": ?"bad.example.com/phish/".* 201$' <<< "$r"
+check "the firewall sees the URL in urls.txt" grep -qx "bad.example.com/phish/" <<< "$(edl urls.txt)"
+r="$(api POST /api/v1/urls '{"url":"*.com/"}')"
+check "a too wide wildcard is refused (422)" grep -q 'wildcard_too_wide.* 422$' <<< "$r"
+r="$(bulk /api/v1/urls/bulk "" 'url\n*.evil.example.org malware\nhttp://bad.example.net/x\n')"
+check "a URL file is uploaded (200, 2 added)" grep -Eq '"added": ?2.* 200$' <<< "$r"
+check "the uploaded URLs are in urls.txt" bash -c 'grep -qx "\*.evil.example.org/" <<< "$1" && grep -qx bad.example.net/x <<< "$1"' _ "$(edl urls.txt)"
+docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $TOKEN" -X DELETE \
+    "https://$SHARED_IP/api/v1/urls?url=bad.example.net/x" >/dev/null
+check "a URL is removed (gone from urls.txt)" bash -c '! grep -qx bad.example.net/x <<< "$1"' _ "$(edl urls.txt)"
+check "furnace export urls lists them" on "$LEADER" "furnace export urls | grep -q '^bad.example.com/phish/,'"
 check "the test entries are removed again" bash -c "! grep -qx '203.0.113.90' <<< \"\$1\"" _ "$(edl blocklist.txt)"
 
 step "API tokens, expiry and the wrong-token lockout"
@@ -334,6 +348,7 @@ for _ in $(seq 1 90); do
 done
 check "the follower has the IP in its blocklist.txt" [ "$ok" = 1 ]
 check "the follower has the domain" on "$FOLLOWER" "grep -qx bad.example.com /var/lib/furnace-edl/domains.txt"
+check "the follower has the URL" on "$FOLLOWER" "grep -qx bad.example.com/phish/ /var/lib/furnace-edl/urls.txt"
 check "the follower has the archive record" \
     on "$FOLLOWER" "[ \"\$(sqlite3 /var/lib/furnace/furnace.db \"SELECT COUNT(*) FROM ip_records WHERE ip='$PERM_IP'\")\" = 1 ]"
 r="$(docker exec "$XSOAR" curl -sS --cacert /root/furnace.crt -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \

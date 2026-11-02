@@ -71,6 +71,7 @@ class Settings:
     allow_test_ranges: bool = False
     max_ips: int = 50000          # 0 means no limit
     max_domains: int = 50000      # 0 means no limit
+    max_urls: int = 50000         # 0 means no limit
     backup_keep: int = 14
     cleanup_max_percent: int = 20
     cleanup_min_size: int = 100
@@ -96,6 +97,10 @@ class Settings:
     @property
     def domains_path(self) -> Path:
         return self.edl_dir / "domains.txt"
+
+    @property
+    def urls_path(self) -> Path:
+        return self.edl_dir / "urls.txt"
 
     @property
     def archive_csv_path(self) -> Path:
@@ -129,6 +134,7 @@ class Settings:
             allow_test_ranges=_bool(env.get("FURNACE_ALLOW_TEST_RANGES"), False),
             max_ips=_int("FURNACE_MAX_IPS", env.get("FURNACE_MAX_IPS"), 50000),
             max_domains=_int("FURNACE_MAX_DOMAINS", env.get("FURNACE_MAX_DOMAINS"), 50000),
+            max_urls=_int("FURNACE_MAX_URLS", env.get("FURNACE_MAX_URLS"), 50000),
             backup_keep=_int("FURNACE_BACKUP_KEEP", env.get("FURNACE_BACKUP_KEEP"), 14, minimum=1),
             cleanup_max_percent=_int("FURNACE_CLEANUP_MAX_PERCENT",
                                      env.get("FURNACE_CLEANUP_MAX_PERCENT"), 20, minimum=1),

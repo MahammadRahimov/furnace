@@ -464,7 +464,7 @@ ask_all() {
     info "  Or limit it to IPs and ranges, separated by commas."
     ask API_ALLOW_FROM "Who may call the API" "${CFG_API_ALLOW_FROM:-any}"
     ask LISTS_ALLOW_FROM "Who may download the lists" "${CFG_LISTS_ALLOW_FROM:-any}"
-    note "The firewall's EDL limit. Adds beyond it are refused. 0 = no limit. Used for both lists."
+    note "The firewall's EDL limit. Adds beyond it are refused. 0 = no limit. Used for every list (IPs, domains, URLs)."
     ask MAX_IPS "Most entries per list" "${CFG_MAX_IPS:-50000}"
     CFG_MAX_DOMAINS="$CFG_MAX_IPS"
     ask ARCHIVE_AFTER_DAYS "Days an IP stays blocked (permanent IPs never expire)" "${CFG_ARCHIVE_AFTER_DAYS:-90}"
@@ -537,7 +537,7 @@ show_settings() {
     printf '\n  Settings:\n'
     printf '    %-22s %s\n' "Role" "$CFG_ROLE" "Network card" "$CFG_INTERFACE" "This server" "$CFG_THIS_IP" \
         "Other server" "$CFG_PEER_IP" "Shared IP" "$CFG_SHARED_IP/$CFG_SHARED_IP_PREFIX" "API from" "$CFG_API_ALLOW_FROM" \
-        "Lists from" "$CFG_LISTS_ALLOW_FROM" "Most IPs / domains" "$CFG_MAX_IPS / $CFG_MAX_DOMAINS" \
+        "Lists from" "$CFG_LISTS_ALLOW_FROM" "Most entries per list" "$CFG_MAX_IPS" \
         "IPs expire after" "$CFG_ARCHIVE_AFTER_DAYS days" "VRRP router ID" "$CFG_VRRP_ROUTER_ID" \
         "SSH allowed from" "$CFG_SSH_ALLOW_FROM" "Host firewall" "$CFG_HOST_FIREWALL" "HTTPS" "$CFG_USE_HTTPS"
     if needs_first_token; then
@@ -1095,7 +1095,7 @@ code_of() { "${CURL[@]}" -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true
 say "Self-test"
 start_selftest
 if wait_health; then pass "/health answers"; else fail "/health does not answer"; fi
-for file in blocklist.txt domains.txt; do
+for file in blocklist.txt domains.txt urls.txt; do
     [ "$(code_of "$BASE/edl/$file")" = "200" ] && pass "nginx serves /edl/$file" || fail "nginx does not serve /edl/$file"
 done
 for path in /edl/archive.csv /archive/archive.csv /furnace.db /edl/../furnace/furnace.db; do

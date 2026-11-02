@@ -1,6 +1,6 @@
 # Furnace API reference
 
-This is the full reference for the Furnace HTTP API and the two list files.
+This is the full reference for the Furnace HTTP API and the three list files.
 The README has the same content in a shorter form ([README section 6](../README.md#6-api-guide)).
 
 ## Contents
@@ -13,9 +13,10 @@ The README has the same content in a shorter form ([README section 6](../README.
 6. [Endpoint summary](#6-endpoint-summary)
 7. [Blocked IPs](#7-blocked-ips) (and [the archive](#74-the-archive))
 8. [Blocked domains](#8-blocked-domains)
+8a. [Blocked URLs](#8a-blocked-urls)
 9. [Whitelist: IPs and ranges](#9-whitelist-ips-and-ranges)
 10. [Whitelist: domains](#10-whitelist-domains)
-11. [Bulk whitelist upload](#11-bulk-whitelist-upload) (and [blocked IPs and domains from a file](#111-bulk-upload-of-blocked-ips-and-domains-a-file))
+11. [Bulk whitelist upload](#11-bulk-whitelist-upload) (and [blocked IPs, domains and URLs from a file](#111-bulk-upload-of-blocked-ips-domains-and-urls-a-file))
 12. [List files for the list reader](#12-list-files-for-the-list-reader)
 13. [Health check](#13-health-check)
 14. [How a caller should handle answers](#14-how-a-caller-should-handle-answers)
@@ -104,6 +105,8 @@ addresses get a `403` page from nginx (not JSON).
 | `reason` | 500 characters | `422` `field_too_long` |
 | Whitelist list page | `limit` 1 to 10,000 (default 1,000) | Clamped to the range |
 | Blocked IPs | `MAX_IPS` setting (the list reader's limit) | `422` `limit_reached` |
+| Blocked domains, URLs | `MAX_DOMAINS`, `MAX_URLS` (setup sets both to the same limit) | `422` `limit_reached` |
+| URL length | 255 characters (after cleaning) | `422` `url_too_long` |
 
 ## 4. Answers and status codes
 
@@ -144,17 +147,25 @@ Example of a refusal:
 
 | Code | Endpoint | Meaning |
 |---|---|---|
-| `missing_value` | all adds | No IP or domain was sent. |
+| `missing_value` | all adds | No IP, domain or URL was sent. |
 | `invalid_ip` | IPs | Not a valid IP address. |
 | `range_not_allowed` | IPs | A range (CIDR or a-b) was sent. Send one IP. |
 | `private_ip`, `loopback_ip`, `link_local_ip`, `shared_address_space`, `multicast_ip`, `reserved_ip`, `unspecified_ip`, `not_public`, `ipv4_mapped_not_allowed` | IPs | Not a single public IP. |
 | `documentation_range` | IPs | 192.0.2.0/24, 198.51.100.0/24 or 203.0.113.0/24, and test ranges are switched off. |
-| `whitelisted` | IPs, domains | The value is on the whitelist. The message names the whitelist entry. |
-| `limit_reached` | IPs | The list is full (`MAX_IPS`). |
+| `whitelisted` | IPs, domains, URLs | The value is on the whitelist. The message names the whitelist entry. |
+| `limit_reached` | IPs, domains, URLs | The list is full (`MAX_IPS`, `MAX_DOMAINS`, `MAX_URLS`). |
 | `invalid_domain` | domains | Not a valid domain name. |
 | `wildcard_not_allowed` | domains | A wildcard like `*.example.com` was sent. |
 | `url_not_allowed` | domains | A URL was sent. Send only the domain. |
 | `ip_not_allowed` | domains | An IP was sent to a domain endpoint. |
+| `invalid_url` | URLs | Not a valid URL: bad host name, port, spaces, or a non-ASCII path (send it percent-encoded). |
+| `scheme_not_allowed` | URLs | Only `http://` and `https://` (they are removed). `ftp://` and others are refused. |
+| `login_not_allowed` | URLs | The URL has `user@` or `user:password@`. |
+| `url_too_long` | URLs | Longer than 255 characters. |
+| `wildcard_partial` | URLs | A wildcard is only part of a name or path part (`*bad.example.com`). |
+| `wildcard_too_wide` | URLs | The wildcard covers too much (`*.com/`, `example.*/`, `*.co.uk/`). |
+| `ipv6_url_not_allowed` | URLs | The host is an IPv6 address. Block it in the IP list. |
+| `private_ip` and the other IP codes | URLs | The host is an IP that may not be blocked. |
 | `invalid_cidr` | whitelist IPs | Not a valid IP or range. |
 | `range_too_wide` | whitelist IPs | Shorter than /8 (IPv4) or /16 (IPv6). |
 | `field_too_long` | all | `reason`, `added_by` or `removed_by` is too long, or not text. |
@@ -173,6 +184,10 @@ Example of a refusal:
 | GET | `/api/v1/domains/<domain>` | blocklist read | Look up a domain |
 | DELETE | `/api/v1/domains/<domain>` | blocklist write | Unblock a domain |
 | POST | `/api/v1/domains/bulk` | blocklist write | Block the domains of a file |
+| POST | `/api/v1/urls` | blocklist write | Block a URL |
+| GET | `/api/v1/urls?url=...` | blocklist read | Look up a URL |
+| DELETE | `/api/v1/urls?url=...` | blocklist write | Unblock a URL |
+| POST | `/api/v1/urls/bulk` | blocklist write | Block the URLs of a file (like `furnace import-urls`) |
 | POST | `/api/v1/whitelist/ips` | whitelist write | Whitelist an IP or range |
 | GET | `/api/v1/whitelist/ips` | whitelist read | List whitelisted IPs and ranges (paged) |
 | DELETE | `/api/v1/whitelist/ips/<ip or cidr>` | whitelist write | Remove from the whitelist |
@@ -183,6 +198,7 @@ Example of a refusal:
 | POST | `/api/v1/whitelist/domains/bulk` | whitelist write | Bulk whitelist domains |
 | GET | `/edl/blocklist.txt` | list login | Blocked IPs, one per line |
 | GET | `/edl/domains.txt` | list login | Blocked domains, one per line |
+| GET | `/edl/urls.txt` | list login | Blocked URLs, one per line |
 | GET | `/health` | none (servers only) | Health and role |
 
 ## 7. Blocked IPs
@@ -308,9 +324,9 @@ The IP leaves the list file. It stays in the archive.
 
 ### 7.4 The archive
 
-The archive is a record of every different IP and domain that was ever blocked:
+The archive is a record of every different IP, domain and URL that was ever blocked:
 
-- One row per IP or domain. Never a duplicate, never removed.
+- One row per IP, domain or URL. Never a duplicate, never removed.
 - Written when it is blocked for the first time, at the same time as the list.
 - It keeps the details of the first block (`added_by`, `reason`), `first_blocked_at`,
   `last_blocked_at` and `times_blocked`.
@@ -368,6 +384,105 @@ curl --cacert "$CA" -X DELETE "$FURNACE/api/v1/domains/bad.example.com?removed_b
 ```
 
 Answers: `200` `removed` or `404` `not_found`.
+
+## 8a. Blocked URLs
+
+The URL list is for a firewall's URL list (on Palo Alto: an EDL of type URL List, used as a custom URL category).
+It blocks the web traffic itself, also when the client already knows the IP. URLs never expire, like domains, and
+get the archive record. The permission is the blocklist permission, the same as for IPs and domains.
+
+A URL has slashes, so the look-up and the unblock take it in the query string (`?url=`, URL-encoded) or in a JSON
+body (`{"url": "..."}`), never in the path.
+
+**How Furnace cleans a URL** (the answer shows the stored form in `entry.url`; `given` shows what was sent when it
+differs):
+
+| Rule | Sent | Stored and published |
+|---|---|---|
+| `http://` and `https://` are removed (one entry covers both) | `https://bad.example.com/login` | `bad.example.com/login` |
+| Lower case (the firewall ignores case) | `Bad.Example.COM/Login` | `bad.example.com/login` |
+| A host alone gets a `/` (so it does not also match `bad.example.com.evil.test`) | `bad.example.com` | `bad.example.com/` |
+| The `#...` part is removed (a browser never sends it) | `bad.example.com/a#top` | `bad.example.com/a` |
+| A query without a path gets the `/` | `bad.example.com?id=1` | `bad.example.com/?id=1` |
+| A port stays | `bad.example.com:8080` | `bad.example.com:8080/` |
+| Non-ASCII names become punycode | `bücher.example` | `xn--bcher-kva.example/` |
+
+**Wildcards** are whole parts only. Parts are separated by `. / ? & = ; +`. `*` is one or more parts, `^` exactly one.
+
+| Entry | Matches | Refused because |
+|---|---|---|
+| `*.bad.example.com/` | `www.bad.example.com`, `a.b.bad.example.com` (not `bad.example.com` itself) | |
+| `^.bad.example.com/` | `www.bad.example.com` (one part only) | |
+| `bad.example.com/*/login` | `bad.example.com/x/login` | |
+| `*bad.example.com/` | | `wildcard_partial` |
+| `*.com/`, `example.*/`, `bad.*.com/` | | `wildcard_too_wide`: the last two parts must be written out |
+| `*.co.uk/`, `*.com.az/` | | `wildcard_too_wide`: under a country's public names, three parts |
+
+To block a site and all its subdomains, add both `bad.example.com/` and `*.bad.example.com/`.
+
+**The whitelist protects by host** (the domain whitelist and the IP whitelist; there is no separate URL whitelist).
+A domain on the whitelist protects itself and all its subdomains:
+
+| Whitelist | URL | Result |
+|---|---|---|
+| `good.example.com` | `good.example.com/login`, `www.good.example.com/`, `*.good.example.com/` | refused (`whitelisted`) |
+| `good.example.com` | `*.example.com/`, `^.example.com/` (they cover `good.example.com`) | refused (`whitelisted`) |
+| `good.example.com` | `example.com/`, `bad.example.com/` | allowed |
+| `198.51.100.0/24` | `198.51.100.7/x` | refused (`whitelisted`) |
+
+Adding a whitelist entry removes the blocked URLs it protects (`urls_removed_from_blocklist` in the answer).
+
+**Paths and HTTPS:** for HTTPS the firewall sees the path only with SSL decryption. Without it, only host entries
+(`bad.example.com/`, `*.bad.example.com/`) work for HTTPS sites. Paths always work for plain HTTP.
+
+### 8a.1 Block a URL
+
+`POST /api/v1/urls`. Body: `url` (required), `reason`, `added_by` (same limits as [7.1](#71-block-an-ip)).
+
+```bash
+curl --cacert "$CA" -X POST "$FURNACE/api/v1/urls" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"url":"https://bad.example.com/login/","reason":"Phishing page","added_by":"analyst.one"}'
+```
+
+`201`:
+
+```json
+{"status": "added", "message": "The URL is now blocked as bad.example.com/login/.",
+ "entry": {"url": "bad.example.com/login/", "added_at": "2026-11-02T15:03:27Z", "added_by": "analyst.one",
+           "reason": "Phishing page"},
+ "record": {"first_blocked_at": "2026-11-02T15:03:27Z", "last_blocked_at": "2026-11-02T15:03:27Z",
+            "times_blocked": 1, "added_by": "analyst.one", "reason": "Phishing page"},
+ "given": "https://bad.example.com/login/"}
+```
+
+Other answers: `200` `already_exists` (also when it was sent in another form, for example with `http://`),
+`422` `rejected`, `503`.
+
+### 8a.2 Look up a URL
+
+`GET /api/v1/urls?url=...`. Send the URL in any form; it is cleaned the same way first.
+
+```bash
+curl --cacert "$CA" -G "$FURNACE/api/v1/urls" --data-urlencode "url=https://bad.example.com/login/" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Answers: `200` `found` with `list` (`active` or `archive`), `entry`, `record` and `whitelisted_by` (the whitelist
+domain or range that protects the URL, or `null`); `404` `not_found` (with `url` and `whitelisted_by`); `400` when
+no URL was given.
+
+### 8a.3 Unblock a URL
+
+`DELETE /api/v1/urls?url=...` (optional `removed_by`), or `DELETE /api/v1/urls` with a JSON body
+`{"url": "...", "removed_by": "..."}`.
+
+```bash
+curl --cacert "$CA" -X DELETE -G "$FURNACE/api/v1/urls" --data-urlencode "url=bad.example.com/login/" \
+  --data-urlencode "removed_by=analyst.one" -H "Authorization: Bearer $TOKEN"
+```
+
+Answers: `200` `removed` or `404` `not_found`. The URL stays in the archive.
 
 ## 9. Whitelist: IPs and ranges
 
@@ -449,7 +564,8 @@ curl --cacert "$CA" -X DELETE "$FURNACE/api/v1/whitelist/domains/good.example.co
   -H "Authorization: Bearer $WL_TOKEN"
 ```
 
-Adding a domain removes it from the blocklist if it was blocked (`removed_from_blocklist`).
+Adding a domain removes it from the blocklist if it was blocked (`removed_from_blocklist`), and removes the
+blocked URLs it protects: the domain and its subdomains (`urls_removed_from_blocklist`).
 
 ## 11. Bulk whitelist upload
 
@@ -486,15 +602,15 @@ curl --cacert "$CA" -X POST "$FURNACE/api/v1/whitelist/ips/bulk?dry_run=true&add
 `200`:
 
 ```json
-{"status": "ok", "message": "2 entries would be added. 1 entries would be rejected. 1 blocked IPs would be removed.",
+{"status": "ok", "message": "2 entries would be added. 1 entries would be rejected. 1 blocked IPs and 0 blocked URLs would be removed.",
  "dry_run": true, "received": 3, "added": 2, "already_exists": 0,
  "rejected": [{"value": "10.0.0.0/4", "reason_code": "range_too_wide", "message": "..."}],
- "removed_from_blocklist": ["203.0.113.45"]}
+ "removed_from_blocklist": ["203.0.113.45"], "urls_removed_from_blocklist": []}
 ```
 
-### 11.1 Bulk upload of blocked IPs and domains (a file)
+### 11.1 Bulk upload of blocked IPs, domains and URLs (a file)
 
-`POST /api/v1/ips/bulk` and `POST /api/v1/domains/bulk` (permission: blocklist write)
+`POST /api/v1/ips/bulk`, `POST /api/v1/domains/bulk` and `POST /api/v1/urls/bulk` (permission: blocklist write)
 
 Send a whole file of IPs or domains in one request. It uses exactly the same rules as `sudo furnace import-ips` and
 `import-domains` on the server ([README section 7.2](../README.md#72-import-ips)):
@@ -544,17 +660,31 @@ curl --cacert "$CA" -X POST "$FURNACE/api/v1/domains/bulk" \
  "report": "api-ips-k2j3h4.txt.20261101-101500.report.txt"}
 ```
 
-`skipped_lines` lists at most 1,000 lines; `skipped` is the full number. Domains have no `permanent` and
-`archived` (domains never expire).
+`skipped_lines` lists at most 1,000 lines; `skipped` is the full number. Domains and URLs have no `permanent` and
+`archived` (they never expire).
+
+**URL files** (`/api/v1/urls/bulk`, the same as `sudo furnace import-urls`): one URL per line, optionally followed
+by a space or a tab and a reason. A URL can have commas and semicolons, so they do not split the line:
+
+```
+url
+https://bad.example.com/login phishing page
+*.evil.example.org	malware
+bad.example.net/a,b
+```
+
+Each URL is cleaned as in [section 8a](#8a-blocked-urls). The same URL in another form (`http://bad.example.com/x`
+and `bad.example.com/x`) counts as a duplicate. Options: `dry_run`, `reason`, `added_by`. The limit is `MAX_URLS`.
 
 ## 12. List files for the list reader
 
-The list reader (for example a firewall) downloads two plain text files. Each has one value per line.
+The list reader (for example a firewall) downloads plain text files. Each has one value per line.
 
 | Path | Content |
 |---|---|
 | `GET /edl/blocklist.txt` | Active blocked IPs |
 | `GET /edl/domains.txt` | Blocked domains |
+| `GET /edl/urls.txt` | Blocked URLs (for a URL list / custom URL category) |
 
 - Login: HTTP basic auth. Setup makes the user `lists`. Manage logins with `sudo furnace edl-user list|add NAME|rotate NAME|remove NAME`.
 - Rate limit: 2 requests per second per address (burst 10).
@@ -575,7 +705,7 @@ It is for keepalived and the admins.
 `200`:
 
 ```json
-{"status": "ok", "version": "0.7.0", "role": "leader", "ips": 1234, "domains": 56}
+{"status": "ok", "version": "0.8.0", "role": "leader", "ips": 1234, "domains": 56, "urls": 7}
 ```
 
 `503` `error` when the database or the list files cannot be read.

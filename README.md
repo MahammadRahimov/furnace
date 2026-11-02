@@ -24,7 +24,7 @@ HTTPS requests, and any list reader that can download a text file over HTTPS wit
 5. [Checklist of manual work](#5-checklist-of-manual-work)
 6. [API guide](#6-api-guide)
 7. [Daily admin work (the furnace command)](#7-daily-admin-work-the-furnace-command)
-8. [Rules for IPs, domains and the whitelist](#8-rules-for-ips-domains-and-the-whitelist)
+8. [Rules for IPs, domains, URLs and the whitelist](#8-rules-for-ips-domains-urls-and-the-whitelist)
 9. [The nightly cleanup and the archive](#9-the-nightly-cleanup-and-the-archive)
 10. [Two servers: leader and follower](#10-two-servers-leader-and-follower)
 11. [Files and folders](#11-files-and-folders)
@@ -44,12 +44,13 @@ The plan for the next versions (Kubernetes, high availability) is in [docs/ROADM
                                                                           |
                                                                           +--> blocklist.txt  (IPs)
                                                                           +--> domains.txt    (domains)
+                                                                          +--> urls.txt       (URLs)
                                                                                     ^
  List reader (firewall) --downloads every few minutes over HTTPS + login------------+
 ```
 
 - The **database** (SQLite) is the master record.
-- The two text files are always rebuilt from the database after each change.
+- The three text files are always rebuilt from the database after each change.
 - A new file is first written to a temporary file, then renamed. The firewall never sees half a file.
 - A file lock makes sure two changes at the same time cannot clash.
 - Every change is one database transaction. Every action is written to an audit log, also refused requests.
@@ -311,9 +312,10 @@ Setup cannot do these things for you.
 ### 5.2 The list reader (for example a firewall)
 
 - [ ] Make it trust the Furnace certificate: `/etc/furnace/tls/furnace.crt` on the leader. It is public, not secret.
-- [ ] Add two lists:
+- [ ] Add the lists:
   - IPs: `https://SHARED_IP/edl/blocklist.txt`
   - Domains: `https://SHARED_IP/edl/domains.txt`
+  - URLs: `https://SHARED_IP/edl/urls.txt` (only if you block URLs)
 - [ ] Give it the list login: user `lists` and the password from setup (HTTP basic authentication).
 - [ ] Let it check for updates every few minutes, and use the lists in its block rules.
 - [ ] Check its limit per list. Set `MAX_IPS` to it (default 50,000). Furnace refuses new adds when a list is full
@@ -542,6 +544,35 @@ curl --cacert "$CA" -X DELETE "$FURNACE/api/v1/domains/bad.example.com?removed_b
 Domains are stored in lower case. Domains never expire. They stay until someone removes them.
 Domains have no `permanent` field. Like IPs, every domain gets an archive record.
 
+### 6.7.1 Add, look up and remove a URL
+
+`POST /api/v1/urls`, `GET /api/v1/urls?url=...` (blocklist read) and `DELETE /api/v1/urls?url=...`
+(blocklist write). A URL has slashes, so it goes in the query string (URL-encoded) or in the JSON body, never in the
+path.
+
+```bash
+curl --cacert "$CA" -X POST "$FURNACE/api/v1/urls" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"url":"https://bad.example.com/login/","reason":"Phishing page","added_by":"analyst.one"}'
+
+curl --cacert "$CA" -G "$FURNACE/api/v1/urls" --data-urlencode "url=bad.example.com/login/" \
+  -H "Authorization: Bearer $TOKEN"
+
+curl --cacert "$CA" -X DELETE -G "$FURNACE/api/v1/urls" --data-urlencode "url=bad.example.com/login/" \
+  --data-urlencode "removed_by=analyst.one" -H "Authorization: Bearer $TOKEN"
+```
+
+Furnace cleans every URL into the form the firewall's URL list needs, and the answer shows it (`entry.url`):
+
+| Sent | Stored and published |
+|---|---|
+| `https://Bad.Example.com/Login/` | `bad.example.com/login/` (no `http://` or `https://`: one entry covers both) |
+| `bad.example.com` | `bad.example.com/` (the `/` stops it also matching `bad.example.com.evil.test`) |
+| `*.bad.example.com` | `*.bad.example.com/` (every subdomain, not `bad.example.com` itself) |
+| `bad.example.com/a#top` | `bad.example.com/a` (a browser never sends the `#` part) |
+
+URLs never expire, like domains. Rules: [section 8](#8-rules-for-ips-domains-urls-and-the-whitelist).
+
 ### 6.8 Whitelist: add, remove, list
 
 IPs and ranges: `/api/v1/whitelist/ips`. Domains: `/api/v1/whitelist/domains`. Listing needs whitelist read,
@@ -569,9 +600,10 @@ curl --cacert "$CA" -X DELETE "$FURNACE/api/v1/whitelist/domains/good.example.co
 ```
 
 When a whitelist entry is added, Furnace removes every blocked IP or domain it covers. The answer lists them in
-`removed_from_blocklist`. Each removal is in the audit log.
+`removed_from_blocklist`, and the blocked URLs it covers in `urls_removed_from_blocklist`. Each removal is in the
+audit log.
 
-### 6.9 Bulk upload (whitelist, and blocked IPs and domains)
+### 6.9 Bulk upload (whitelist, and blocked IPs, domains and URLs)
 
 `POST /api/v1/whitelist/ips/bulk` and `POST /api/v1/whitelist/domains/bulk` (whitelist write, also for `dry_run`).
 Up to 200,000 entries per request. Use `dry_run` first to see what would happen.
@@ -591,10 +623,10 @@ curl --cacert "$CA" -X POST "$FURNACE/api/v1/whitelist/ips/bulk?dry_run=true&add
 Answer `200`:
 
 ```json
-{"status": "ok", "message": "2 entries would be added. 1 entries would be rejected. 1 blocked IPs would be removed.",
+{"status": "ok", "message": "2 entries would be added. 1 entries would be rejected. 1 blocked IPs and 0 blocked URLs would be removed.",
  "dry_run": true, "received": 3, "added": 2, "already_exists": 0,
  "rejected": [{"value": "10.0.0.0/4", "reason_code": "range_too_wide", "message": "..."}],
- "removed_from_blocklist": ["203.0.113.45"]}
+ "removed_from_blocklist": ["203.0.113.45"], "urls_removed_from_blocklist": []}
 ```
 
 Bulk upload is all in one transaction. Bad lines are skipped and listed. Good lines are added.
@@ -608,6 +640,10 @@ string: `dry_run`, `permanent`, `old_ips`, `date_format`, `reason`, `added_by`. 
 curl --cacert "$CA" -X POST "$FURNACE/api/v1/ips/bulk?dry_run=true" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: text/plain" --data-binary @blocklist.csv
 ```
+
+**Blocked URLs from a file:** `POST /api/v1/urls/bulk` (blocklist write), the same as `sudo furnace import-urls`.
+One URL per line, optionally followed by a space or a tab and a reason (`https://bad.example.com/x phishing`).
+A URL can have commas and semicolons, so they do not split a line. Options: `dry_run`, `reason`, `added_by`.
 
 ### 6.10 Trusting the self-signed certificate
 
@@ -745,15 +781,16 @@ sudo furnace import-ips /tmp/old-list.csv
 - If the result would be larger than `MAX_IPS`, the import stops and changes nothing.
 - 30,000 lines take about 2 seconds.
 
-### 7.3 Import domains and whitelists
+### 7.3 Import domains, URLs and whitelists
 
 ```bash
 sudo furnace import-domains /tmp/domains.txt [--dry-run]            # domain or domain,reason
+sudo furnace import-urls /tmp/urls.txt [--dry-run]                  # url, or url and a reason after a space
 sudo furnace import-whitelist-ips /tmp/wl-ips.txt [--dry-run]       # IPs and CIDR ranges
 sudo furnace import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
 ```
 
-## 8. Rules for IPs, domains and the whitelist
+## 8. Rules for IPs, domains, URLs and the whitelist
 
 **IPs**
 - Single public IPs only (IPv4 and IPv6).
@@ -775,10 +812,29 @@ sudo furnace import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
 - Refused when on the domain whitelist. The domain whitelist is exact: whitelisting `example.com` does not
   whitelist `www.example.com`.
 
+**URLs**
+- The form of a firewall URL list: `host[:port]` and an optional path and query. `http://` and `https://` are
+  removed (one entry covers both); other schemes (`ftp://`) are refused. Stored in lower case, without `#...`.
+  A host alone gets a `/` at the end.
+- Wildcards: `*` (one or more parts) and `^` (exactly one part), as whole parts only. Parts are separated by
+  `. / ? & = ; +`. `*.bad.example.com/` is fine; `*bad.example.com/` is refused (`wildcard_partial`).
+- Too wide wildcards are refused (`wildcard_too_wide`): the last two parts of the host must be written out
+  (`*.com/`, `example.*/` and `bad.*.com/` are refused), three under a country's public names (`*.co.uk/`,
+  `*.com.az/` are refused, `*.example.co.uk/` is fine).
+- IPv4 hosts are allowed (public only, like the IP list). IPv6 hosts, `user@host` and non-ASCII paths are refused.
+  Send a non-ASCII path percent-encoded. At most 255 characters.
+- No expiry: a URL stays until someone removes it or the whitelist covers it. Every URL gets an archive record.
+- **The whitelist protects by host:** a domain on the domain whitelist protects itself and all its subdomains.
+  With `good.example.com` on the whitelist, `good.example.com/x`, `www.good.example.com/` and `*.good.example.com/`
+  are refused, and also wildcards that cover it, like `*.example.com/`. `example.com/` (the parent) is allowed.
+  A URL with an IP host is checked against the IP whitelist.
+- **Paths need SSL decryption** on the firewall for HTTPS sites. Without it the firewall sees only the host name,
+  so only host entries (`bad.example.com/`, `*.bad.example.com/`) work for HTTPS.
+
 **Whitelist**
 - IPs and CIDR (Classless Inter-Domain Routing) ranges, and exact domains.
 - Ranges shorter than /8 (IPv4) or /16 (IPv6) are refused.
-- Adding an entry removes the blocked IPs or domains it covers, with an audit entry.
+- Adding an entry removes the blocked IPs, domains and URLs it covers, with an audit entry.
 - Look-ups use merged, sorted ranges and binary search. Checking 30,000 IPs against thousands of ranges takes
   milliseconds.
 
@@ -786,8 +842,8 @@ sudo furnace import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
 
 Furnace keeps two lists:
 
-- **The EDL lists** (`blocklist.txt`, `domains.txt`): what is blocked now.
-- **The archive**: a record of every different IP and domain that was ever blocked. One row each, never a
+- **The EDL lists** (`blocklist.txt`, `domains.txt`, `urls.txt`): what is blocked now.
+- **The archive**: a record of every different IP, domain and URL that was ever blocked. One row each, never a
   duplicate, never removed. It is written when an IP or domain is blocked for the first time. The row keeps the
   first details (date, who, reason), the last block date and how many times it was blocked.
   Expiry, unblock and the whitelist remove an entry only from the EDL list, never from the archive.
@@ -876,7 +932,7 @@ shared IP as the leader, and then starts the service again. Afterwards the other
 | `/var/lib/furnace/archive/archive.csv` | The archive record of IPs and domains as CSV. Never served. |
 | `/var/lib/furnace/backups/` | Database backups. |
 | `/var/lib/furnace/reports/` | Import reports. |
-| `/var/lib/furnace-edl/` | `blocklist.txt` and `domains.txt` (served by nginx). |
+| `/var/lib/furnace-edl/` | `blocklist.txt`, `domains.txt` and `urls.txt` (served by nginx). |
 | `/var/lib/furnace-incoming/` | Snapshots received from the other server. |
 | `/run/furnace-state/role` | `leader` or `follower` (written by keepalived). |
 | `/var/log/furnace-setup.log` | Setup log. No secrets. |
@@ -902,7 +958,9 @@ if its settings changed, so an upgrade does not move the shared IP. If you chang
 **From 0.7 to 0.8:** nothing to do. Replication now goes over HTTPS. Setup makes the replication secret from
 the certificate key both servers already share, so no new bundle is needed. While one server is upgraded and the
 other is not yet, the leader uses SSH as before; when both run 0.8 it uses HTTPS. Port 443 between the servers is
-already open (the health check uses it). New: blocklist files through the API (section 6.9).
+already open (the health check uses it). New: blocklist files through the API (section 6.9), and the URL
+blocklist (section 6.7.1): the upgrade adds `/edl/urls.txt` (empty until you add URLs) and `FURNACE_MAX_URLS`
+(the same limit as the other lists).
 **Change your callers first:** the field `incident_id` is gone. A request that still sends it gets `400`, so remove
 it from your SOAR playbooks and scripts before the upgrade. The upgrade deletes every stored incident number (old
 backups still have them). The exports and the archive CSV no longer have the `incident_id` column.
@@ -1063,7 +1121,7 @@ Be aware of these limits before you go live:
 ## 15. Examples: Palo Alto and Cortex XSOAR
 
 These are the tested products. Menu names can differ between versions. Other products need the same things:
-trust the certificate, the two list URLs with the list login, and the API token.
+trust the certificate, the list URLs with the list login, and the API token.
 
 ### 15.1 Palo Alto firewall (list reader)
 
@@ -1091,11 +1149,18 @@ Palo Alto calls the lists EDLs (External Dynamic Lists).
    - Type: **Domain List**
    - Source: `https://SHARED_IP/edl/domains.txt`
    - Same certificate profile, list login and update interval.
-3. Use the IP list in security policy rules (deny, source and/or destination).
-   Use the domain list in an Anti-Spyware profile (DNS policies) or as your design requires.
-4. Commit. Check that the firewall downloaded the lists (in the EDL object, "Test Source URL", or on the CLI:
+3. If you block URLs, add a third EDL:
+   - Type: **URL List**
+   - Source: `https://SHARED_IP/edl/urls.txt`
+   - Same certificate profile, list login and update interval.
+4. Use the IP list in security policy rules (deny, source and/or destination).
+   Use the domain list in an Anti-Spyware profile (DNS policies): it blocks the DNS lookup.
+   Use the URL list as a custom URL category: in a security rule (URL Category, action deny) or in a URL Filtering
+   profile (action block). It blocks the web traffic itself (HTTP, and HTTPS by the server name).
+   Deny the `quic` application, so browsers use HTTPS the firewall can read. Paths only work with SSL decryption.
+5. Commit. Check that the firewall downloaded the lists (in the EDL object, "Test Source URL", or on the CLI:
    `request system external-list show type ip name Furnace-IP-Blocklist`).
-5. Check your firewall model's EDL limit and set `MAX_IPS` to it.
+6. Check your firewall model's EDL limit and set `MAX_IPS` to it.
 
 The firewall downloads EDLs from its management interface by default. With a **service route** for External
 Dynamic Lists, it uses that interface. That matters only if you limit `LISTS_ALLOW_FROM`.

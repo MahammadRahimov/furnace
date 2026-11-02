@@ -1,5 +1,5 @@
 # Furnace - written by "furnace setup". Running setup again writes this file again.
-# Serves only the two EDL files (login: user and password), the API (token) and /health.
+# Serves only the three EDL files (login: user and password), the API (token) and /health.
 # The database, the archive CSV, the EDL users file and everything else are never served.
 
 limit_req_zone $binary_remote_addr zone=furnace_api:10m rate=10r/s;
@@ -42,6 +42,18 @@ server {
         default_type text/plain;
         add_header Cache-Control "no-store" always;
         alias /var/lib/furnace-edl/domains.txt;
+    }
+
+    location = /edl/urls.txt {
+{{LISTS_ALLOW}}
+        allow 127.0.0.1;
+        deny all;
+        auth_basic $furnace_edl_login;
+        auth_basic_user_file /var/lib/furnace-auth/edl-users;
+        limit_req zone=furnace_edl burst=10 nodelay;
+        default_type text/plain;
+        add_header Cache-Control "no-store" always;
+        alias /var/lib/furnace-edl/urls.txt;
     }
 
     location /api/ {

@@ -236,7 +236,7 @@ def make_0_6_database(path):
 def check_upgraded(s):
     conn = db.connect(s.db_path)
     try:
-        assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "5"
+        assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(db.SCHEMA_VERSION)
         for table in db.INCIDENT_TABLES:  # 0.8: every stored incident_id is deleted
             assert conn.execute(f"SELECT COUNT(*) FROM {table} WHERE incident_id <> ''").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM archived_ips").fetchone()[0] == 0

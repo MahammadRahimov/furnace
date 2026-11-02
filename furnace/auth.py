@@ -9,7 +9,7 @@ for example "soar" or "ui"), permissions and an expiry. There are four
 permissions, a grid of two lists and two actions:
 
                  read   write
-    blocklist     x      x       look up / block and unblock IPs and domains
+    blocklist     x      x       look up / block and unblock IPs, domains and URLs
     whitelist     x      x       list and look up / add and remove entries
 
 Write always includes read. Each token has its own expiry in days (0 = never),

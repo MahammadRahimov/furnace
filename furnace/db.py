@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6  # 6: the URL blocklist (new tables only)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -78,6 +78,26 @@ CREATE TABLE IF NOT EXISTS blocked_domains (
     added_by    TEXT NOT NULL DEFAULT '',
     reason      TEXT NOT NULL DEFAULT '',
     incident_id TEXT NOT NULL DEFAULT ''
+);
+
+-- URL blocklist (version 0.8). url is the published form (no http://, lower case).
+-- host is its host part (a name, maybe with * or ^, or an IPv4), for the whitelist checks.
+-- URLs never expire (user decision 2026-11-02): only an unblock or the whitelist removes them.
+CREATE TABLE IF NOT EXISTS blocked_urls (
+    url      TEXT PRIMARY KEY,
+    host     TEXT NOT NULL,
+    added_at TEXT NOT NULL,
+    added_by TEXT NOT NULL DEFAULT '',
+    reason   TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS url_records (
+    url              TEXT PRIMARY KEY,
+    first_blocked_at TEXT NOT NULL,
+    last_blocked_at  TEXT NOT NULL,
+    times_blocked    INTEGER NOT NULL DEFAULT 1,
+    added_by         TEXT NOT NULL DEFAULT '',
+    reason           TEXT NOT NULL DEFAULT ''
 );
 
 -- start_hex / end_hex: the range as fixed-width hex, so text order = number order.

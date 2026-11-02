@@ -99,7 +99,9 @@ def send_snapshot(settings: Settings, peer_ip: str, cafile: Path, secret_file: P
         reason = getattr(exc, "reason", exc)
         raise ReplicaError(f"cannot reach the other server at {peer_ip}: {reason}") from None
     applied = answer.get("applied", {})
-    return f"sent ({len(body)} bytes, {applied.get('ips', '?')} IPs, {applied.get('domains', '?')} domains)"
+    urls = f", {applied['urls']} URLs" if "urls" in applied else ""  # an older follower does not count URLs
+    return (f"sent ({len(body)} bytes, {applied.get('ips', '?')} IPs, "
+            f"{applied.get('domains', '?')} domains{urls})")
 
 
 def receive_snapshot(settings: Settings, stream: BinaryIO, limit: int = MAX_SNAPSHOT_BYTES) -> dict[str, int]:

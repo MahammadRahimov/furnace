@@ -46,6 +46,20 @@ How a release happens (user decision 2026-11-01):
 8. **Fix: setup no longer leaves its test IP on the list.** When setup ran on the follower while that follower held
    the shared IP (after a failover, for example during an upgrade), its "follower refuses changes" test added
    `192.0.2.123` to the real list and never removed it. Setup now checks the role first and skips that test.
-9. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
+9. **A URL blocklist.** A third list next to IPs and domains, for a firewall's URL list (on Palo Alto: an EDL of
+   type URL List, used as a custom URL category; it blocks the web traffic itself, not only the DNS lookup).
+   - API: `POST /api/v1/urls`, `GET` and `DELETE /api/v1/urls?url=...`, and `POST /api/v1/urls/bulk` for a file
+     (`furnace import-urls` on the server). The blocklist permission, as for IPs and domains.
+   - The list for the firewall: `https://SHARED_IP/edl/urls.txt` (same login). The upgrade adds it, empty.
+   - Furnace cleans every URL into the firewall's form: `http://` and `https://` removed, lower case, no `#...`,
+     a host alone ends with `/`. The answer shows the stored form.
+   - URLs never expire. Wildcards are allowed as whole parts (`*.bad.example.com/`, `^.bad.example.com/`); too
+     wide ones are refused (`*.com/`, `example.*/`, `*.co.uk/`).
+   - The whitelist protects by host: a domain on the domain whitelist protects itself and all its subdomains,
+     also against wildcards that cover it. A URL with an IP host is checked against the IP whitelist. Adding a
+     whitelist entry removes the URLs it protects.
+   - The limit `MAX_URLS` (setup uses the same number as the other lists). Archive record, export, stats,
+     replication and the health check include URLs. Schema 6 (new tables only).
+10. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
 
 Not in this release: the Docker image. It is kept on the branch `docker` (user decision 2026-11-01).

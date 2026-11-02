@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from dataclasses import dataclass
 from typing import Union
 
 IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]  # not "|": Python 3.9 is supported
@@ -45,6 +46,15 @@ REASON_TEXT = {
     "field_too_long": "A field is too long.",
     "invalid_permanent": "The field permanent must be true or false.",
     "not_leader": "This server is the standby. Send changes to the shared IP.",
+    "invalid_url": "This is not a valid URL. Send a host name with an optional path, for example bad.example.com/login.",
+    "scheme_not_allowed": "Only http:// and https:// addresses can be blocked.",
+    "login_not_allowed": "A URL with a user name or password (user@host) cannot be blocked.",
+    "url_too_long": "The URL is longer than 255 characters (the firewall's limit).",
+    "wildcard_partial": "A wildcard (* or ^) must be a whole part between dots or slashes: *.example.com, "
+                        "not *example.com.",
+    "wildcard_too_wide": "This wildcard is too wide: the name before the end must be written out, "
+                         "for example *.example.com/, not *.com/ or example.*/.",
+    "ipv6_url_not_allowed": "URLs with an IPv6 address are not supported. Block the IP in the IP list.",
 }
 
 
@@ -137,6 +147,148 @@ def normalize_domain(value: object) -> str:
     if labels[-1].isdigit():
         raise Rejected("invalid_domain")
     return text
+
+
+# ---------------------------------------------------------------------- URLs
+#
+# A URL entry is what the firewall's URL list takes: host[:port] and an optional path, with no
+# http:// or https:// (one entry covers both). A wildcard is a whole part (token): * = one or
+# more parts, ^ = exactly one part. Parts are separated by . / ? & = ; +
+# Stored form: lower case, no scheme, no #fragment, and a host alone ends with /, so
+# "bad.example.com" never also matches "bad.example.com.evil.test".
+
+URL_MAX = 255
+WILDCARDS = ("*", "^")
+_SCHEME = re.compile(r"^([a-z][a-z0-9+.-]*)://")
+_TOKEN_SPLIT = re.compile(r"[./?&=;+]")
+_PORT = re.compile(r"^[0-9]{1,5}$")
+# Second-level names under a country code that are public, like co.uk or com.az. With a wildcard,
+# *.co.uk/ would block every company in that country, so one more part must be written out.
+_PUBLIC_SECOND_LEVEL = {"co", "com", "net", "org", "gov", "edu", "ac", "gob", "or", "ne", "go", "mil", "nic"}
+
+
+@dataclass(frozen=True)
+class URLEntry:
+    url: str    # the stored and published form, for example *.bad.example.com/login
+    host: str   # the host part without the port: a name (may have wildcards) or an IPv4 address
+
+    @property
+    def is_ip(self) -> bool:
+        try:
+            ipaddress.ip_address(self.host)
+            return True
+        except ValueError:
+            return False
+
+
+def _check_tokens(text: str) -> None:
+    for token in _TOKEN_SPLIT.split(text):
+        if any(w in token for w in WILDCARDS) and token not in WILDCARDS:
+            raise Rejected("wildcard_partial")
+
+
+def normalize_url(value: object, allow_test_ranges: bool = False) -> URLEntry:
+    """Accept one URL for the URL list. http:// and https:// are removed (user decision 2026-11-02)."""
+    if not isinstance(value, str) or not value.strip():
+        raise Rejected("missing_value")
+    text = value.strip()
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise Rejected("invalid_url")
+    text = text.lower()
+    scheme = _SCHEME.match(text)
+    if scheme:
+        if scheme.group(1) not in ("http", "https"):
+            raise Rejected("scheme_not_allowed")
+        text = text[scheme.end():]
+    text = text.split("#", 1)[0]
+    cut = min((i for i in (text.find("/"), text.find("?")) if i >= 0), default=len(text))
+    authority, rest = text[:cut], text[cut:]
+    if rest.startswith("?"):
+        rest = "/" + rest
+    if "@" in authority:
+        raise Rejected("login_not_allowed")
+    if authority.startswith("["):
+        raise Rejected("ipv6_url_not_allowed")
+    host, _, port = authority.partition(":")
+    if port and (not _PORT.match(port) or not 0 < int(port) < 65536):
+        raise Rejected("invalid_url")
+    if host.endswith("."):
+        host = host[:-1]
+    if not host:
+        raise Rejected("invalid_url")
+    if ":" in host:
+        raise Rejected("ipv6_url_not_allowed")
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        host = str(validate_ip(host, allow_test_ranges))
+    else:
+        host = _url_host(host)
+    if not rest.isascii():
+        raise Rejected("invalid_url", "The path has letters that are not ASCII. Send it percent-encoded (%C3%A7).")
+    _check_tokens(rest)
+    url = host + (f":{int(port)}" if port else "") + (rest or "/")
+    if len(url) > URL_MAX:
+        raise Rejected("url_too_long")
+    return URLEntry(url, host)
+
+
+def _url_host(host: str) -> str:
+    labels = host.split(".")
+    out = []
+    for label in labels:
+        if label in WILDCARDS:
+            out.append(label)
+            continue
+        if any(w in label for w in WILDCARDS):
+            raise Rejected("wildcard_partial")
+        if not label.isascii():
+            try:
+                label = label.encode("idna").decode("ascii")
+            except UnicodeError:
+                raise Rejected("invalid_url") from None
+        if not _LABEL.match(label):
+            raise Rejected("invalid_url")
+        out.append(label)
+    if len(out) < 2 or out[-1] in WILDCARDS or out[-1].isdigit():
+        raise Rejected("wildcard_too_wide" if out[-1] in WILDCARDS else "invalid_url")
+    if any(label in WILDCARDS for label in out):
+        written = 3 if out[-2] in _PUBLIC_SECOND_LEVEL and len(out[-1]) == 2 else 2
+        if len(out) <= written or any(label in WILDCARDS for label in out[-written:]):
+            raise Rejected("wildcard_too_wide")
+    return ".".join(out)
+
+
+def host_touches_domain(host: str, domain: str) -> bool:
+    """True when a URL host (with wildcards) can match the domain or any of its subdomains.
+
+    This is the whitelist rule for URLs (user decision 2026-11-02): x.example.com on the whitelist
+    protects x.example.com and everything under it, so x.example.com/, www.x.example.com/a and
+    *.x.example.com/ are refused, and a wildcard such as *.example.com/ too (it covers x.example.com).
+    """
+    pattern, target = host.split("."), domain.split(".")
+
+    def match(i: int, j: int) -> bool:  # pattern[:i] against target[:j], from the right
+        if j == 0:
+            return True        # the domain is covered; the rest of the pattern is the subdomain part
+        if i == 0:
+            return False       # the pattern is a parent of the domain: it does not touch it
+        part = pattern[i - 1]
+        if part == "*":
+            return True        # * takes the rest of the domain and more
+        if part == "^" or part == target[j - 1]:
+            return match(i - 1, j - 1)
+        return False
+
+    return match(len(pattern), len(target))
+
+
+def domain_key(name: str) -> str:
+    """The last two parts of a name: a whitelist domain can touch a URL host only if they share them."""
+    return ".".join(name.split(".")[-2:])
 
 
 def validate_whitelist_cidr(value: object) -> IPNetwork:

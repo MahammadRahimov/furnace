@@ -19,8 +19,8 @@ from . import db, edl
 from .config import Settings
 from .locking import FileLock
 from .rangeset import RangeSet
-from .validation import (Rejected, clean_text, ip_sort_key, normalize_domain, range_hex,
-                         to_hex, validate_ip, validate_whitelist_cidr)
+from .validation import (Rejected, URLEntry, clean_text, domain_key, host_touches_domain, ip_sort_key,
+                         normalize_domain, normalize_url, range_hex, to_hex, validate_ip, validate_whitelist_cidr)
 
 log = logging.getLogger("furnace")
 
@@ -41,6 +41,27 @@ class Result:
             out["reason_code"] = self.code
         out.update(self.data)
         return out
+
+
+class URLWhitelist:
+    """The whitelist as the URL list sees it: loaded once, then many URLs are checked fast."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+        self.by_key: dict[str, list[str]] = {}
+        for (domain,) in conn.execute("SELECT domain FROM whitelist_domains"):
+            self.by_key.setdefault(domain_key(domain), []).append(domain)
+        for names in self.by_key.values():
+            names.sort(key=len)
+
+    def protects(self, entry: URLEntry) -> str | None:
+        """The whitelist entry that protects this URL, or None."""
+        if entry.is_ip:
+            return Furnace._ip_whitelisted(self.conn, ipaddress.ip_address(entry.host))
+        for domain in self.by_key.get(domain_key(entry.host), ()):
+            if host_touches_domain(entry.host, domain):
+                return domain
+        return None
 
 
 class Furnace:
@@ -77,7 +98,7 @@ class Furnace:
     def _rebuild(self, conn: sqlite3.Connection, *which: str) -> None:
         """Rebuild files after a commit. A failure here never undoes the change:
         the next change, the nightly job or 'furnace rebuild' writes the file again."""
-        writers = {"ips": edl.write_blocklist, "domains": edl.write_domains,
+        writers = {"ips": edl.write_blocklist, "domains": edl.write_domains, "urls": edl.write_urls,
                    "archive": edl.write_archive_csv}
         for name in which:
             try:
@@ -369,6 +390,151 @@ class Furnace:
                                 "whitelisted": whitelisted})
         return Result("not_found", "This domain was never blocked.", data={"whitelisted": whitelisted})
 
+    # ------------------------------------------------------------------ URLs
+    #
+    # URLs never expire. The whitelist protects them by host (user decision 2026-11-02):
+    # a domain on the domain whitelist protects itself and all its subdomains, and an IP host
+    # is checked against the IP whitelist.
+
+    @staticmethod
+    def record_url(conn: sqlite3.Connection, url: str, stamp: str, actor: str, reason: str) -> bool:
+        if conn.execute("UPDATE url_records SET last_blocked_at = MAX(last_blocked_at, ?),"
+                        " times_blocked = times_blocked + 1 WHERE url = ?", (stamp, url)).rowcount:
+            return True
+        conn.execute("INSERT INTO url_records(url, first_blocked_at, last_blocked_at, added_by, reason)"
+                     " VALUES (?,?,?,?,?)", (url, stamp, stamp, actor, reason))
+        return False
+
+    @staticmethod
+    def url_whitelist(conn: sqlite3.Connection) -> "URLWhitelist":
+        return URLWhitelist(conn)
+
+    def add_url(self, value: object, reason: object = "", added_by: object = "",
+                source: str = "api", now: datetime | None = None) -> Result:
+        raw = self._raw(value)
+        refused = self._not_leader("add", "url", raw)
+        if refused:
+            return refused
+        now = now or db.utcnow()
+        with self.locked() as conn:
+            try:
+                reason_t, actor = self._texts(reason, added_by)
+            except Rejected as error:
+                return self._reject(conn, "add", "url", raw, error, "", source, now)
+            try:
+                entry = normalize_url(value, self.settings.test_ranges_allowed())
+                protected = self.url_whitelist(conn).protects(entry)
+                if protected:
+                    raise Rejected("whitelisted", f"This URL is covered by the whitelist entry {protected}. "
+                                                  "It cannot be blocked.")
+            except Rejected as error:
+                return self._reject(conn, "add", "url", raw, error, actor, source, now)
+            url, stamp = entry.url, db.to_iso(now)
+            with db.transaction(conn):
+                existing = conn.execute("SELECT * FROM blocked_urls WHERE url=?", (url,)).fetchone()
+                if existing:
+                    db.audit(conn, "add", "url", url, "already_exists", "", actor, "", source,
+                             f"Already blocked since {existing['added_at']}.", now)
+                    record = conn.execute("SELECT * FROM url_records WHERE url=?", (url,)).fetchone()
+                    return Result("already_exists",
+                                  f"This URL is already blocked since {existing['added_at']}. Nothing changed.",
+                                  data={"entry": self._url_entry(existing), "record": self._record(record)})
+                if self.settings.max_urls:
+                    count = conn.execute("SELECT COUNT(*) FROM blocked_urls").fetchone()[0]
+                    if count >= self.settings.max_urls:
+                        db.audit(conn, "add", "url", url, "rejected", "limit_reached", actor, "",
+                                 source, f"Limit is {self.settings.max_urls}.", now)
+                        return Result("rejected", Rejected("limit_reached").message, code="limit_reached")
+                conn.execute("INSERT INTO blocked_urls(url, host, added_at, added_by, reason) VALUES (?,?,?,?,?)",
+                             (url, entry.host, stamp, actor, reason_t))
+                before = self.record_url(conn, url, stamp, actor, reason_t)
+                db.audit(conn, "add", "url", url, "restored" if before else "added", "", actor, "",
+                         source, "Blocked before (in the archive)." if before else "", now)
+                record = conn.execute("SELECT * FROM url_records WHERE url=?", (url,)).fetchone()
+                row = conn.execute("SELECT * FROM blocked_urls WHERE url=?", (url,)).fetchone()
+            self._rebuild(conn, "urls")
+            data: dict[str, Any] = {"entry": self._url_entry(row), "record": self._record(record)}
+            if raw.lower() != url:
+                data["given"] = raw
+            if before:
+                data["restored_from_archive"] = True
+                return Result("added", f"This URL was blocked before (it is in the archive). "
+                                       f"It is blocked again as {url}.", data=data)
+            return Result("added", f"The URL is now blocked as {url}.", data=data)
+
+    def remove_url(self, value: object, removed_by: object = "", source: str = "api",
+                   now: datetime | None = None) -> Result:
+        raw = self._raw(value)
+        refused = self._not_leader("remove", "url", raw)
+        if refused:
+            return refused
+        now = now or db.utcnow()
+        with self.locked() as conn:
+            try:
+                actor = clean_text(removed_by, "removed_by", NAME_MAX)
+                url = normalize_url(value, allow_test_ranges=True).url
+            except Rejected as error:
+                return self._reject(conn, "remove", "url", raw, error, "", source, now)
+            with db.transaction(conn):
+                gone = conn.execute("DELETE FROM blocked_urls WHERE url=?", (url,)).rowcount
+                db.audit(conn, "remove", "url", url, "removed" if gone else "not_found", "", actor,
+                         "", source, "", now)
+            if not gone:
+                return Result("not_found", "This URL is not in the blocklist.", data={"url": url})
+            self._rebuild(conn, "urls")
+            return Result("removed", "The URL is no longer blocked.", data={"url": url})
+
+    def get_url(self, value: object) -> Result:
+        try:
+            entry = normalize_url(value, allow_test_ranges=True)
+        except Rejected as error:
+            return Result("rejected", error.message, code=error.code)
+        with self._reader() as conn:
+            protected = self.url_whitelist(conn).protects(entry)
+            row = conn.execute("SELECT * FROM blocked_urls WHERE url=?", (entry.url,)).fetchone()
+            record = self._record(conn.execute("SELECT * FROM url_records WHERE url=?", (entry.url,)).fetchone())
+        if row:
+            return Result("found", "This URL is blocked.",
+                          data={"list": "active", "entry": self._url_entry(row), "record": record,
+                                "whitelisted_by": protected})
+        if record:
+            return Result("found", "This URL is in the archive: it was blocked before. It is not blocked now.",
+                          data={"list": "archive", "entry": {"url": entry.url, **record}, "record": record,
+                                "whitelisted_by": protected})
+        return Result("not_found", "This URL was never blocked.", data={"url": entry.url, "whitelisted_by": protected})
+
+    @staticmethod
+    def _url_entry(row: sqlite3.Row) -> dict[str, Any]:
+        return {k: row[k] for k in ("url", "added_at", "added_by", "reason")}
+
+    def _purge_urls(self, conn: sqlite3.Connection, actor: str, source: str, now: datetime,
+                    domains: Iterable[str] = (), ranges: RangeSet | None = None) -> list[str]:
+        """Remove blocked URLs that new whitelist entries protect. Caller holds the transaction."""
+        hit = self.urls_covered(conn, domains, ranges)
+        for url in hit:
+            conn.execute("DELETE FROM blocked_urls WHERE url=?", (url,))
+            db.audit(conn, "remove", "url", url, "removed_by_whitelist", "", actor, "", source, "Whitelisted.", now)
+        return hit
+
+    @staticmethod
+    def urls_covered(conn: sqlite3.Connection, domains: Iterable[str] = (),
+                     ranges: RangeSet | None = None) -> list[str]:
+        """The blocked URLs that these (new) whitelist domains or IP ranges protect."""
+        by_key: dict[str, list[str]] = {}
+        for d in domains:
+            by_key.setdefault(domain_key(d), []).append(d)
+        if not by_key and not (ranges and len(ranges)):
+            return []
+        hit = []
+        for url, host in conn.execute("SELECT url, host FROM blocked_urls").fetchall():
+            if URLEntry(url, host).is_ip:
+                covered = ranges is not None and host in ranges
+            else:
+                covered = any(host_touches_domain(host, d) for d in by_key.get(domain_key(host), ()))
+            if covered:
+                hit.append(url)
+        return sorted(hit)
+
     # ------------------------------------------------------------------ IP whitelist
 
     def _purge_ips(self, conn: sqlite3.Connection, ranges: RangeSet, actor: str, source: str,
@@ -409,17 +575,22 @@ class Furnace:
                              (cidr, net.version, start, end, db.to_iso(now), actor, reason_t))
                 db.audit(conn, "add", "whitelist_ip", cidr, "added", "", actor, "", source, "", now)
                 removed = self._purge_ips(conn, RangeSet([net]), actor, source, now, cidr)
-            if removed:
-                self._rebuild(conn, "ips")
-            return Result("added", self._wl_message(removed, "IP"),
-                          data={"cidr": cidr, "removed_from_blocklist": removed})
+                urls = self._purge_urls(conn, actor, source, now, ranges=RangeSet([net]))
+            self._rebuild_after_whitelist(conn, "ips", removed, urls)
+            return Result("added", self._wl_message(removed, "IP", urls),
+                          data={"cidr": cidr, "removed_from_blocklist": removed, "urls_removed_from_blocklist": urls})
 
     @staticmethod
-    def _wl_message(removed: list[str], kind: str) -> str:
-        if not removed:
-            return "The entry is on the whitelist now."
-        return (f"The entry is on the whitelist now. {len(removed)} blocked {kind}"
-                f"{'s were' if len(removed) != 1 else ' was'} removed from the blocklist.")
+    def _wl_message(removed: list[str], kind: str, urls: list[str] = ()) -> str:  # type: ignore[assignment]
+        text = "The entry is on the whitelist now."
+        for count, what in ((len(removed), kind), (len(urls), "URL")):
+            if count:
+                text += f" {count} blocked {what}{'s were' if count != 1 else ' was'} removed from the blocklist."
+        return text
+
+    def _rebuild_after_whitelist(self, conn: sqlite3.Connection, kind: str, removed: list[str],
+                                 urls: list[str]) -> None:
+        self._rebuild(conn, *([kind] if removed else []), *(["urls"] if urls else []))
 
     def remove_whitelist_ip(self, value: object, removed_by: object = "", source: str = "api",
                             now: datetime | None = None) -> Result:
@@ -478,6 +649,7 @@ class Furnace:
                 covered = sorted((row[0] for row in conn.execute("SELECT ip FROM blocked_ips")
                                   if row[0] in ranges), key=ip_sort_key)
                 removed = covered
+                urls = self.urls_covered(conn, ranges=ranges)
             else:
                 stamp = db.to_iso(now)
                 with db.transaction(conn):
@@ -491,14 +663,14 @@ class Furnace:
                         db.audit(conn, "add", "whitelist_ip", item["value"], "rejected", item["reason_code"],
                                  actor, "", source, "bulk", now)
                     removed = self._purge_ips(conn, ranges, actor, source, now, "from bulk upload")
-                if removed:
-                    self._rebuild(conn, "ips")
+                    urls = self._purge_urls(conn, actor, source, now, ranges=ranges)
+                self._rebuild_after_whitelist(conn, "ips", removed, urls)
         summary = {"dry_run": dry_run, "received": len(values), "added": len(new),
                    "already_exists": len(nets) - len(new), "rejected": rejected,
-                   "removed_from_blocklist": removed}
+                   "removed_from_blocklist": removed, "urls_removed_from_blocklist": urls}
         verb = "would be" if dry_run else "were"
         return Result("ok", f"{len(new)} entries {verb} added. {len(rejected)} entries {verb} rejected. "
-                            f"{len(removed)} blocked IPs {verb} removed.", data=summary)
+                            f"{len(removed)} blocked IPs and {len(urls)} blocked URLs {verb} removed.", data=summary)
 
     # ------------------------------------------------------------------ domain whitelist
 
@@ -524,10 +696,11 @@ class Furnace:
                              (domain, db.to_iso(now), actor, reason_t))
                 db.audit(conn, "add", "whitelist_domain", domain, "added", "", actor, "", source, "", now)
                 removed = self._purge_domains(conn, {domain}, actor, source, now)
-            if removed:
-                self._rebuild(conn, "domains")
-            return Result("added", self._wl_message(removed, "domain"),
-                          data={"domain": domain, "removed_from_blocklist": removed})
+                urls = self._purge_urls(conn, actor, source, now, domains=[domain])
+            self._rebuild_after_whitelist(conn, "domains", removed, urls)
+            return Result("added", self._wl_message(removed, "domain", urls),
+                          data={"domain": domain, "removed_from_blocklist": removed,
+                                "urls_removed_from_blocklist": urls})
 
     def _purge_domains(self, conn: sqlite3.Connection, domains: set[str], actor: str, source: str,
                        now: datetime) -> list[str]:
@@ -592,6 +765,7 @@ class Furnace:
             if dry_run:
                 removed = sorted(row[0] for row in conn.execute("SELECT domain FROM blocked_domains")
                                  if row[0] in set(new))
+                urls = self.urls_covered(conn, domains=new)
             else:
                 stamp = db.to_iso(now)
                 with db.transaction(conn):
@@ -603,11 +777,12 @@ class Furnace:
                         db.audit(conn, "add", "whitelist_domain", item["value"], "rejected", item["reason_code"],
                                  actor, "", source, "bulk", now)
                     removed = self._purge_domains(conn, set(new), actor, source, now)
-                if removed:
-                    self._rebuild(conn, "domains")
+                    urls = self._purge_urls(conn, actor, source, now, domains=new)
+                self._rebuild_after_whitelist(conn, "domains", removed, urls)
         summary = {"dry_run": dry_run, "received": len(values), "added": len(new),
                    "already_exists": len(domains) - len(new), "rejected": rejected,
-                   "removed_from_blocklist": removed}
+                   "removed_from_blocklist": removed, "urls_removed_from_blocklist": urls}
         verb = "would be" if dry_run else "were"
         return Result("ok", f"{len(new)} entries {verb} added. {len(rejected)} entries {verb} rejected. "
-                            f"{len(removed)} blocked domains {verb} removed.", data=summary)
+                            f"{len(removed)} blocked domains and {len(urls)} blocked URLs {verb} removed.",
+                      data=summary)

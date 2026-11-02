@@ -58,7 +58,16 @@ def write_domains(conn: sqlite3.Connection, settings: Settings) -> int:
     return len(domains)
 
 
-ARCHIVE_COLUMNS = ["type", "value", "first_blocked_at", "last_blocked_at", "times_blocked", "blocked_now",
+def write_urls(conn: sqlite3.Connection, settings: Settings) -> int:
+    try:
+        urls = [row[0] for row in conn.execute("SELECT url FROM blocked_urls ORDER BY url")]
+    except sqlite3.OperationalError:  # a snapshot from a leader older than 0.8 has no URL table
+        urls = []
+    atomic_write(settings.urls_path, _lines(urls))
+    return len(urls)
+
+
+ARCHIVE_COLUMNS =["type", "value", "first_blocked_at", "last_blocked_at", "times_blocked", "blocked_now",
                    "added_by", "reason"]
 _RECORD_FIELDS = "first_blocked_at, last_blocked_at, times_blocked, {now}, added_by, reason"
 
@@ -76,13 +85,16 @@ def write_archive_csv(conn: sqlite3.Connection, settings: Settings) -> int:
     domains = conn.execute("SELECT domain, " + _RECORD_FIELDS.format(
         now="EXISTS(SELECT 1 FROM blocked_domains b WHERE b.domain = r.domain)")
         + " FROM domain_records r ORDER BY domain").fetchall()
-    for kind, rows in (("ip", ips), ("domain", domains)):
+    urls = conn.execute("SELECT url, " + _RECORD_FIELDS.format(
+        now="EXISTS(SELECT 1 FROM blocked_urls b WHERE b.url = r.url)")
+        + " FROM url_records r ORDER BY url").fetchall()
+    for kind, rows in (("ip", ips), ("domain", domains), ("url", urls)):
         for row in rows:
             values = list(row)
             values[4] = "yes" if values[4] else "no"
             writer.writerow([kind] + values)
     atomic_write(settings.archive_csv_path, buffer.getvalue(), mode=0o640)
-    return len(ips) + len(domains)
+    return len(ips) + len(domains) + len(urls)
 
 
 def write_edl_users(conn: sqlite3.Connection, settings: Settings) -> int:
@@ -99,6 +111,7 @@ def rebuild_all(conn: sqlite3.Connection, settings: Settings) -> dict[str, int]:
     return {
         "ips": write_blocklist(conn, settings),
         "domains": write_domains(conn, settings),
+        "urls": write_urls(conn, settings),
         "archived": write_archive_csv(conn, settings),
         "edl_users": write_edl_users(conn, settings),
     }
@@ -107,7 +120,7 @@ def rebuild_all(conn: sqlite3.Connection, settings: Settings) -> dict[str, int]:
 def ensure_files(settings: Settings) -> None:
     """A fresh server must never return an error page: create empty files.
     An empty users file means that nobody may download the EDL yet."""
-    for path in (settings.blocklist_path, settings.domains_path):
+    for path in (settings.blocklist_path, settings.domains_path, settings.urls_path):
         if not path.exists():
             atomic_write(path, "")
     if not settings.edl_users_path.exists():

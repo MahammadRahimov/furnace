@@ -1,7 +1,7 @@
 """The Furnace HTTP API (Flask, JSON).
 
-Every /api/ call needs a token (Authorization: Bearer ...). Blocklist calls need a
-token with the scope block or all, whitelist calls the scope whitelist or all.
+Every /api/ call needs a token (Authorization: Bearer ...). Blocklist calls (IPs, domains
+and URLs) need the blocklist permission, whitelist calls the whitelist permission.
 An IP that sends too many wrong tokens is locked for a while (429).
 Internal errors are logged on the server and never shown to the caller.
 """
@@ -123,16 +123,17 @@ def create_app(settings: Settings | None = None) -> Flask:
             try:
                 ips = conn.execute("SELECT COUNT(*) FROM blocked_ips").fetchone()[0]
                 domains = conn.execute("SELECT COUNT(*) FROM blocked_domains").fetchone()[0]
+                urls = conn.execute("SELECT COUNT(*) FROM blocked_urls").fetchone()[0]
             finally:
                 conn.close()
-            if not (settings.blocklist_path.is_file() and settings.domains_path.is_file()):
+            if not all(p.is_file() for p in (settings.blocklist_path, settings.domains_path, settings.urls_path)):
                 raise RuntimeError("EDL files are missing")
         except Exception:
             log.exception("Health check failed.")
             return _error("error", "The service is not healthy.", 503)
         return jsonify({"status": "ok", "version": __version__,
                         "role": "leader" if settings.is_leader() else "follower",
-                        "ips": ips, "domains": domains})
+                        "ips": ips, "domains": domains, "urls": urls})
 
     # -------------------------------------------------------------- replication
 
@@ -192,6 +193,34 @@ def create_app(settings: Settings | None = None) -> Flask:
     @require("blocklist", "write")
     def remove_domain(domain: str):
         return _reply(furnace.remove_domain(domain, actor(), source=g.source))
+
+    # -------------------------------------------------------------- URLs
+    # A URL has slashes, so it goes in the query string (?url=...) or the JSON body, not in the path.
+
+    def url_param() -> Any:
+        if "url" in request.args:
+            return request.args.get("url")
+        data = request.get_json(silent=True) if request.data else None
+        if isinstance(data, dict) and "url" in data:
+            return data["url"]
+        raise _BadRequest("Give the URL as ?url=... (URL-encoded) or in the JSON body as \"url\".")
+
+    @app.post("/api/v1/urls")
+    @require("blocklist", "write")
+    def add_url():
+        d = body()
+        no_incident(d)
+        return _reply(furnace.add_url(d.get("url"), d.get("reason"), d.get("added_by"), source=g.source))
+
+    @app.get("/api/v1/urls")
+    @require("blocklist", "read")
+    def get_url():
+        return _reply(furnace.get_url(url_param()))
+
+    @app.delete("/api/v1/urls")
+    @require("blocklist", "write")
+    def remove_url():
+        return _reply(furnace.remove_url(url_param(), actor(), source=g.source))
 
     # -------------------------------------------------------------- whitelist
 
@@ -277,6 +306,8 @@ def create_app(settings: Settings | None = None) -> Flask:
                 report = importer.import_ips(settings, source, dry_run=dry_run, date_format=date_format,
                                              old_ips=old_ips, added_by=added_by, reason=reason,
                                              permanent=flag("permanent", options.get("permanent", False)))
+            elif kind == "urls":
+                report = importer.import_urls(settings, source, dry_run=dry_run, added_by=added_by, reason=reason)
             else:
                 report = importer.import_domains(settings, source, dry_run=dry_run, added_by=added_by,
                                                  reason=reason)
@@ -308,6 +339,11 @@ def create_app(settings: Settings | None = None) -> Flask:
     @require("blocklist", "write")
     def bulk_domains():
         return bulk_file("domains")
+
+    @app.post("/api/v1/urls/bulk")
+    @require("blocklist", "write")
+    def bulk_urls():
+        return bulk_file("urls")
 
     @app.post("/api/v1/whitelist/ips")
     @require("whitelist", "write")

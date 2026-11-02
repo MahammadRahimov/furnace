@@ -65,7 +65,7 @@ def test_rebuild_writes_sorted_files_and_no_temp_files(settings, conn):
         conn.execute("INSERT INTO blocked_domains(domain, added_at) VALUES ('b.example.com','t')")
         conn.execute("INSERT INTO blocked_domains(domain, added_at) VALUES ('a.example.com','t')")
     counts = edl.rebuild_all(conn, settings)
-    assert counts == {"ips": 3, "domains": 2, "archived": 0, "edl_users": 0}
+    assert counts == {"ips": 3, "domains": 2, "urls": 0, "archived": 0, "edl_users": 0}
     assert settings.blocklist_path.read_text() == "198.51.100.30\n198.51.100.200\n203.0.113.9\n"
     assert settings.domains_path.read_text() == "a.example.com\nb.example.com\n"
     assert settings.archive_csv_path.read_text().startswith("type,value,first_blocked_at,last_blocked_at,times_blocked,blocked_now")

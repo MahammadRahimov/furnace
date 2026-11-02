@@ -20,7 +20,7 @@ from typing import Iterable
 from . import __version__, auth, backup, db, edl
 from .cleanup import run_cleanup
 from .config import ConfigError, Settings, read_env_file
-from .importer import ImportError_, import_domains, import_ips, import_whitelist
+from .importer import ImportError_, import_domains, import_ips, import_urls, import_whitelist
 from .locking import LockTimeout
 from .replica import ReplicaError, apply_snapshot, send_snapshot
 from .service import Furnace
@@ -33,8 +33,12 @@ EXPORTS = {
                 " AS blocked_now, added_by, reason FROM ip_records r UNION ALL"
                 " SELECT 'domain', domain, first_blocked_at, last_blocked_at, times_blocked,"
                 " CASE WHEN EXISTS(SELECT 1 FROM blocked_domains b WHERE b.domain = r.domain) THEN 'yes' ELSE 'no'"
-                " END, added_by, reason FROM domain_records r", "type, value"),
+                " END, added_by, reason FROM domain_records r UNION ALL"
+                " SELECT 'url', url, first_blocked_at, last_blocked_at, times_blocked,"
+                " CASE WHEN EXISTS(SELECT 1 FROM blocked_urls b WHERE b.url = r.url) THEN 'yes' ELSE 'no'"
+                " END, added_by, reason FROM url_records r", "type, value"),
     "domains": ("SELECT domain, added_at, added_by, reason FROM blocked_domains", "domain"),
+    "urls": ("SELECT url, added_at, added_by, reason FROM blocked_urls", "url"),
     "whitelist-ips": ("SELECT cidr, added_at, added_by, reason FROM whitelist_ips", "cidr"),
     "whitelist-domains": ("SELECT domain, added_at, added_by, reason FROM whitelist_domains", "domain"),
     "audit": ("SELECT id, ts, action, object_type, value, result, reason_code, actor, source,"
@@ -65,6 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("import-domains", help="Import domains from a file (domain / domain,reason).")
     common_import(sp)
+    sp = sub.add_parser("import-urls", help="Import URLs from a file (url / url reason). http:// and https:// "
+                                            "are removed. URLs never expire.")
+    common_import(sp)
     sp = sub.add_parser("import-whitelist-ips", help="Import whitelist IPs and ranges from a file.")
     common_import(sp)
     sp = sub.add_parser("import-whitelist-domains", help="Import whitelist domains from a file.")
@@ -78,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--keep", type=int, help="How many copies to keep (default FURNACE_BACKUP_KEEP).")
 
     sub.add_parser("stats", help="Show counts, dates and file sizes.")
-    sub.add_parser("rebuild", help="Rebuild blocklist.txt, domains.txt and the archive CSV from the database.")
+    sub.add_parser("rebuild", help="Rebuild blocklist.txt, domains.txt, urls.txt and the archive CSV from the database.")
 
     sp = sub.add_parser("cleanup", help="Remove temporary IPs older than ARCHIVE_AFTER_DAYS from the list "
                                         "(they stay in the archive).")
@@ -356,6 +363,8 @@ def cmd_import(settings: Settings, args: argparse.Namespace) -> int:
                             args.added_by, args.reason, args.report, permanent=args.permanent)
     elif args.command == "import-domains":
         report = import_domains(settings, args.file, args.dry_run, args.added_by, args.reason, args.report)
+    elif args.command == "import-urls":
+        report = import_urls(settings, args.file, args.dry_run, args.added_by, args.reason, args.report)
     else:
         kind = "ips" if args.command == "import-whitelist-ips" else "domains"
         report = import_whitelist(settings, args.file, kind, args.dry_run, args.added_by, args.reason, args.report)
@@ -399,12 +408,15 @@ def cmd_stats(settings: Settings) -> int:
             "active_ips": q("SELECT COUNT(*) FROM blocked_ips"),
             "permanent_ips": permanent,
             "domains": q("SELECT COUNT(*) FROM blocked_domains"),
+            "urls": q("SELECT COUNT(*) FROM blocked_urls"),
             "archive_ips": q("SELECT COUNT(*) FROM ip_records"),
             "archive_domains": q("SELECT COUNT(*) FROM domain_records"),
+            "archive_urls": q("SELECT COUNT(*) FROM url_records"),
             "whitelist_ips": q("SELECT COUNT(*) FROM whitelist_ips"),
             "whitelist_domains": q("SELECT COUNT(*) FROM whitelist_domains"),
             "ip_limit": settings.max_ips or "none",
             "domain_limit": settings.max_domains or "none",
+            "url_limit": settings.max_urls or "none",
             "archive_after_days": settings.archive_after_days,
             "oldest_active_ip": q("SELECT MIN(added_at) FROM blocked_ips"),
             "newest_active_ip": q("SELECT MAX(added_at) FROM blocked_ips"),
@@ -418,6 +430,7 @@ def cmd_stats(settings: Settings) -> int:
             "locked_ips": len(auth.list_lockouts(settings)),
             "blocklist_txt_bytes": settings.blocklist_path.stat().st_size if settings.blocklist_path.exists() else None,
             "domains_txt_bytes": settings.domains_path.stat().st_size if settings.domains_path.exists() else None,
+            "urls_txt_bytes": settings.urls_path.stat().st_size if settings.urls_path.exists() else None,
             "backups": len(list(settings.backup_dir.glob("furnace-*.db"))) if settings.backup_dir.exists() else 0,
         }
         warnings = token_warnings(conn) + permanent_warnings(settings, permanent)
@@ -436,7 +449,8 @@ def cmd_check_config(settings: Settings) -> int:
         "data_dir": str(settings.data_dir), "edl_dir": str(settings.edl_dir),
         "archive_dir": str(settings.archive_dir), "backup_dir": str(settings.backup_dir),
         "archive_after_days": settings.archive_after_days, "allow_test_ranges": settings.allow_test_ranges,
-        "max_ips": settings.max_ips, "max_domains": settings.max_domains, "backup_keep": settings.backup_keep,
+        "max_ips": settings.max_ips, "max_domains": settings.max_domains, "max_urls": settings.max_urls,
+        "backup_keep": settings.backup_keep,
         "cleanup_max_percent": settings.cleanup_max_percent, "cleanup_min_size": settings.cleanup_min_size,
         "role_file": str(settings.role_file) if settings.role_file else None,
         "auth_dir": str(settings.auth_dir),
@@ -457,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
         furnace = Furnace(settings)
         if args.command == "rebuild":
             furnace.startup()
-            print("Rebuilt blocklist.txt, domains.txt and the archive CSV from the database.")
+            print("Rebuilt blocklist.txt, domains.txt, urls.txt and the archive CSV from the database.")
             return 0
         settings.ensure_dirs()
         db.init_db(settings.db_path)
@@ -501,7 +515,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "apply-replica":
             counts = apply_snapshot(settings, args.file)
-            print(f"Snapshot applied. {counts['ips']} IPs, {counts['domains']} domains.")
+            print(f"Snapshot applied. {counts['ips']} IPs, {counts['domains']} domains, {counts['urls']} URLs.")
             return 0
     except (ConfigError, ImportError_, ReplicaError, auth.AuthError) as error:
         print(f"Error: {error}", file=sys.stderr)

@@ -16,7 +16,7 @@ from . import backup, db, edl
 from .config import Settings
 from .locking import FileLock
 from .service import Furnace
-from .validation import Rejected, clean_text, normalize_domain, validate_ip
+from .validation import Rejected, clean_text, normalize_domain, normalize_url, validate_ip
 
 COMMENT_PREFIXES = ("#", ";", "//")
 _AMBIGUOUS = re.compile(r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})(?:[ T](\d{1,2}:\d{2}(?::\d{2})?))?$")
@@ -62,7 +62,7 @@ class ImportReport:
             if self.permanent:
                 parts.append("All added IPs are permanent.")
             parts.append(f"Added only to the archive (too old to block): {self.added_archive}.")
-        if self.kind in ("ips", "domains"):
+        if self.kind in ("ips", "domains", "urls"):
             parts.append(f"Blocked again (already in the archive): {self.restored}.")
         parts.append(f"Skipped: {len(self.skipped)}.")
         if self.backup_file:
@@ -421,6 +421,86 @@ def import_domains(settings: Settings, source: Path, dry_run: bool = False, adde
     return report
 
 
+# ---------------------------------------------------------------------- URL import
+
+URL_HEADERS = ("url", "urls", "link", "address", "entry")
+
+
+def url_fields(line: str) -> tuple[str, str]:
+    """A URL line: the URL, then an optional reason after a tab or a space.
+    A URL has no spaces, but it may have commas and semicolons, so those do not split."""
+    if "\t" in line:
+        url, _, reason = line.partition("\t")
+    else:
+        url, _, reason = line.partition(" ")
+    return _unquote(url), _unquote(reason)
+
+
+def import_urls(settings: Settings, source: Path, dry_run: bool = False, added_by: str = "import",
+                reason: str = "imported", report_path: Path | None = None,
+                now: datetime | None = None) -> ImportReport:
+    """URLs never expire. http:// and https:// are removed; the whitelist protects by host."""
+    _require_leader(settings)
+    now = now or db.utcnow()
+    report = ImportReport("urls", dry_run)
+    added_by = clean_text(added_by, "added_by", 100)
+    default_reason = clean_text(reason, "reason", 500)
+    with FileLock(settings.lock_path, settings.lock_timeout):
+        conn = db.connect(settings.db_path)
+        try:
+            whitelist = Furnace.url_whitelist(conn)
+            active = {row[0] for row in conn.execute("SELECT url FROM blocked_urls")}
+            recorded = {row[0] for row in conn.execute("SELECT url FROM url_records")}
+            rows: list[tuple] = []
+            seen: set[str] = set()
+            first_data = True
+            stamp = db.to_iso(now)
+            for number, text in data_lines(source):
+                report.total_lines += 1
+                value, line_reason = url_fields(text)
+                is_first, first_data = first_data, False
+                try:
+                    entry = normalize_url(value, settings.test_ranges_allowed())
+                    line_reason = clean_text(line_reason, "reason", 500) if line_reason else default_reason
+                except Rejected as error:
+                    header = is_first and value.lower() in URL_HEADERS
+                    report.skipped.append(Skipped(number, text, "header" if header else error.code))
+                    continue
+                if whitelist.protects(entry):
+                    report.skipped.append(Skipped(number, text, "whitelisted"))
+                elif entry.url in seen:
+                    report.skipped.append(Skipped(number, text, "duplicate_in_file"))
+                elif entry.url in active:
+                    report.skipped.append(Skipped(number, text, "already_active"))
+                else:
+                    seen.add(entry.url)
+                    rows.append((entry.url, entry.host, stamp, added_by, line_reason))
+            report.added_active = len(rows)
+            report.restored = sum(1 for r in rows if r[0] in recorded)
+            final_count = len(active) + len(rows)
+            if settings.max_urls and final_count > settings.max_urls:
+                raise ImportError_(f"The import would make the list {final_count} URLs long. "
+                                   f"The limit is {settings.max_urls}. Nothing was changed.")
+            if not dry_run:
+                _backup_first(settings, report)
+                with db.transaction(conn):
+                    conn.executemany("INSERT INTO blocked_urls(url, host, added_at, added_by, reason)"
+                                     " VALUES (?,?,?,?,?)", rows)
+                    for r in rows:
+                        Furnace.record_url(conn, r[0], r[2], r[3], r[4])
+                    conn.executemany("INSERT INTO audit_log(ts, action, object_type, value, result, actor, source)"
+                                     " VALUES (?,?,?,?,?,?,?)",
+                                     [(stamp, "import", "url", r[0], "added", added_by, "import") for r in rows])
+                    db.audit(conn, "import", "url", source.name, "done", "", added_by, "", "import",
+                             f"added={len(rows)} skipped={len(report.skipped)}", now)
+                edl.write_urls(conn, settings)
+                edl.write_archive_csv(conn, settings)
+        finally:
+            conn.close()
+    _write_report(report, source, report_path, now, settings)
+    return report
+
+
 # ---------------------------------------------------------------------- whitelist import
 
 def import_whitelist(settings: Settings, source: Path, kind: str, dry_run: bool = False,
@@ -458,7 +538,7 @@ def import_whitelist(settings: Settings, source: Path, kind: str, dry_run: bool 
     already = result.data["already_exists"]
     if already:
         report.skipped.append(Skipped(0, f"{already} entries", "already_on_whitelist_or_duplicate"))
-    removed = result.data["removed_from_blocklist"]
+    removed = result.data["removed_from_blocklist"] + result.data["urls_removed_from_blocklist"]
     for value in removed:
         report.skipped.append(Skipped(0, value, "removed_from_blocklist" if not dry_run
                                       else "would_be_removed_from_blocklist"))

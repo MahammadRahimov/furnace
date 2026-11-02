@@ -1,6 +1,6 @@
 # Furnace roadmap
 
-State on 2026-11-01: **v0.7.0 is released** (`.deb` and `.rpm`). v0.8.0 (bulk blocklist upload, HTTPS replication) is coded, not released; the list is in `docs/NEXT-RELEASE.md`. Docker step 1 is coded and parked on the branch `docker` (not in v0.8.0). This file holds the plan for the next steps,
+State on 2026-11-02: **v0.7.0 is released** (`.deb` and `.rpm`). v0.8.0 (bulk blocklist upload, HTTPS replication, the URL blocklist) is coded, not released; the list is in `docs/NEXT-RELEASE.md`. Docker step 1 is coded and parked on the branch `docker` (not in v0.8.0). This file holds the plan for the next steps,
 so the work can continue later exactly where it stopped.
 
 ## Decisions so far
@@ -23,6 +23,7 @@ so the work can continue later exactly where it stopped.
 | 2026-11-01 | **Bulk upload of blocked IPs and domains through the API** (changes the 2026-10-28 "no bulk block endpoint" decision). `POST /api/v1/ips/bulk` and `/api/v1/domains/bulk`, blocklist write, the same rules as `furnace import-ips` (dates, whitelist, archive, backup, all or nothing, `MAX_IPS`), `dry_run` and `permanent`. Still one token per program. |
 | 2026-11-01 | **The servers replicate over HTTPS too, in v0.8.0** (option a). The leader sends the snapshot to `https://PEER_IP/replica/snapshot`; the secret is derived from the TLS key both servers already share, so an upgrade needs no new bundle. For one version the leader falls back to SSH when HTTPS does not work (an old follower during the upgrade). The version after v0.8.0 removes SSH replication. |
 | 2026-11-01 | **No Docker image in v0.8.0.** The Docker work moves to the branch `docker` (kept, parked); `main` and the release have no Docker files or Docker docs. The shared parts (HTTPS replication, the notify script without systemd) stay. |
+| 2026-11-02 | **A URL blocklist (option B), in v0.8.0.** Its own list type: API, bulk file, `/edl/urls.txt`, archive record, replication; the blocklist permission (like domains). URLs **never expire**. `http://`/`https://` are removed so the firewall always gets a working line. **Wildcards** (`*`, `^`, whole parts) are allowed, too wide ones are refused (`*.com/`, `*.co.uk/`). **The whitelist protects by host:** the existing domain whitelist (no separate URL whitelist), and a whitelisted domain also protects its subdomains (`x.com` on the whitelist: no `x.com/...`, `www.x.com/...` or `*.x.com/`). URL hosts that are IPs use the IP whitelist. |
 | 2026-11-01 | **`incident_id` is removed** (it can mean different things to different callers). A request that still sends it is refused (`400`). The upgrade deletes the stored values (schema 5); the columns stay empty so older followers and backups still fit. |
 
 ## Done
