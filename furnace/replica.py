@@ -1,6 +1,6 @@
 """Apply a snapshot from the leader on the follower.
 
-The leader pushes a full database snapshot every minute. The follower
+The leader pushes a full database snapshot every 20 seconds. The follower
 checks it, copies it into its own database with the SQLite backup
 function (one step, safe with WAL), and rebuilds its EDL files.
 A leader never applies a snapshot, so a late push cannot overwrite it.

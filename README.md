@@ -662,7 +662,7 @@ sudo furnace check-config                # show the settings (no secrets)
 
 API tokens and list logins are in the database. Furnace keeps only a hash (SHA-256 for tokens, SHA-512 crypt for
 passwords). A new token or password is shown **once**. Lost one? Make a new one with `rotate`.
-Changes run on the leader. The follower gets them with the next replication (within a minute).
+Changes run on the leader. The follower gets them with the next replication (within 20 seconds).
 Every change is in the audit log, with the admin's name, never with the secret.
 
 ```bash
@@ -822,7 +822,7 @@ The nightly cleanup:
   standby, so the IP is never left on both servers.
 - When a server takes the shared IP, the notify script marks it as leader and starts the cleanup timer.
   When it loses the IP, it marks it as follower and stops the timer.
-- **Replication:** every minute the leader makes a SQLite backup snapshot and sends it over HTTPS to
+- **Replication:** every 20 seconds the leader makes a SQLite backup snapshot and sends it over HTTPS to
   `https://PEER_IP/replica/snapshot`, with the replication secret both servers share. nginx lets only the other
   server reach this address. The follower checks the secret, loads the snapshot, rebuilds its EDL files and
   answers at once, so the leader knows that it worked. `sudo furnace status` on the leader shows the last result.
@@ -837,12 +837,12 @@ The nightly cleanup:
   Each one accepts changes, and neither takes snapshots from the other. When the link comes back, one keeps the IP.
   Changes made on the other server during the split are overwritten by the next snapshot. Check the audit log of
   both servers after a network problem. Keep VRRP and SSH between the servers on a reliable path.
-- **Up to one minute of lost changes.** If the leader dies, changes from its last minute may not have reached the
+- **Up to 20 seconds of lost changes.** If the leader dies, changes from its last 20 seconds may not have reached the
   follower. The caller got a success answer for them. Ask analysts to re-click after a failover, or check the audit log.
   The duplicate rule makes a re-click harmless.
 - **Both servers down.** The firewall keeps the last list it downloaded and keeps blocking. New blocks are not
   possible until a server is back.
-- Replication sends the whole database every minute. For large audit logs, this is more network traffic.
+- Replication sends the whole database every 20 seconds. For large audit logs, this is more network traffic.
 
 ### 10.2 Failover test
 

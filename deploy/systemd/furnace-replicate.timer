@@ -1,9 +1,9 @@
 [Unit]
-Description=Push a Furnace snapshot to the other server every minute
+Description=Push a Furnace snapshot to the other server every 20 seconds
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=1min
+OnUnitActiveSec=20s
 AccuracySec=1s
 
 [Install]

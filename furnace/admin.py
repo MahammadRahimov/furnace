@@ -146,7 +146,7 @@ def _actor() -> str:
 def _need_leader(settings: Settings) -> None:
     if not settings.is_leader():
         raise auth.AuthError("This server is the follower. Run this on the leader (the server with the shared IP). "
-                             "The follower gets the change within a minute.")
+                             "The follower gets the change within 20 seconds.")
 
 
 def _show_secret(what: str, value: str) -> None:

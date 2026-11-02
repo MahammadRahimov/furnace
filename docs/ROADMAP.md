@@ -38,9 +38,15 @@ so the work can continue later exactly where it stopped.
 
 ### Later ideas (not planned)
 
-- **Faster replication.** Today the leader sends a full snapshot every minute, so a dead leader can lose up to about
-  one minute of changes. Options: a shorter interval (15 to 30 seconds, small change) or real-time replication
-  (bigger, fits the high-availability phase).
+- **Real-time replication** (high-availability phase, user decision 2026-11-02). v0.8.0 sends the full snapshot
+  every 20 seconds (was 1 minute), so a dead leader can lose up to about 20 seconds of changes. Plan for later:
+  a change log on the leader (every write numbered, in the same transaction), the follower asks for "changes after
+  N" over the HTTPS replication, applies them in order, falls back to the full snapshot when it is too far behind;
+  `furnace status` shows the lag. Async first (sync = the leader waits for the follower, slower writes). Leader
+  terms so a returning old leader drops changes the new leader never got. Still 2 servers.
+- **Witness / tie-breaker** (later, with the HA phase). With 2 servers, a broken link between them makes both
+  leader (split brain). A small third vote with no data (a tiny VM, or "can I reach the gateway") fixes most of it
+  without a third Furnace server.
 - A UI with its own user logins. High availability with more servers.
 
 ### After v0.7.0: Docker support, both ways (user decision 2026-10-30)

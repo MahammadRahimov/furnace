@@ -325,6 +325,8 @@ check "XSOAR works again after the unlock" grep -q ' 200$' <<< "$r"
 check "furnace token remove" on "$LEADER" "furnace token remove lab"
 
 step "Replication to the follower (waits up to 90 seconds)"
+check "replication runs every 20 seconds" \
+    on "$LEADER" "[ \"\$(systemctl show furnace-replicate.timer -p TimersMonotonic --value | grep -o 'OnUnitActiveUSec=[^ ;]*')\" = OnUnitActiveUSec=20s ]"
 ok=0
 for _ in $(seq 1 90); do
     if on "$FOLLOWER" "grep -qx $TEST_IP /var/lib/furnace-edl/blocklist.txt"; then ok=1; break; fi

@@ -139,7 +139,7 @@ def create_app(settings: Settings | None = None) -> Flask:
     if settings.replica_secret_file is not None:
         @app.post("/replica/snapshot")
         def receive_snapshot():
-            """The leader sends a gzip snapshot every minute. nginx lets only the other server in."""
+            """The leader sends a gzip snapshot every 20 seconds. nginx lets only the other server in."""
             caller = request.remote_addr or "unknown"
             header = request.headers.get("Authorization", "")
             given = header[7:].strip() if header[:7].lower() == "bearer " else ""

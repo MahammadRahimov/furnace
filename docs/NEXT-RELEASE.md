@@ -16,7 +16,7 @@ How a release happens (user decision 2026-11-01):
    A whole file of IPs or domains in one request, with the same rules as `furnace import-ips` (dates, whitelist,
    archive, backup first, all or nothing, the list limit). Options: `dry_run`, `permanent`, `old_ips`,
    `date_format`, `reason`, `added_by`. Needs the blocklist write permission.
-2. **Replication over HTTPS.** Every minute the leader sends the snapshot to `https://PEER_IP/replica/snapshot`
+2. **Replication over HTTPS.** Every 20 seconds the leader sends the snapshot to `https://PEER_IP/replica/snapshot`
    with a replication secret; the follower loads it and answers at once, so `furnace status` on the leader shows
    whether it worked. The secret comes from the certificate key both servers already share, so an upgrade needs no
    new bundle. For this version the leader falls back to SSH when HTTPS does not work (an older follower during an
@@ -36,6 +36,9 @@ How a release happens (user decision 2026-11-01):
      expired, both servers failed the check at once and nobody held the shared IP. The health check now ignores
      the certificate (it only talks to 127.0.0.1); the daily certificate warnings report the expiry.
    - The integration round now tests both cases.
-6. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
+6. **Replication every 20 seconds** (was every minute). If the leader dies, at most about 20 seconds of changes
+   can be lost instead of a minute, and a deleted or broken list file on the leader is rebuilt sooner. One copy is
+   small (lab: 247 KB, about 0.25 s). Real-time replication stays a later idea (roadmap, high-availability phase).
+7. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
 
 Not in this release: the Docker image. It is kept on the branch `docker` (user decision 2026-11-01).

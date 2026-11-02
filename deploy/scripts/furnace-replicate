@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs every minute on both servers (systemd timer), as the furnace user.
+# Runs every 20 seconds on both servers (systemd timer), as the furnace user.
 # Only the leader does something: it sends a database snapshot to the other server,
 # over HTTPS with the replication secret. If that does not work (for example while the
 # other server still runs an older Furnace during an upgrade), it falls back to SSH
