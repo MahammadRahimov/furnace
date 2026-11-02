@@ -863,6 +863,23 @@ else
 fi
 ok "keepalived configured (unicast VRRP to $CFG_PEER_IP, priority $PRIORITY, nopreempt, health check)"
 
+# If keepalived crashes, it cannot remove the shared IP and the role file still says
+# "leader": both servers would own the IP and take changes (split-brain). systemd starts
+# it again; at start keepalived drops the old shared IP and joins as the standby.
+# The daemon-reload below picks this up; it does not restart a running keepalived.
+KA_DROPIN=/etc/systemd/system/keepalived.service.d/furnace.conf
+install -d -m 0755 "$(dirname "$KA_DROPIN")"
+cat > "$KA_DROPIN.new" <<'EOF'
+# Furnace - written by "furnace setup". Restart keepalived when it crashes, so a dead
+# keepalived never leaves the shared IP on this server.
+[Service]
+Restart=on-failure
+RestartSec=2
+EOF
+chmod 0644 "$KA_DROPIN.new"
+mv -f "$KA_DROPIN.new" "$KA_DROPIN"
+ok "keepalived restarts by itself after a crash ($KA_DROPIN)"
+
 # The package brings the systemd units. If the API unit changed (for example in an
 # upgrade), a reload is not enough: the API needs a restart.
 API_UNIT_SUM="$(sha256sum "$(systemctl show -p FragmentPath --value furnace-api.service)" | cut -d' ' -f1)"   # not -P: RHEL 8 has systemd 239

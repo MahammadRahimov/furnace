@@ -27,6 +27,15 @@ How a release happens (user decision 2026-11-01):
    into `reason`.
 4. **Small changes on the servers:** nginx no longer logs `/health` (asked every 5 seconds), the keepalived notify
    script also works without systemd, and `furnace status` shows the last replication result.
-5. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
+5. **Two failover fixes** (found by breaking each part of the leader in the lab):
+   - **keepalived crash:** after a `kill -9`, the crashed server kept the shared IP and still called itself the
+     leader, so both servers owned the IP and took changes. Setup now adds a systemd drop-in
+     (`/etc/systemd/system/keepalived.service.d/furnace.conf`, `Restart=on-failure`): keepalived starts again,
+     drops the IP and joins as the standby. Uninstall removes the drop-in.
+   - **Expired certificate:** the health check verified the certificate, which both servers share. When it
+     expired, both servers failed the check at once and nobody held the shared IP. The health check now ignores
+     the certificate (it only talks to 127.0.0.1); the daily certificate warnings report the expiry.
+   - The integration round now tests both cases.
+6. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
 
 Not in this release: the Docker image. It is kept on the branch `docker` (user decision 2026-11-01).

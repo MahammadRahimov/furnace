@@ -425,11 +425,52 @@ step "Failover: break the web service on the new leader (health check)"
 on "$FOLLOWER" "furnace failover-test --web" && pass "failover test (web service down)" || fail "failover test (web service down)"
 check "the shared IP is back on the first server" on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 
+step "A keepalived crash on the leader (kill -9) must not leave the shared IP on both servers"
+check "keepalived has Restart=on-failure" [ "$(on "$LEADER" 'systemctl show -p Restart --value keepalived')" = "on-failure" ]
+on "$LEADER" "pkill -9 -x keepalived"
+ok=0
+for _ in $(seq 1 30); do
+    sleep 1
+    owners=0
+    for box in "$LEADER" "$FOLLOWER"; do
+        on "$box" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'" && owners=$((owners + 1))
+    done
+    if [ "$owners" = 1 ] && on "$LEADER" "systemctl is-active --quiet keepalived"; then ok=1; break; fi
+done
+check "systemd started keepalived again and only one server owns the shared IP" [ "$ok" = 1 ]
+check "the follower took the shared IP" on "$FOLLOWER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
+check "the crashed server is a follower now (role file)" [ "$(on "$LEADER" 'cat /run/furnace-state/role')" = "follower" ]
+check "the firewall still gets the list" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
+
+step "An expired certificate does not fail the health check (both servers share it)"
+on "$FOLLOWER" 'set -e; d=$(mktemp -d); cd "$d"; touch index.txt; echo 1000 > serial; mkdir certs
+printf "[ca]\ndefault_ca=c\n[c]\ndir=%s\ndatabase=\$dir/index.txt\nnew_certs_dir=\$dir/certs\nserial=\$dir/serial\ndefault_md=sha256\npolicy=p\nx509_extensions=e\n[p]\ncommonName=supplied\n[e]\nsubjectAltName=IP:127.0.0.1\n" "$d" > ca.cnf
+openssl req -new -key /etc/furnace/tls/furnace.key -subj "/CN=expired" -out r.csr
+openssl ca -batch -config ca.cnf -selfsign -keyfile /etc/furnace/tls/furnace.key -in r.csr \
+    -startdate 20250101000000Z -enddate 20250201000000Z -notext -out expired.crt 2>/dev/null
+cp /etc/furnace/tls/furnace.crt /root/furnace.crt.keep
+install -m 0644 expired.crt /etc/furnace/tls/furnace.crt; systemctl reload nginx; sleep 1; rm -rf "$d"'
+check "the served certificate is expired" on "$FOLLOWER" "! openssl s_client -connect 127.0.0.1:443 </dev/null 2>/dev/null | openssl x509 -noout -checkend 0"
+check "the health check still passes" on "$FOLLOWER" "/usr/lib/furnace/bin/furnace-health-check"
+sleep 16
+check "the follower kept the shared IP (no FAULT)" on "$FOLLOWER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
+on "$FOLLOWER" "install -m 0644 /root/furnace.crt.keep /etc/furnace/tls/furnace.crt && rm -f /root/furnace.crt.keep && systemctl reload nginx"
+check "the real certificate is back" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
+# Give the shared IP back to the first server: the uninstall step below removes the second one.
+on "$FOLLOWER" "systemctl restart keepalived"
+ok=0
+for _ in $(seq 1 20); do
+    sleep 1
+    on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'" && { ok=1; break; }
+done
+check "the shared IP is back on the first server" [ "$ok" = 1 ]
+
 step "Uninstall on the follower: removing the package keeps the data"
 pkg_remove "$FOLLOWER"
 check "program removed" on "$FOLLOWER" "! test -e /usr/lib/furnace && ! command -v furnace"
 check "services stopped" on "$FOLLOWER" "! systemctl is-active --quiet furnace-api && ! systemctl is-active --quiet keepalived"
 check "nginx site removed" on "$FOLLOWER" "! test -e $NGINX_CONF"
+check "keepalived restart drop-in removed" on "$FOLLOWER" "! test -e /etc/systemd/system/keepalived.service.d/furnace.conf"
 check "the Furnace firewall rules are removed" bash -c '! grep -qiE "furnace|vrrp|port=\"443\"" <<< "$1"' _ "$(fw_rules "$FOLLOWER")"
 check "database and EDL logins kept" on "$FOLLOWER" "test -f /var/lib/furnace/furnace.db && test -f /var/lib/furnace-auth/edl-users"
 if [ "$KIND" = deb ]; then

@@ -7,7 +7,11 @@ set -euo pipefail
 . /etc/furnace/install.env
 
 if [ "${USE_HTTPS:-yes}" = "yes" ]; then
-    exec curl -fsS --max-time 3 -o /dev/null --cacert /etc/furnace/tls/furnace.crt https://127.0.0.1/health
+    # -k: the check talks to this same server over 127.0.0.1, so it does not verify the
+    # certificate. Both servers share one certificate: if the check failed on an expired
+    # certificate, both servers would give up the shared IP at the same moment and nobody
+    # would serve the lists. The expiry is reported by the daily certificate warnings.
+    exec curl -fsSk --max-time 3 -o /dev/null https://127.0.0.1/health
 else
     exec curl -fsS --max-time 3 -o /dev/null http://127.0.0.1/health
 fi

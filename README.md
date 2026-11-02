@@ -812,6 +812,14 @@ The nightly cleanup:
 - Both servers use state `BACKUP` with `nopreempt`. A server that comes back does **not** take the IP back.
   Priority 150 is the preferred leader at the very first start, 100 is the follower.
 - keepalived calls `/health` every 5 seconds. After 3 failures the IP moves, even if the machine is still alive.
+  `/health` fails when nginx or the API is stopped or hangs, when the database cannot be read, when an EDL file
+  is missing, and when the disk is full. Tested in a lab: the follower takes over in about 15 seconds and the
+  firewall keeps getting the list.
+- The health check does **not** fail on an expired certificate. Both servers share one certificate, so it would
+  fail on both at the same moment and nobody would hold the shared IP. Watch the daily certificate warnings instead.
+- If keepalived itself crashes, systemd starts it again within 2 seconds
+  (`/etc/systemd/system/keepalived.service.d/furnace.conf`). At start it drops the shared IP and joins as the
+  standby, so the IP is never left on both servers.
 - When a server takes the shared IP, the notify script marks it as leader and starts the cleanup timer.
   When it loses the IP, it marks it as follower and stops the timer.
 - **Replication:** every minute the leader makes a SQLite backup snapshot and sends it over HTTPS to

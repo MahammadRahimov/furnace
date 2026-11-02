@@ -17,6 +17,11 @@ if [ -f /etc/keepalived/keepalived.conf ] && grep -q "^# Furnace" /etc/keepalive
     rm -f /etc/keepalived/keepalived.conf
     echo "Furnace: removed its keepalived configuration and stopped keepalived (the shared IP is released)."
 fi
+if [ -f /etc/systemd/system/keepalived.service.d/furnace.conf ]; then
+    rm -f /etc/systemd/system/keepalived.service.d/furnace.conf
+    rmdir /etc/systemd/system/keepalived.service.d 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
 
 rm -f /etc/nginx/sites-enabled/furnace /etc/nginx/sites-available/furnace /etc/nginx/conf.d/furnace.conf
 if nginx -t -q >/dev/null 2>&1; then systemctl reload nginx >/dev/null 2>&1 || true; fi
