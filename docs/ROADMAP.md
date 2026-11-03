@@ -1,6 +1,6 @@
 # Furnace roadmap
 
-State on 2026-11-02: **v0.7.0 is released** (`.deb` and `.rpm`). v0.8.0 (bulk blocklist upload, HTTPS replication, the URL blocklist) is coded, not released; the list is in `docs/NEXT-RELEASE.md`. Docker step 1 is coded and parked on the branch `docker` (not in v0.8.0). This file holds the plan for the next steps,
+State on 2026-11-03: **v0.8.0 is released** (`.deb` and `.rpm`). The list for the next version is in `docs/NEXT-RELEASE.md` (empty so far). Docker step 1 is coded and parked on the branch `docker` (not in v0.8.0). This file holds the plan for the next steps,
 so the work can continue later exactly where it stopped.
 
 ## Decisions so far
@@ -38,6 +38,7 @@ so the work can continue later exactly where it stopped.
 | 2 | v0.5.0 | `.rpm` for RHEL / Rocky / AlmaLinux / Oracle Linux / CentOS Stream 8, 9, 10, Fedora 41+, Amazon Linux 2023. firewalld. SELinux (tested on a real AlmaLinux 9.8 VM). |
 | 3 | v0.6.0 | Token permissions: a grid of Blocklist / Whitelist and Read / Write (write includes read). Each token has its own expiry, chosen when it is made (no default). `token edit`, `rotate` keeps the days, last use, warnings in `status` and the nightly cleanup log. Setup makes one token and asks its name, boxes and days. Tokens of 0.5 keep their rights and never expire. Integration 108/108 (`.deb`) and 107/107 (`.rpm`) on all 11 systems. |
 | 4 | v0.7.0 | Permanent IPs (`permanent: true` never expires; the same IP again changes nothing). The archive is a record of every different IP and domain ever blocked (first and last blocked, times blocked). Domains never expire. Schema 4 with a migration from 0.6. Unit tests 175. Integration 116/116 (`.deb`) and 115/115 (`.rpm`) on all 11 systems. |
+| 5 | v0.8.0 | Blocklist files through the API, the URL blocklist, replication over HTTPS every 20 seconds (SSH fallback), the domain whitelist protects subdomains and refuses shared platforms (Public Suffix List), the whitelist check, export and upload again, `incident_id` removed, 90 days by default, keepalived crash and expired-certificate fixes, the RHEL 8 certificate fix. Unit tests 323. Integration 159/159 (`.deb`) and 158/158 (`.rpm`) on all 11 systems. |
 
 ## Next
 

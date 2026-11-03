@@ -1172,12 +1172,12 @@ tests/integration/run.sh almalinux:9        # also: almalinux:8, almalinux:10, r
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
-Results for v0.7.0 (every system with the same final package):
+Results for v0.8.0 (every system with the same final package):
 
 | System | Checks |
 |---|---|
-| Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13 (`.deb`) | 116 of 116 each (one more: `apt purge`) |
-| AlmaLinux 8, 9, 10, Rocky Linux 9, Oracle Linux 9, Fedora 42, Amazon Linux 2023 (`.rpm`) | 115 of 115 each |
+| Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13 (`.deb`) | 159 of 159 each (one more: `apt purge`) |
+| AlmaLinux 8, 9, 10, Rocky Linux 9, Oracle Linux 9, Fedora 42, Amazon Linux 2023 (`.rpm`) | 158 of 158 each |
 
 It covers:
 building the package, `apt install` with its dependencies, Flask and gunicorn from the bundle (not the system), nothing running before setup, `setup --check`, refusing
@@ -1192,6 +1192,10 @@ replicated to the follower, nginx and ufw rules with limited IPs and with `any` 
 replication both ways, the follower refusing changes, `furnace status`, an import from a file only root can read,
 a package upgrade that keeps data and tokens without moving the shared IP, both failover modes, the cleanup timer
 moving with the shared IP, `apt remove` (data kept) and `apt purge` (data deleted).
+New in 0.8: the certificate is valid and has no extension twice, replication over HTTPS every 20 seconds (and the
+SSH fallback with an older follower), blocklist files and URLs through the API, a keepalived crash (`kill -9`:
+it is restarted, and the shared IP is never on both servers; either server may then be the leader) and an
+expired certificate (the shared IP stays).
 
 On the Red Hat family the same test installs the `.rpm` with dnf, uses firewalld, and checks that `dnf remove`
 keeps the data and removes the firewall rules.
