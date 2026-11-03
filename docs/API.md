@@ -163,7 +163,7 @@ Example of a refusal:
 | `login_not_allowed` | URLs | The URL has `user@` or `user:password@`. |
 | `url_too_long` | URLs | Longer than 255 characters. |
 | `wildcard_partial` | URLs | A wildcard is only part of a name or path part (`*bad.example.com`). |
-| `wildcard_too_wide` | URLs | The wildcard covers too much (`*.com/`, `example.*/`, `*.co.uk/`). |
+| `wildcard_too_wide` | URLs | The wildcard covers too much (`*.com/`, `example.*/`, `*.co.uk/`, `*.github.io/`). |
 | `ipv6_url_not_allowed` | URLs | The host is an IPv6 address. Block it in the IP list. |
 | `private_ip` and the other IP codes | URLs | The host is an IP that may not be blocked. |
 | `whitelist_not_allowed` | whitelist domains | A shared platform (`github.io`), a public name (`co.uk`), a name that covers one (`amazonaws.com`), or a name of the local refuse file. The message says which. |
@@ -419,6 +419,7 @@ differs):
 | `*bad.example.com/` | | `wildcard_partial` |
 | `*.com/`, `example.*/`, `bad.*.com/` | | `wildcard_too_wide`: the last two parts must be written out |
 | `*.co.uk/`, `*.com.az/` | | `wildcard_too_wide`: under a country's public names, three parts |
+| `*.github.io/`, `*.blogspot.com/`, `*.amazonaws.com/` | | `wildcard_too_wide`: a shared platform or public name (Public Suffix List), or a name that covers one |
 
 To block a site and all its subdomains, add both `bad.example.com/` and `*.bad.example.com/`.
 

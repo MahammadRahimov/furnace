@@ -54,7 +54,9 @@ How a release happens (user decision 2026-11-01):
    - Furnace cleans every URL into the firewall's form: `http://` and `https://` removed, lower case, no `#...`,
      a host alone ends with `/`. The answer shows the stored form.
    - URLs never expire. Wildcards are allowed as whole parts (`*.bad.example.com/`, `^.bad.example.com/`); too
-     wide ones are refused (`*.com/`, `example.*/`, `*.co.uk/`).
+     wide ones are refused (`*.com/`, `example.*/`, `*.co.uk/`). A wildcard may also not cover a whole
+     shared platform from the Public Suffix List: `*.github.io/`, `*.blogspot.com/` and `*.amazonaws.com/` are
+     refused, `*.bad.github.io/` is fine.
    - The whitelist protects by host: a domain on the domain whitelist protects itself and all its subdomains,
      also against wildcards that cover it. A URL with an IP host is checked against the IP whitelist. Adding a
      whitelist entry removes the URLs it protects.

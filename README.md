@@ -822,7 +822,9 @@ sudo furnace import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
   `. / ? & = ; +`. `*.bad.example.com/` is fine; `*bad.example.com/` is refused (`wildcard_partial`).
 - Too wide wildcards are refused (`wildcard_too_wide`): the last two parts of the host must be written out
   (`*.com/`, `example.*/` and `bad.*.com/` are refused), three under a country's public names (`*.co.uk/`,
-  `*.com.az/` are refused, `*.example.co.uk/` is fine).
+  `*.com.az/` are refused, `*.example.co.uk/` is fine). A wildcard may also not cover a shared platform or a
+  public name from the Public Suffix List (the same list the whitelist uses): `*.github.io/`, `*.blogspot.com/`
+  and `*.amazonaws.com/` are refused, `*.bad.github.io/` is fine.
 - IPv4 hosts are allowed (public only, like the IP list). IPv6 hosts, `user@host` and non-ASCII paths are refused.
   Send a non-ASCII path percent-encoded. At most 255 characters.
 - No expiry: a URL stays until someone removes it or the whitelist covers it. Every URL gets an archive record.

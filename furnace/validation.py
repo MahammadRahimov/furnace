@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass
 from typing import Union
 
+from furnace import psl
+
 IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]  # not "|": Python 3.9 is supported
 IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 
@@ -260,7 +262,29 @@ def _url_host(host: str) -> str:
         written = 3 if out[-2] in _PUBLIC_SECOND_LEVEL and len(out[-1]) == 2 else 2
         if len(out) <= written or any(label in WILDCARDS for label in out[-written:]):
             raise Rejected("wildcard_too_wide")
+        _check_shared_platform(out)
     return ".".join(out)
+
+
+def _check_shared_platform(labels: list) -> None:
+    """A wildcard may not cover a whole shared platform or public name (user decision 2026-11-03).
+
+    The written-out name after the last wildcard is checked against the Public Suffix List, the same
+    list the whitelist uses: *.github.io/ would block every GitHub Pages site, *.amazonaws.com/ covers
+    s3.amazonaws.com and the other Amazon platforms. One name below them is fine: *.bad.github.io/.
+    """
+    last = max(i for i, label in enumerate(labels) if label in WILDCARDS)
+    tail = ".".join(labels[last + 1:])
+    rules = psl.load()
+    if psl.public_suffix(tail, rules):
+        raise Rejected("wildcard_too_wide",
+                       f"This wildcard is too wide: {tail} is a shared platform or a public name, so it would "
+                       f"block every site under it. Write out one site, for example *.bad.{tail}/.")
+    under = rules.parents.get(tail)
+    if under:
+        raise Rejected("wildcard_too_wide",
+                       f"This wildcard is too wide: {tail} covers the shared platform {under}, so it would "
+                       f"block sites of many owners. Write out one site, for example *.bad.{under}/.")
 
 
 def host_touches_domain(host: str, domain: str) -> bool:

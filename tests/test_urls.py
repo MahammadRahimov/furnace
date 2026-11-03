@@ -48,6 +48,9 @@ def published(settings) -> list[str]:
     ("bad.example.com/*/login", "bad.example.com/*/login"),
     ("bad.example.com/?id=*", "bad.example.com/?id=*"),
     ("*.example.co.uk/", "*.example.co.uk/"),
+    ("*.bad.github.io/", "*.bad.github.io/"),
+    ("*.google.com/", "*.google.com/"),
+    ("github.io/", "github.io/"),
     ("http://203.0.113.5/x", "203.0.113.5/x"),
     ("bücher.example/", "xn--bcher-kva.example/"),
     ("  bad.example.com/a,b;c  ", "bad.example.com/a,b;c"),
@@ -74,6 +77,12 @@ def test_urls_are_cleaned(given, stored):
     ("bad.*.com/", "wildcard_too_wide"),
     ("*.co.uk/", "wildcard_too_wide"),
     ("*.com.az/", "wildcard_too_wide"),
+    ("*.github.io/", "wildcard_too_wide"),           # shared platforms (Public Suffix List)
+    ("^.github.io/", "wildcard_too_wide"),
+    ("bad.*.github.io/", "wildcard_too_wide"),
+    ("*.blogspot.com/", "wildcard_too_wide"),
+    ("*.amazonaws.com/", "wildcard_too_wide"),        # covers s3.amazonaws.com and others
+    ("*.ltd.uk/", "wildcard_too_wide"),               # a public name not in the short list
     ("*example.com/", "wildcard_partial"),
     ("bad.example.com/log*in", "wildcard_partial"),
     ("[2001:db8::1]/", "ipv6_url_not_allowed"),
