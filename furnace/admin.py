@@ -17,7 +17,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Iterable
 
-from . import __version__, auth, backup, db, edl, psl
+from . import __version__, auth, backup, db, edl, exchange, psl
 from .cleanup import run_cleanup
 from .config import ConfigError, Settings, read_env_file
 from .importer import ImportError_, import_domains, import_ips, import_urls, import_whitelist
@@ -25,9 +25,9 @@ from .locking import LockTimeout
 from .replica import ReplicaError, apply_snapshot, send_snapshot
 from .service import Furnace
 
+# The lists that can be uploaded again are in furnace/exchange.py (a Furnace export, user decision
+# 2026-11-03). These two are for reading only: the archive of all three types in one file, and the audit log.
 EXPORTS = {
-    "ips": ("SELECT ip, added_at, added_by, reason,"
-            " CASE permanent WHEN 1 THEN 'yes' ELSE 'no' END AS permanent FROM blocked_ips", "ip"),
     "archive": ("SELECT 'ip' AS type, ip AS value, first_blocked_at, last_blocked_at, times_blocked,"
                 " CASE WHEN EXISTS(SELECT 1 FROM blocked_ips b WHERE b.ip = r.ip) THEN 'yes' ELSE 'no' END"
                 " AS blocked_now, added_by, reason FROM ip_records r UNION ALL"
@@ -37,10 +37,6 @@ EXPORTS = {
                 " SELECT 'url', url, first_blocked_at, last_blocked_at, times_blocked,"
                 " CASE WHEN EXISTS(SELECT 1 FROM blocked_urls b WHERE b.url = r.url) THEN 'yes' ELSE 'no'"
                 " END, added_by, reason FROM url_records r", "type, value"),
-    "domains": ("SELECT domain, added_at, added_by, reason FROM blocked_domains", "domain"),
-    "urls": ("SELECT url, added_at, added_by, reason FROM blocked_urls", "url"),
-    "whitelist-ips": ("SELECT cidr, added_at, added_by, reason FROM whitelist_ips", "cidr"),
-    "whitelist-domains": ("SELECT domain, added_at, added_by, reason FROM whitelist_domains", "domain"),
     "audit": ("SELECT id, ts, action, object_type, value, result, reason_code, actor, source,"
               " details FROM audit_log", "id"),
 }
@@ -77,8 +73,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("import-whitelist-domains", help="Import whitelist domains from a file.")
     common_import(sp)
 
-    sp = sub.add_parser("export", help="Export a list to CSV.")
-    sp.add_argument("list", choices=sorted(EXPORTS))
+    sp = sub.add_parser("export", help="Export a list to CSV. The lists (not archive and audit) can be "
+                                       "uploaded again with the matching import.")
+    sp.add_argument("list", choices=sorted(set(EXPORTS) | set(exchange.SPECS)))
     sp.add_argument("-o", "--output", type=Path, help="Output file (default: print to the screen).")
 
     sp = sub.add_parser("backup", help="Back up the database and keep the newest N copies.")
@@ -385,6 +382,24 @@ def cmd_import(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def cmd_export(settings: Settings, args: argparse.Namespace) -> int:
+    if args.list in exchange.SPECS:
+        spec = exchange.SPECS[args.list]
+        conn = db.connect(settings.db_path)
+        try:
+            handle = open(args.output, "w", newline="", encoding="utf-8") if args.output else sys.stdout
+            try:
+                for chunk in exchange.csv_chunks(conn, spec):
+                    handle.write(chunk)
+            finally:
+                if args.output:
+                    handle.close()
+            count = conn.execute(f"SELECT COUNT(*) FROM ({spec.sql})").fetchone()[0]
+        finally:
+            conn.close()
+        if args.output:
+            print(f"Exported {count} rows to {args.output}. Upload it again with: "
+                  f"sudo furnace {exchange.IMPORT_COMMAND[spec.family]} {args.output}")
+        return 0
     sql, order = EXPORTS[args.list]
     conn = db.connect(settings.db_path)
     try:

@@ -76,6 +76,13 @@ How a release happens (user decision 2026-11-01):
 11. **Check the whitelist.** New: `GET /api/v1/whitelist/check/<ip or domain>` answers "is this on the
     whitelist?" with `whitelisted` `true` or `false` and the entry that protects it (a range, or a parent domain
     for a subdomain). It needs only the whitelist read permission and also works for private IPs.
-12. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
+12. **Export every list, and upload it again.** New: `GET /api/v1/export/<list>` for `ips`, `ips-archive`,
+    `domains`, `domains-archive`, `urls`, `urls-archive`, `whitelist-ips` and `whitelist-domains` (CSV, or
+    `?format=json`; blocklist read or whitelist read). `furnace export` writes the same file. It starts with a
+    marker line (`# furnace-export ips v1`), and the bulk uploads and `furnace import-*` read such a file by
+    column name: dates, who added it, the reason, the permanent flag and the archive history stay as they
+    were, so the lists move to a new server (README 7.4). Other files are read as before. The CSV of
+    `furnace export` now starts with these two `#` lines; the `archive` and `audit` exports are unchanged.
+13. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
 
 Not in this release: the Docker image. It is kept on the branch `docker` (user decision 2026-11-01).

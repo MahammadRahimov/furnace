@@ -269,7 +269,7 @@ def test_admin_cli(furnace, settings, tmp_path, monkeypatch, capsys):
     assert admin.main(["import-ips", str(src), "--report", str(tmp_path / "r.txt")]) == 0
     out_csv = tmp_path / "out.csv"
     assert admin.main(["export", "ips", "-o", str(out_csv)]) == 0
-    exported = list(csv.DictReader(out_csv.open()))
+    exported = list(csv.DictReader(line for line in out_csv.open() if not line.startswith("#")))
     assert [r["ip"] for r in exported] == ["198.51.100.1", "198.51.100.2"]
     assert admin.main(["stats"]) == 0
     assert "active ips" in capsys.readouterr().out

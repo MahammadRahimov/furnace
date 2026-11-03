@@ -17,7 +17,7 @@ The README has the same content in a shorter form ([README section 6](../README.
 9. [Whitelist: IPs and ranges](#9-whitelist-ips-and-ranges)
 10. [Whitelist: domains](#10-whitelist-domains) (and [check an IP or domain](#101-check-an-ip-or-a-domain))
 11. [Bulk whitelist upload](#11-bulk-whitelist-upload) (and [blocked IPs, domains and URLs from a file](#111-bulk-upload-of-blocked-ips-domains-and-urls-a-file))
-12. [List files for the list reader](#12-list-files-for-the-list-reader)
+12. [List files for the list reader](#12-list-files-for-the-list-reader) (and [export a list](#12a-export-a-list))
 13. [Health check](#13-health-check)
 14. [How a caller should handle answers](#14-how-a-caller-should-handle-answers)
 
@@ -198,6 +198,7 @@ Example of a refusal:
 | DELETE | `/api/v1/whitelist/domains/<domain>` | whitelist write | Remove from the whitelist |
 | POST | `/api/v1/whitelist/domains/bulk` | whitelist write | Bulk whitelist domains |
 | GET | `/api/v1/whitelist/check/<ip or domain>` | whitelist read | Is this IP or domain on the whitelist? |
+| GET | `/api/v1/export/<list>` | blocklist read or whitelist read | Export a list as a file that can be uploaded again (section 12a) |
 | GET | `/edl/blocklist.txt` | list login | Blocked IPs, one per line |
 | GET | `/edl/domains.txt` | list login | Blocked domains, one per line |
 | GET | `/edl/urls.txt` | list login | Blocked URLs, one per line |
@@ -764,6 +765,70 @@ curl --cacert "$CA" -u lists:PASSWORD "$FURNACE/edl/blocklist.txt"
 ```
 
 The archive CSV and the database are never served.
+
+## 12a. Export a list
+
+`GET /api/v1/export/<list>` gives a list as a **Furnace export**: a CSV file that can be uploaded again with the
+matching bulk endpoint, on this server or on a new one (user decision 2026-11-03). It is the same file as
+`sudo furnace export <list>`.
+
+| `<list>` | Columns | Permission | Upload it again with |
+|---|---|---|---|
+| `ips` | `ip, added_at, added_by, reason, permanent, counted_from` | blocklist read | `POST /api/v1/ips/bulk` |
+| `ips-archive` | `ip, first_blocked_at, last_blocked_at, times_blocked, blocked_now, added_by, reason` | blocklist read | `POST /api/v1/ips/bulk` |
+| `domains` | `domain, added_at, added_by, reason` | blocklist read | `POST /api/v1/domains/bulk` |
+| `domains-archive` | `domain`, then the archive columns | blocklist read | `POST /api/v1/domains/bulk` |
+| `urls` | `url, added_at, added_by, reason` | blocklist read | `POST /api/v1/urls/bulk` |
+| `urls-archive` | `url`, then the archive columns | blocklist read | `POST /api/v1/urls/bulk` |
+| `whitelist-ips` | `cidr, added_at, added_by, reason` | whitelist read | `POST /api/v1/whitelist/ips/bulk` |
+| `whitelist-domains` | `domain, added_at, added_by, reason` | whitelist read | `POST /api/v1/whitelist/domains/bulk` |
+
+- `counted_from`: the date the IP's days count from (the cleanup uses it). It is `added_at`, except for IPs
+  imported without a date, whose expiry was spread out.
+- `permanent` and `blocked_now` are `yes` or `no`. Times are UTC (`2026-10-01T10:00:00Z`).
+- An unknown list answers `404` with the list names. The audit log is not exported through the API.
+- It is a read, so the standby server answers it too. Uploads go to the leader.
+
+```bash
+curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" -o ips.csv "$FURNACE/api/v1/export/ips"
+curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$FURNACE/api/v1/export/ips?format=json"
+
+# upload it again (new server: whitelist first, then ips, domains, urls, then the archives)
+curl --cacert "$CA" -H "Authorization: Bearer $TOKEN" -H "Content-Type: text/plain" \
+  --data-binary @ips.csv "$FURNACE/api/v1/ips/bulk?dry_run=true"
+```
+
+The CSV answer has `Content-Type: text/csv` and a file name (`furnace-ips-20261103-100000.csv`). It starts with
+a marker line, a comment line, then the header:
+
+```
+# furnace-export ips v1
+# Furnace 0.8.0, exported 2026-11-03T10:00:00Z. Upload it again with /api/v1/ips/bulk or furnace import-ips.
+ip,added_at,added_by,reason,permanent,counted_from
+203.0.113.5,2026-10-01T10:00:00Z,soar,"phishing, wave 2",no,2026-10-01T10:00:00Z
+```
+
+`?format=json` gives `{"status": "ok", "list": "ips", "count": 1, "entries": [{"ip": ..., "permanent": false,
+...}]}` (`permanent` and `blocked_now` as `true`/`false`). Use it for reading; upload the CSV.
+
+**Uploading an export.** The bulk endpoints see the marker and read every column by name; files without it are
+read as before. With an export file:
+
+- Dates, `added_by`, `reason`, `permanent` and `counted_from` come from the file. An IP whose time is over goes
+  to the archive only (`archived` in the answer).
+- An archive file restores the history and never blocks anything. The answer has `archive_added` and
+  `archive_updated`. For an entry already in the archive, the earliest first block (with its `added_by` and
+  `reason`), the latest last block and the higher count are kept. The same file twice changes nothing.
+- A whitelist file is read the same way. The answer lists `removed_from_blocklist`: the blocked IPs, domains and
+  URLs that the new entries protect (with `dry_run`: that would be removed). Shared platforms are refused
+  (`whitelist_not_allowed`, in `skipped_lines`).
+- The answer has `furnace_export` (the list type) and the usual `skipped_lines` (`invalid_date`,
+  `future_date`, `ambiguous_date`, `invalid_permanent`, `invalid_times_blocked`, `duplicate_in_file`,
+  `already_active`, `already_on_whitelist`, `whitelisted` and the normal reason codes).
+- `422` `rejected`, nothing changed: the file belongs to another upload (the message names the right one), a
+  column is missing, the format is unknown (`v1` is the only one), or `permanent`, `old_ips` or `date_format` was
+  sent with it.
+- A JSON upload works too: `{"entries": [the lines of the file]}`.
 
 ## 13. Health check
 

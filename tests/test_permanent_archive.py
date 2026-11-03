@@ -160,7 +160,7 @@ def test_archive_csv_and_export(furnace, settings, tmp_path, monkeypatch):
     assert {(r["type"], r["value"], r["blocked_now"]) for r in exported} == {
         ("ip", "198.51.100.9", "no"), ("ip", "198.51.100.10", "yes"), ("domain", "bad.example.com", "yes")}
     assert admin.main(["export", "ips", "-o", str(out)]) == 0
-    assert list(csv.DictReader(out.open()))[0]["permanent"] == "no"
+    assert list(csv.DictReader(line for line in out.open() if not line.startswith("#")))[0]["permanent"] == "no"
 
 
 # ---------------------------------------------------------------------- imports

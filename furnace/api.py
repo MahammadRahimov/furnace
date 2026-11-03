@@ -19,7 +19,7 @@ from flask import Flask, Response, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import __version__, auth, db, importer, replica
+from . import __version__, auth, db, exchange, importer, replica
 from .config import Settings
 from .locking import LockTimeout
 from .service import Furnace, Result
@@ -308,6 +308,9 @@ def create_app(settings: Settings | None = None) -> Flask:
                                              permanent=flag("permanent", options.get("permanent", False)))
             elif kind == "urls":
                 report = importer.import_urls(settings, source, dry_run=dry_run, added_by=added_by, reason=reason)
+            elif kind.startswith("whitelist-"):
+                report = importer.import_whitelist(settings, source, kind.split("-", 1)[1], dry_run=dry_run,
+                                                   added_by=added_by, reason=reason)
             else:
                 report = importer.import_domains(settings, source, dry_run=dry_run, added_by=added_by,
                                                  reason=reason)
@@ -323,10 +326,19 @@ def create_app(settings: Settings | None = None) -> Flask:
             "message": report.summary().split("\nBackup:")[0].split("\nReport:")[0].replace("\n", " "),
             "dry_run": dry_run, "received": report.total_lines, "added": report.added_active,
         }
-        if kind == "ips":
+        if report.furnace_file:
+            answer["furnace_export"] = report.kind
+            if report.kind.endswith("-archive"):
+                answer.update(added=0, archive_added=report.added_archive, archive_updated=report.restored)
+            elif report.kind.startswith("whitelist-"):
+                answer["removed_from_blocklist"] = report.removed_from_blocklist
+            elif report.kind == "ips":
+                answer["archived"] = report.added_archive
+        elif kind == "ips":
             answer.update(permanent=report.permanent, archived=report.added_archive)
-        answer.update(blocked_again=report.restored, skipped=len(skipped), skipped_lines=skipped[:1000],
-                      report=Path(report.report_file).name)
+        if not report.kind.startswith("whitelist-") and not report.kind.endswith("-archive"):
+            answer["blocked_again"] = report.restored
+        answer.update(skipped=len(skipped), skipped_lines=skipped[:1000], report=Path(report.report_file).name)
         log.info("Bulk %s upload by %s: %s", kind, g.source, answer["message"])
         return jsonify(answer), 200
 
@@ -344,6 +356,56 @@ def create_app(settings: Settings | None = None) -> Flask:
     @require("blocklist", "write")
     def bulk_urls():
         return bulk_file("urls")
+
+    def furnace_file_upload() -> bool:
+        """True when the upload is a Furnace export (it starts with '# furnace-export')."""
+        if request.mimetype == "application/json":
+            d = request.get_json(silent=True)
+            entries = d.get("entries") if isinstance(d, dict) else None
+            return bool(isinstance(entries, list) and entries and isinstance(entries[0], str)
+                        and entries[0].strip().startswith(exchange.MARK))
+        return request.get_data(as_text=True).lstrip("\ufeff \r\n\t").startswith(exchange.MARK)
+
+    # -------------------------------------------------------------- export
+    # The lists as a Furnace export (CSV), the same file 'furnace export' writes. It can be uploaded
+    # again with the matching bulk endpoint or import command (user decision 2026-11-03).
+
+    def send_export(spec: exchange.Spec) -> Any:
+        fmt = request.args.get("format", "csv").lower()
+        if fmt not in ("csv", "json"):
+            raise _BadRequest("format must be csv or json.")
+        log.info("Export %s (%s) by %s", spec.kind, fmt, g.source)
+        if fmt == "json":
+            conn = db.connect(settings.db_path)
+            try:
+                entries = [dict(zip(spec.columns, row)) for row in exchange.rows(conn, spec)]
+            finally:
+                conn.close()
+            for entry in entries:
+                for name in ("permanent", "blocked_now"):
+                    if name in entry:
+                        entry[name] = entry[name] == "yes"
+            return jsonify({"status": "ok", "message": f"{len(entries)} entries in {spec.kind}.",
+                            "list": spec.kind, "count": len(entries), "entries": entries}), 200
+
+        def generate():
+            conn = db.connect(settings.db_path)
+            try:
+                yield from exchange.csv_chunks(conn, spec)
+            finally:
+                conn.close()
+
+        resp = Response(generate(), mimetype="text/csv")
+        stamp = db.utcnow().strftime("%Y%m%d-%H%M%S")
+        resp.headers["Content-Disposition"] = f'attachment; filename="furnace-{spec.kind}-{stamp}.csv"'
+        return resp
+
+    @app.get("/api/v1/export/<kind>")
+    def export_list(kind: str):
+        spec = exchange.SPECS.get(kind)
+        if spec is None:
+            return _error("not_found", f"There is no list '{kind}'. Lists: {', '.join(exchange.SPECS)}.", 404)
+        return require(spec.permission, "read")(lambda: send_export(spec))()
 
     @app.get("/api/v1/whitelist/check/<value>")
     @require("whitelist", "read")
@@ -365,6 +427,8 @@ def create_app(settings: Settings | None = None) -> Flask:
     @app.post("/api/v1/whitelist/ips/bulk")
     @require("whitelist", "write")
     def bulk_whitelist_ips():
+        if furnace_file_upload():
+            return bulk_file("whitelist-ips")
         entries, dry, reason, who = bulk_input()
         check_bulk_size(entries)
         return _reply(furnace.bulk_whitelist_ips(entries, reason, who, dry_run=dry, source=g.source))
@@ -389,6 +453,8 @@ def create_app(settings: Settings | None = None) -> Flask:
     @app.post("/api/v1/whitelist/domains/bulk")
     @require("whitelist", "write")
     def bulk_whitelist_domains():
+        if furnace_file_upload():
+            return bulk_file("whitelist-domains")
         entries, dry, reason, who = bulk_input()
         check_bulk_size(entries)
         return _reply(furnace.bulk_whitelist_domains(entries, reason, who, dry_run=dry, source=g.source))

@@ -697,8 +697,9 @@ sudo furnace rebuild                     # rebuild blocklist.txt, domains.txt an
 sudo furnace backup [--keep N]           # SQLite backup, keeps the newest N (default 14)
 sudo furnace cleanup --dry-run           # which temporary IPs the nightly job would remove
 sudo furnace cleanup [--force]           # run it now (--force skips the safety stop)
-sudo furnace export ips -o /tmp/ips.csv  # also: archive (every IP and domain ever blocked), domains,
-                                        # whitelist-ips, whitelist-domains, audit
+sudo furnace export ips -o /tmp/ips.csv  # also: ips-archive, domains, domains-archive, urls, urls-archive,
+                                        # whitelist-ips, whitelist-domains (these can be uploaded again,
+                                        # section 7.4), archive (all three types, read only), audit
 sudo furnace check-config                # show the settings (no secrets)
 ```
 
@@ -797,6 +798,62 @@ sudo furnace import-urls /tmp/urls.txt [--dry-run]                  # url, or ur
 sudo furnace import-whitelist-ips /tmp/wl-ips.txt [--dry-run]       # IPs and CIDR ranges
 sudo furnace import-whitelist-domains /tmp/wl-domains.txt [--dry-run]
 ```
+
+### 7.4 Export and move to a new server
+
+Every list can be exported, and the exported file can be uploaded again, on the same server or on a new one.
+The entries keep their dates, who added them, the reason, the permanent flag and the archive history.
+
+| List | What is in it | Upload it again with |
+|---|---|---|
+| `ips` | Blocked IPs now: date, by, reason, permanent, and `counted_from` (the date its days count from) | `/api/v1/ips/bulk` or `furnace import-ips` |
+| `ips-archive` | Every IP ever blocked: first and last block, times blocked, blocked now | the same |
+| `domains`, `domains-archive` | Blocked domains now, and every domain ever blocked | `/api/v1/domains/bulk` or `furnace import-domains` |
+| `urls`, `urls-archive` | Blocked URLs now, and every URL ever blocked | `/api/v1/urls/bulk` or `furnace import-urls` |
+| `whitelist-ips`, `whitelist-domains` | The whitelist | `/api/v1/whitelist/ips/bulk` and `/api/v1/whitelist/domains/bulk`, or `furnace import-whitelist-ips` / `-domains` |
+
+Export on the server (`sudo furnace export ips -o ips.csv`) or through the API
+(`GET /api/v1/export/ips`, see `docs/API.md` section 12a). Both give the same file. It starts with a marker line:
+
+```
+# furnace-export ips v1
+# Furnace 0.8.0, exported 2026-11-03T10:00:00Z. Upload it again with /api/v1/ips/bulk or furnace import-ips.
+ip,added_at,added_by,reason,permanent,counted_from
+203.0.113.5,2026-10-01T10:00:00Z,soar,phishing,no,2026-10-01T10:00:00Z
+```
+
+The importers look for that marker. With it, they read every column by name. Without it, a file is read as
+before (`ip,date,reason`), so lists from other sources work as they always did.
+
+**Move to a new server:**
+
+1. On the old server: export the eight lists (or call the API with a token that has blocklist read and
+   whitelist read).
+2. Install Furnace on the new server and run `sudo furnace setup` (new tokens, list logins and certificate:
+   they are secrets and are never exported).
+3. Upload the files in this order: **whitelist first** (`whitelist-ips`, `whitelist-domains`), then
+   `ips`, `domains`, `urls`, then the three archives. A dry run (`--dry-run` or `dry_run=true`) shows the result
+   first.
+
+What happens on upload:
+
+- The normal rules still apply: a database backup first, all or nothing, the whitelist, the list limits. Bad
+  rows are skipped and listed in the report.
+- An IP keeps its date, so its days go on from where they were. An IP whose time is over goes to the archive
+  only. A permanent IP stays permanent.
+- An archive upload restores the history. It never blocks anything: what is blocked now comes from `ips`,
+  `domains` and `urls`. When an entry is already in the archive, the earliest first block, the latest last block
+  and the higher count are kept.
+- Uploading the same file twice changes nothing the second time.
+- A file of the wrong list (an `ips` export sent to the domain upload, for example), a missing column or an
+  unknown format is refused, and nothing changes. The upload options `permanent`, `old_ips` and `date_format`
+  cannot be used with an export file (the file has its own dates and flags).
+- Opened and saved in a spreadsheet? That works too: semicolons, other date forms and extra columns are read.
+  Do not delete the marker line. A date the spreadsheet made unclear (`03/04/2026`) skips that row (in the
+  report).
+
+Not exported: tokens, list logins, the certificate and the audit log (`sudo furnace export audit` stays
+for reading on the server only).
 
 ## 8. Rules for IPs, domains, URLs and the whitelist
 

@@ -53,9 +53,13 @@ class ImportReport:
     backup_file: str = ""
     report_file: str = ""
     permanent: bool = False
+    furnace_file: bool = False                 # a Furnace export read back (furnace/exchange.py)
+    removed_from_blocklist: list = field(default_factory=list)
 
     def summary(self) -> str:
         head = "DRY RUN - nothing was changed. " if self.dry_run else ""
+        if self.furnace_file:
+            return self._furnace_summary(head)
         parts = [f"{head}Read {self.total_lines} lines.",
                  f"Added to the active list: {self.added_active}."]
         if self.kind == "ips":
@@ -64,6 +68,27 @@ class ImportReport:
             parts.append(f"Added only to the archive (too old to block): {self.added_archive}.")
         if self.kind in ("ips", "domains", "urls"):
             parts.append(f"Blocked again (already in the archive): {self.restored}.")
+        parts.append(f"Skipped: {len(self.skipped)}.")
+        if self.backup_file:
+            parts.append(f"Backup: {self.backup_file}.")
+        if self.report_file:
+            parts.append(f"Report: {self.report_file}.")
+        return "\n".join(parts)
+
+    def _furnace_summary(self, head: str) -> str:
+        parts = [f"{head}Furnace export ({self.kind}). Read {self.total_lines} rows."]
+        if self.kind.endswith("-archive"):
+            parts.append(f"New in the archive: {self.added_archive}. Updated in the archive: {self.restored}.")
+        elif self.kind.startswith("whitelist-"):
+            parts.append(f"Added to the whitelist: {self.added_active}.")
+            if self.removed_from_blocklist:
+                verb = "Would be removed" if self.dry_run else "Removed"
+                parts.append(f"{verb} from the blocklist (now whitelisted): {len(self.removed_from_blocklist)}.")
+        else:
+            parts.append(f"Added to the active list with their own dates: {self.added_active}.")
+            if self.kind == "ips":
+                parts.append(f"Added only to the archive (their time is over): {self.added_archive}.")
+            parts.append(f"Already in the archive: {self.restored}.")
         parts.append(f"Skipped: {len(self.skipped)}.")
         if self.backup_file:
             parts.append(f"Backup: {self.backup_file}.")
@@ -213,6 +238,19 @@ def _write_report(report: ImportReport, source: Path, report_path: Path | None, 
     report.report_file = str(path)
 
 
+def _furnace_kind(source: Path) -> str | None:
+    """The list type of a Furnace export (it starts with '# furnace-export'), or None for other files."""
+    from . import exchange
+    return exchange.detect(source)
+
+
+def _furnace_import(settings: Settings, source: Path, kind: str, family: str, dry_run: bool, added_by: str,
+                    report_path: Path | None, now: datetime | None) -> ImportReport:
+    from . import exchange
+    return exchange.import_file(settings, source, kind, family, dry_run=dry_run, added_by=added_by,
+                                report_path=report_path, now=now)
+
+
 def _backup_first(settings: Settings, report: ImportReport) -> None:
     if not report.dry_run:
         report.backup_file = str(backup.make_backup(settings, label="pre-import"))
@@ -225,6 +263,14 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
                report_path: Path | None = None, now: datetime | None = None,
                permanent: bool = False) -> ImportReport:
     """permanent: every added IP is permanent. Then the dates are only kept, nothing is too old."""
+    kind = _furnace_kind(source)
+    if kind:
+        options = [name for name, used in (("permanent", permanent), ("old_ips", old_ips != "archive"),
+                                           ("date_format", bool(date_format))) if used]
+        if options:
+            raise ImportError_(f"A Furnace export keeps its own dates and permanent flags. Remove the option "
+                               f"{', '.join(options)}. Nothing was changed.")
+        return _furnace_import(settings, source, kind, "ips", dry_run, added_by, report_path, now)
     if old_ips not in ("archive", "fresh"):
         raise ImportError_("--old-ips must be 'archive' or 'fresh'.")
     _require_leader(settings)
@@ -359,6 +405,9 @@ def import_ips(settings: Settings, source: Path, dry_run: bool = False, date_for
 def import_domains(settings: Settings, source: Path, dry_run: bool = False, added_by: str = "import",
                    reason: str = "imported", report_path: Path | None = None,
                    now: datetime | None = None) -> ImportReport:
+    kind = _furnace_kind(source)
+    if kind:
+        return _furnace_import(settings, source, kind, "domains", dry_run, added_by, report_path, now)
     _require_leader(settings)
     now = now or db.utcnow()
     report = ImportReport("domains", dry_run)
@@ -445,6 +494,9 @@ def import_urls(settings: Settings, source: Path, dry_run: bool = False, added_b
                 reason: str = "imported", report_path: Path | None = None,
                 now: datetime | None = None) -> ImportReport:
     """URLs never expire. http:// and https:// are removed; the whitelist protects by host."""
+    kind = _furnace_kind(source)
+    if kind:
+        return _furnace_import(settings, source, kind, "urls", dry_run, added_by, report_path, now)
     _require_leader(settings)
     now = now or db.utcnow()
     report = ImportReport("urls", dry_run)
@@ -512,6 +564,9 @@ def import_whitelist(settings: Settings, source: Path, kind: str, dry_run: bool 
                      added_by: str = "import", reason: str = "imported", report_path: Path | None = None,
                      now: datetime | None = None) -> ImportReport:
     """kind is 'ips' or 'domains'. Uses the same rules as the bulk API."""
+    found = _furnace_kind(source)
+    if found:
+        return _furnace_import(settings, source, found, f"whitelist-{kind}", dry_run, added_by, report_path, now)
     _require_leader(settings)
     now = now or db.utcnow()
     report = ImportReport(f"whitelist-{kind}", dry_run)
