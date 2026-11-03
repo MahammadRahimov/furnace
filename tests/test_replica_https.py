@@ -1,5 +1,7 @@
 """Replication over HTTPS: the leader POSTs a gzip snapshot to /replica/snapshot."""
 
+from __future__ import annotations
+
 import gzip
 import io
 import os
