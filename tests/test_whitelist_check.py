@@ -51,6 +51,8 @@ def test_messages_name_the_entry(client):
     assert check(client, "a.good.example.com")[1]["message"] == \
         "a.good.example.com is on the whitelist through the parent domain good.example.com."
     assert check(client, "10.9.9.9")[1]["message"] == "10.9.9.9 is on the whitelist through the range 10.0.0.0/8."
+    client.post("/api/v1/whitelist/ips", json={"entry": "192.0.2.44"}, headers=WHITE)   # stored as /32
+    assert check(client, "192.0.2.44")[1]["message"] == "192.0.2.44 is on the whitelist."
 
 
 @pytest.mark.parametrize("value, kind", [
@@ -75,7 +77,8 @@ def test_not_whitelisted(client, value, kind):
 def test_bad_values(client, value, reason):
     code, d = check(client, value)
     assert (code, d["reason_code"]) == (422, reason)
-    assert "Send one IP address or one domain name." in d["message"]
+    assert d["message"] == (f"{value} is neither an IP address nor a domain name. "
+                            "Send one IP address or one exact domain (no wildcard, no URL).")
 
 
 def test_permissions(client):

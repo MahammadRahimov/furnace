@@ -653,7 +653,8 @@ class Furnace:
                 try:
                     shown = normalize_domain(text)
                 except Rejected as error:
-                    return Result("rejected", error.message + " Send one IP address or one domain name.",
+                    return Result("rejected", f"{text} is neither an IP address nor a domain name. "
+                                  "Send one IP address or one exact domain (no wildcard, no URL).",
                                   code=error.code)
                 kind = "domain"
                 entry = self._domain_whitelisted(conn, shown)
@@ -663,7 +664,7 @@ class Furnace:
                 "entry": dict(row) if row else None}
         if entry is None:
             return Result("ok", f"{shown} is not on the whitelist.", data=data)
-        if entry == shown:
+        if entry in (shown, f"{shown}/32", f"{shown}/128"):  # the entry is this one IP or domain
             return Result("ok", f"{shown} is on the whitelist.", data=data)
         how = "the range" if kind == "ip" else "the parent domain"
         return Result("ok", f"{shown} is on the whitelist through {how} {entry}.", data=data)
