@@ -346,7 +346,7 @@ def test_domain_import_skips_whitelisted_subdomains(settings, tmp_path):
     ("cloudfront.net", "shared platform"),
     ("co.uk", "public name"),
     ("com.az", "public name"),
-    ("amazonaws.com", "covers the shared platform"),
+    ("amazonaws.com", "contains shared platforms"),
 ])
 def test_shared_platforms_and_public_names_cannot_be_whitelisted(settings, name, words):
     r = Furnace(settings).add_whitelist_domain(name)

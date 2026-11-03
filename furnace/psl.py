@@ -104,7 +104,7 @@ def refusal(domain: str, local_file: Path | None = None, rules: Rules | None = N
                 f"Whitelist the exact domain instead, for example company.{domain}.")
     under = rules.parents.get(domain)
     if under:
-        return (f"{domain} covers the shared platform {under}: anyone can make a site under it. "
+        return (f"{domain} contains shared platforms (sites of many owners). "
                 f"Whitelist the exact site instead.")
     local = read_local(local_file)
     if domain in local:

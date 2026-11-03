@@ -283,8 +283,8 @@ def _check_shared_platform(labels: list) -> None:
     under = rules.parents.get(tail)
     if under:
         raise Rejected("wildcard_too_wide",
-                       f"This wildcard is too wide: {tail} covers the shared platform {under}, so it would "
-                       f"block sites of many owners. Write out one site, for example *.bad.{under}/.")
+                       f"This wildcard is too wide: {tail} contains shared platforms (sites of many owners), "
+                       f"so it would block too much. Write out one site instead.")
 
 
 def host_touches_domain(host: str, domain: str) -> bool:
