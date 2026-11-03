@@ -697,15 +697,39 @@ cert_names_ok() {
     done
 }
 
+# make_cert: the self-signed certificate. All extensions come from a settings file of our own, not
+# from -addext: OpenSSL 1.1.1 (RHEL 8) adds -addext to the extensions of the system openssl.cnf, so
+# "Basic Constraints" was in the certificate twice, and such a certificate is not valid.
 make_cert() {
-    local key="$ETC/tls/furnace.key" crt="$ETC/tls/furnace.crt"
-    (umask 077; openssl req -x509 -newkey rsa:3072 -sha256 -days 3650 -nodes \
-        -keyout "$key" -out "$crt" -subj "/CN=Furnace ${CFG_SHARED_IP}/O=Furnace" \
-        -addext "subjectAltName=IP:${CFG_SHARED_IP},IP:${CFG_THIS_IP},IP:${CFG_PEER_IP},IP:127.0.0.1" \
-        -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
-        -addext "keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign" \
-        -addext "extendedKeyUsage=serverAuth" 2>/dev/null)
+    local key="$ETC/tls/furnace.key" crt="$ETC/tls/furnace.crt" cnf
+    cnf="$(mktemp /tmp/furnace-cert.XXXXXX)"
+    cat > "$cnf" <<EOF
+[req]
+prompt = no
+distinguished_name = dn
+x509_extensions = furnace
+
+[dn]
+CN = Furnace ${CFG_SHARED_IP}
+O = Furnace
+
+[furnace]
+subjectAltName = IP:${CFG_SHARED_IP},IP:${CFG_THIS_IP},IP:${CFG_PEER_IP},IP:127.0.0.1
+basicConstraints = critical,CA:TRUE,pathlen:0
+keyUsage = critical,digitalSignature,keyEncipherment,keyCertSign
+extendedKeyUsage = serverAuth
+subjectKeyIdentifier = hash
+EOF
+    (umask 077; openssl req -x509 -newkey rsa:3072 -sha256 -days 3650 -nodes -config "$cnf" \
+        -keyout "$key" -out "$crt" 2>/dev/null) || { rm -f "$cnf"; die "openssl could not make the certificate."; }
+    rm -f "$cnf"
     chmod 0644 "$crt"
+}
+
+# cert_repeated FILE: true when an extension is in the certificate more than once (made by setup
+# before 0.8 on RHEL 8 / OpenSSL 1.1.1). Such a certificate breaks the standard.
+cert_repeated() {
+    openssl x509 -in "$1" -noout -text 2>/dev/null | grep -oE '^ +X509v3 [A-Za-z ]+:' | sort | uniq -d | grep -q .
 }
 
 fix_secret_modes() {
@@ -752,6 +776,10 @@ if [ "$CFG_USE_HTTPS" = "yes" ] && ! cert_names_ok "$ETC/tls/furnace.crt"; then
     warn "The certificate does not name all of ${CFG_SHARED_IP}, ${CFG_THIS_IP}, ${CFG_PEER_IP}."
     warn "If the IPs changed: delete $ETC/tls on the leader, run setup there, then on the follower."
     TODO+=("Fix the certificate: it does not name all server IPs.")
+elif [ "$CFG_USE_HTTPS" = "yes" ] && cert_repeated "$ETC/tls/furnace.crt"; then
+    warn "The certificate has an extension twice (made by an older setup on RHEL 8). Some programs reject it."
+    warn "Make a new one: delete $ETC/tls on the leader, run setup there, then on the follower. Then load the new furnace.crt on the firewall."
+    TODO+=("Make a new certificate: the current one has an extension twice.")
 fi
 # Replication over HTTPS: both servers have the same TLS key, so both derive the same secret.
 # Nothing new to copy, also not when an older install is upgraded. A new key gives a new secret.

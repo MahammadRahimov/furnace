@@ -670,6 +670,17 @@ instead. It is the same certificate on both servers and names the shared IP.
 
 The certificate is valid for 10 years.
 
+**Make a new certificate** (when the server IPs changed, or when `furnace status` says the certificate has an
+extension twice):
+
+1. On the leader: `sudo rm -r /etc/furnace/tls`, then `sudo furnace setup`. It makes a new certificate and a new
+   follower bundle `/root/furnace-peer-bundle.tar.gz`.
+2. Copy the bundle to the follower. There: `sudo rm -r /etc/furnace/tls`, then `sudo furnace setup`.
+3. Give the new `furnace.crt` to everything that trusts the old one: the firewall (section 15.1), the SOAR
+   platform and the scripts. Until then they refuse the Furnace server.
+
+The new key also gives a new replication secret. Both servers get it from the same key, so nothing else changes.
+
 ### 6.11 Health check
 
 `GET /health` needs no token. nginx allows it only from the servers themselves (localhost and the two server
@@ -1061,6 +1072,9 @@ platforms (`github.io`) and public names (`co.uk`) can no longer be whitelisted 
 once, the blocked domains that are subdomains of a domain already on the whitelist (audit source `upgrade`). Check
 first: `sudo furnace export whitelist-domains`. Old whitelist entries that would be refused today stay;
 `furnace status` names them.
+**Servers set up on RHEL 8 (AlmaLinux 8, Rocky 8, Oracle 8):** setup before 0.8 made a certificate there with
+"Basic Constraints" twice, which breaks the standard. Replication over HTTPS now accepts it, but some programs and
+firewalls may reject it. `furnace status` warns about it. Make a new one when it suits you (section 6.10).
 **Change your callers first:** the field `incident_id` is gone. A request that still sends it gets `400`, so remove
 it from your SOAR playbooks and scripts before the upgrade. The upgrade deletes every stored incident number (old
 backups still have them). The exports and the archive CSV no longer have the `incident_id` column.

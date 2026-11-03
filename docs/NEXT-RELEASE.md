@@ -83,6 +83,12 @@ How a release happens (user decision 2026-11-01):
     column name: dates, who added it, the reason, the permanent flag and the archive history stay as they
     were, so the lists move to a new server (README 7.4). Other files are read as before. The CSV of
     `furnace export` now starts with these two `#` lines; the `archive` and `audit` exports are unchanged.
-13. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
+13. **Fix: the certificate on RHEL 8.** Setup on AlmaLinux / Rocky / Oracle 8 (OpenSSL 1.1.1) made a certificate
+    with "Basic Constraints" twice, so it was not valid and the HTTPS replication fell back to SSH. Found by the
+    integration test on `almalinux:8`. Now setup makes the certificate from its own OpenSSL settings file (the same
+    on every OpenSSL). The replication trusts the shared certificate directly (partial chain), so old certificates
+    also work. `furnace status` and setup warn about an old one; README 6.10 says how to make a new one. Nothing
+    is replaced on its own, because the firewall must get the new certificate too.
+14. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
 
 Not in this release: the Docker image. It is kept on the branch `docker` (user decision 2026-11-01).

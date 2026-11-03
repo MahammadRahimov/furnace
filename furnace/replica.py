@@ -67,6 +67,19 @@ def derive_secret(key_file: Path) -> str:
     return hmac.new(Path(key_file).read_bytes(), b"furnace replication v1", hashlib.sha256).hexdigest()
 
 
+# Python 3.9 does not name this OpenSSL flag yet; the value is the same in OpenSSL 1.1.1 and 3.
+VERIFY_X509_PARTIAL_CHAIN = getattr(ssl, "VERIFY_X509_PARTIAL_CHAIN", 0x80000)
+
+
+def replica_context(cafile: Path) -> ssl.SSLContext:
+    """TLS for the replication: trust only the shared Furnace certificate, and trust it directly
+    (partial chain). Then a certificate made before 0.8 on RHEL 8 ("Basic Constraints" twice, so
+    OpenSSL does not accept it as its own CA) still works. The host name check stays on."""
+    context = ssl.create_default_context(cafile=str(cafile))
+    context.verify_flags |= VERIFY_X509_PARTIAL_CHAIN
+    return context
+
+
 def send_snapshot(settings: Settings, peer_ip: str, cafile: Path, secret_file: Path, out: Path,
                   opener: Callable | None = None) -> str:
     """Leader: send one gzip snapshot to the other server. Returns a short result; raises ReplicaError."""
@@ -82,7 +95,7 @@ def send_snapshot(settings: Settings, peer_ip: str, cafile: Path, secret_file: P
         f"https://{peer_ip}/replica/snapshot", data=body, method="POST",
         headers={"Authorization": f"Bearer {secret}", "Content-Type": "application/octet-stream"})
     if opener is None:
-        context = ssl.create_default_context(cafile=str(cafile))
+        context = replica_context(cafile)
         opener = lambda req: urllib.request.urlopen(req, timeout=50, context=context)  # noqa: E731
     try:
         with opener(request) as reply:

@@ -191,6 +191,8 @@ WL_TOKEN="$(grep -o 'fur_[A-Za-z0-9_-]*' <<< "$out_wl")"
 check "a whitelist token from the command line (write brings read)" \
     grep -q "Permissions: blocklist -, whitelist read+write. Expires: never." <<< "$out_wl"
 check "the network card and IP were found automatically" on "$LEADER" "grep -qx 'INTERFACE=eth0' /etc/furnace/setup.conf && grep -qx 'THIS_IP=$LEADER_IP' /etc/furnace/setup.conf"
+check "the certificate is valid for itself and has no extension twice" on "$LEADER" \
+    "openssl verify -CAfile /etc/furnace/tls/furnace.crt /etc/furnace/tls/furnace.crt >/dev/null && ! openssl x509 -in /etc/furnace/tls/furnace.crt -noout -text | grep -oE '^ +X509v3 [A-Za-z ]+:' | sort | uniq -d | grep -q ."
 check "a keepalived password was created" on "$LEADER" "grep -Eqx 'KEEPALIVED_PASSWORD=[A-Za-z0-9]{8}' /etc/furnace/setup.conf"
 check "the saved settings are readable by root only" on "$LEADER" "[ \"\$(stat -c '%U %a' /etc/furnace/setup.conf)\" = 'root 600' ]"
 check "leader owns the shared IP" on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"

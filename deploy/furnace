@@ -125,6 +125,13 @@ status() {
     else
         echo "Replication: no result yet (it runs every minute)"
     fi
+    # A certificate made by setup before 0.8 on RHEL 8 has "Basic Constraints" twice. Not valid.
+    local crt="$ETC/tls/furnace.crt"
+    if [ -f "$crt" ] && openssl x509 -in "$crt" -noout -text 2>/dev/null \
+            | grep -oE '^ +X509v3 [A-Za-z ]+:' | sort | uniq -d | grep -q .; then
+        echo "Certificate: WARNING: $crt has an extension twice (made by an older setup on RHEL 8)."
+        echo "             Some programs and firewalls reject it. Make a new one: README, section 6.10."
+    fi
     echo
     run_data_command stats || problems=1
     if [ "$problems" -ne 0 ]; then

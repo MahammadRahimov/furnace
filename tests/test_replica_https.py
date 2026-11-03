@@ -197,3 +197,22 @@ def test_a_follower_does_not_send(settings, tmp_path, secret_file):
     settings.role_file = role
     assert replica.send_snapshot(settings, "192.0.2.12", tmp_path / "ca.crt", secret_file, tmp_path / "o.db",
                                  opener=lambda req: pytest.fail("a follower must not send")) == "not the leader"
+
+
+def test_the_replication_trusts_the_shared_certificate_directly(tmp_path):
+    """A certificate made before 0.8 on RHEL 8 has "Basic Constraints" twice, so OpenSSL 1.1.1 does not
+    accept it as its own CA. The replication trusts it directly (partial chain), with the name check on."""
+    import shutil
+    import ssl
+    import subprocess
+
+    if not shutil.which("openssl"):
+        pytest.skip("needs openssl")
+    crt, key = tmp_path / "furnace.crt", tmp_path / "furnace.key"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=Furnace",
+                    "-addext", "subjectAltName=IP:192.0.2.10", "-keyout", str(key), "-out", str(crt)],
+                   check=True, capture_output=True)
+    context = replica.replica_context(crt)
+    assert context.verify_flags & replica.VERIFY_X509_PARTIAL_CHAIN
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    assert replica.VERIFY_X509_PARTIAL_CHAIN == 0x80000
