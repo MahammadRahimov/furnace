@@ -73,6 +73,9 @@ How a release happens (user decision 2026-11-01):
       every name that covers it.
     - `furnace status` warns about old whitelist entries that would be refused today. They are not removed.
     - IPs: no change. A whitelisted range already protects every IP in it.
-11. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
+11. **Check the whitelist.** New: `GET /api/v1/whitelist/check/<ip or domain>` answers "is this on the
+    whitelist?" with `whitelisted` `true` or `false` and the entry that protects it (a range, or a parent domain
+    for a subdomain). It needs only the whitelist read permission and also works for private IPs.
+12. **Docs:** README (replication, upgrade from 0.7 to 0.8, network checklist, files), `docs/API.md` and the roadmap.
 
 Not in this release: the Docker image. It is kept on the branch `docker` (user decision 2026-11-01).

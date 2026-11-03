@@ -345,6 +345,11 @@ def create_app(settings: Settings | None = None) -> Flask:
     def bulk_urls():
         return bulk_file("urls")
 
+    @app.get("/api/v1/whitelist/check/<value>")
+    @require("whitelist", "read")
+    def check_whitelist(value: str):
+        return _reply(furnace.check_whitelist(value))
+
     @app.post("/api/v1/whitelist/ips")
     @require("whitelist", "write")
     def add_whitelist_ip():

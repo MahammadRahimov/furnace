@@ -15,7 +15,7 @@ The README has the same content in a shorter form ([README section 6](../README.
 8. [Blocked domains](#8-blocked-domains)
 8a. [Blocked URLs](#8a-blocked-urls)
 9. [Whitelist: IPs and ranges](#9-whitelist-ips-and-ranges)
-10. [Whitelist: domains](#10-whitelist-domains)
+10. [Whitelist: domains](#10-whitelist-domains) (and [check an IP or domain](#101-check-an-ip-or-a-domain))
 11. [Bulk whitelist upload](#11-bulk-whitelist-upload) (and [blocked IPs, domains and URLs from a file](#111-bulk-upload-of-blocked-ips-domains-and-urls-a-file))
 12. [List files for the list reader](#12-list-files-for-the-list-reader)
 13. [Health check](#13-health-check)
@@ -197,6 +197,7 @@ Example of a refusal:
 | GET | `/api/v1/whitelist/domains` | whitelist read | List whitelisted domains (paged) |
 | DELETE | `/api/v1/whitelist/domains/<domain>` | whitelist write | Remove from the whitelist |
 | POST | `/api/v1/whitelist/domains/bulk` | whitelist write | Bulk whitelist domains |
+| GET | `/api/v1/whitelist/check/<ip or domain>` | whitelist read | Is this IP or domain on the whitelist? |
 | GET | `/edl/blocklist.txt` | list login | Blocked IPs, one per line |
 | GET | `/edl/domains.txt` | list login | Blocked domains, one per line |
 | GET | `/edl/urls.txt` | list login | Blocked URLs, one per line |
@@ -604,6 +605,35 @@ A refused whitelist request answers `422`:
 ```
 
 In a bulk upload, refused names are listed in `rejected` with the same code; the other entries are added.
+
+### 10.1 Check an IP or a domain
+
+`GET /api/v1/whitelist/check/<ip or domain>` answers one question: is this on the whitelist? It needs only the
+**whitelist read** permission (no blocklist permission), so a program that manages the whitelist can ask it.
+
+```bash
+curl --cacert "$CA" "$FURNACE/api/v1/whitelist/check/198.51.100.7" -H "Authorization: Bearer $WL_TOKEN"
+curl --cacert "$CA" "$FURNACE/api/v1/whitelist/check/www.good.example.com" -H "Authorization: Bearer $WL_TOKEN"
+```
+
+```json
+{"status": "ok", "message": "www.good.example.com is on the whitelist through the parent domain good.example.com.",
+ "value": "www.good.example.com", "type": "domain", "whitelisted": true, "whitelisted_by": "good.example.com",
+ "entry": {"domain": "good.example.com", "added_at": "2026-11-03T10:00:00Z", "added_by": "admin.one",
+           "reason": "Company website"}}
+```
+
+- **IPs:** any IPv4 or IPv6 address, **also private ones** (`10.1.2.3`), because private ranges can be
+  whitelisted. `whitelisted_by` is the range that covers it. The IPv6 form `::ffff:198.51.100.7` is read as
+  `198.51.100.7`.
+- **Domains:** a domain is whitelisted when it **or a parent of it** is on the domain whitelist (the parent
+  protects its subdomains). `whitelisted_by` names that entry. The parent of a whitelisted domain is not
+  whitelisted: with `good.example.com` on the list, `example.com` answers `false`.
+- `entry` is the whitelist entry (with `added_at`, `added_by`, `reason`), or `null`.
+- Answers: always `200` `ok` for a valid value, with `whitelisted` `true` or `false`. `422` `rejected` for a value
+  that is neither an IP nor a domain (`invalid_domain`, `wildcard_not_allowed`, `url_not_allowed`). Check a URL
+  with `GET /api/v1/urls?url=...` (its `whitelisted_by`).
+- It is a read, so the standby server answers it too.
 
 ## 11. Bulk whitelist upload
 

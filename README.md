@@ -599,7 +599,13 @@ curl --cacert "$CA" -X POST "$FURNACE/api/v1/whitelist/domains" \
   -d '{"domain":"good.example.com","reason":"Company website","added_by":"admin.one"}'
 curl --cacert "$CA" -X DELETE "$FURNACE/api/v1/whitelist/domains/good.example.com" \
   -H "Authorization: Bearer $WL_TOKEN"
+
+# check: is this IP or domain on the whitelist? (whitelist read; private IPs too)
+curl --cacert "$CA" "$FURNACE/api/v1/whitelist/check/www.good.example.com" -H "Authorization: Bearer $WL_TOKEN"
 ```
+
+The check answers `whitelisted` `true` or `false` and, in `whitelisted_by`, the entry that protects the value: the
+range for an IP, the domain itself or a parent of it for a domain. Details: `docs/API.md` section 10.1.
 
 When a whitelist entry is added, Furnace removes every blocked IP or domain it covers. The answer lists them in
 `removed_from_blocklist`, and the blocked URLs it covers in `urls_removed_from_blocklist`. Each removal is in the

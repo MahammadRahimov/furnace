@@ -19,7 +19,7 @@ from . import db, edl, psl
 from .config import Settings
 from .locking import FileLock
 from .rangeset import RangeSet
-from .validation import (Rejected, URLEntry, clean_text, domain_key, host_touches_domain, ip_sort_key,
+from .validation import (REASON_TEXT, Rejected, URLEntry, clean_text, domain_key, host_touches_domain, ip_sort_key,
                          normalize_domain, normalize_url, range_hex, to_hex, validate_ip, validate_whitelist_cidr)
 
 log = logging.getLogger("furnace")
@@ -627,6 +627,46 @@ class Furnace:
         if not gone:
             return Result("not_found", "This entry is not on the whitelist.")
         return Result("removed", "The entry is no longer on the whitelist.", data={"cidr": cidr})
+
+    def check_whitelist(self, value: object) -> Result:
+        """Is this IP or domain on the whitelist? (user decision 2026-11-03)
+
+        Any IP may be checked, also private ones (they can be whitelisted). A domain counts as whitelisted
+        when it or a parent of it is on the domain whitelist. The answer names the entry that protects it.
+        """
+        if not isinstance(value, str) or not value.strip():
+            return Result("rejected", REASON_TEXT["missing_value"], code="missing_value")
+        text = value.strip()
+        try:
+            ip = ipaddress.ip_address(text.strip("[]"))
+        except ValueError:
+            ip = None
+        with self._reader() as conn:
+            if ip is not None:
+                if ip.version == 6 and ip.ipv4_mapped:
+                    ip = ip.ipv4_mapped
+                kind, shown = "ip", str(ip)
+                entry = self._ip_whitelisted(conn, ip)
+                row = conn.execute("SELECT cidr, added_at, added_by, reason FROM whitelist_ips WHERE cidr=?",
+                                   (entry,)).fetchone() if entry else None
+            else:
+                try:
+                    shown = normalize_domain(text)
+                except Rejected as error:
+                    return Result("rejected", error.message + " Send one IP address or one domain name.",
+                                  code=error.code)
+                kind = "domain"
+                entry = self._domain_whitelisted(conn, shown)
+                row = conn.execute("SELECT domain, added_at, added_by, reason FROM whitelist_domains WHERE domain=?",
+                                   (entry,)).fetchone() if entry else None
+        data = {"value": shown, "type": kind, "whitelisted": entry is not None, "whitelisted_by": entry,
+                "entry": dict(row) if row else None}
+        if entry is None:
+            return Result("ok", f"{shown} is not on the whitelist.", data=data)
+        if entry == shown:
+            return Result("ok", f"{shown} is on the whitelist.", data=data)
+        how = "the range" if kind == "ip" else "the parent domain"
+        return Result("ok", f"{shown} is on the whitelist through {how} {entry}.", data=data)
 
     def list_whitelist_ips(self, limit: int = 1000, offset: int = 0) -> Result:
         with self._reader() as conn:
