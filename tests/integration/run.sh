@@ -360,11 +360,17 @@ check "furnace token remove" on "$LEADER" "furnace token remove lab"
 step "Replication to the follower (waits up to 90 seconds)"
 check "replication runs every 20 seconds" \
     on "$LEADER" "[ \"\$(systemctl show furnace-replicate.timer -p TimersMonotonic --value | grep -o 'OnUnitActiveUSec=[^ ;]*')\" = OnUnitActiveUSec=20s ]"
+# Wait for the LAST change (the URL, the removed token), not only the first: a copy every 20 seconds can land
+# between two changes (found in the 0.8.0 round).
 ok=0
-for _ in $(seq 1 90); do
-    if on "$FOLLOWER" "grep -qx $TEST_IP /var/lib/furnace-edl/blocklist.txt"; then ok=1; break; fi
+for i in $(seq 1 90); do
+    if on "$FOLLOWER" "grep -qx $TEST_IP /var/lib/furnace-edl/blocklist.txt && grep -qx bad.example.com/phish/ /var/lib/furnace-edl/urls.txt" \
+        && [ "$(on "$LEADER" 'furnace token list; furnace edl-user list')" = "$(on "$FOLLOWER" 'furnace token list; furnace edl-user list')" ]; then
+        ok=1; break
+    fi
     sleep 1
 done
+echo "  everything replicated after about $i seconds"
 check "the follower has the IP in its blocklist.txt" [ "$ok" = 1 ]
 check "the follower has the domain" on "$FOLLOWER" "grep -qx bad.example.com /var/lib/furnace-edl/domains.txt"
 check "the follower has the URL" on "$FOLLOWER" "grep -qx bad.example.com/phish/ /var/lib/furnace-edl/urls.txt"
@@ -402,6 +408,10 @@ check "status names the fallback" bash -c 'grep -q "SSH is the fallback" <<< "$1
 on "$FOLLOWER" "sed -i 's/^#OFF_FURNACE_REPLICA_SECRET_FILE=/FURNACE_REPLICA_SECRET_FILE=/' /etc/furnace/furnace.env && systemctl restart furnace-api"
 check "after the upgrade of the follower it is HTTPS again" wait_result ' ok over HTTPS: sent'
 api DELETE /api/v1/ips/198.51.100.79 >/dev/null
+# Let the next copy carry the delete before the failover below. Otherwise the new leader still has the IP
+# (changes of the last 20 seconds are lost in a failover: the known window, README 10.1).
+check "the follower got the delete too" bash -c 'for _ in $(seq 1 60); do
+    docker exec "$1" grep -qx 198.51.100.79 /var/lib/furnace-edl/blocklist.txt || exit 0; sleep 1; done; exit 1' _ "$FOLLOWER"
 
 step "The furnace command: status and import"
 check "status is fine on the leader" on "$LEADER" "furnace status"
@@ -431,7 +441,15 @@ check "the follower now owns the shared IP" on "$FOLLOWER" "ip -4 addr show eth0
 check "the cleanup timer moved to the follower" on "$FOLLOWER" "systemctl is-active --quiet furnace-cleanup.timer"
 check "the old leader stopped its cleanup timer" on "$LEADER" "! systemctl is-active --quiet furnace-cleanup.timer"
 check "the firewall still gets the list" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
-r="$(api POST /api/v1/ips '{"ip":"198.51.100.79","added_by":"tester"}')"
+# Right after the move the new leader can answer 503 for a moment (its role file is written by keepalived's
+# notify script). Callers retry on 503 (docs/API.md section 14), so the test does too, for up to 15 seconds.
+for i in $(seq 1 15); do
+    r="$(api POST /api/v1/ips '{"ip":"198.51.100.79","added_by":"tester"}')"
+    grep -q ' 503$' <<< "$r" || break
+    [ "$i" = 1 ] && echo "  first answer: ${r: -160}"
+    sleep 1
+done
+echo "  added on try $i"
 check "XSOAR can add on the new leader (201)" grep -q ' 201$' <<< "$r"
 ok=0
 for _ in $(seq 1 90); do
@@ -464,36 +482,53 @@ check "the shared IP is back on the first server" on "$LEADER" "ip -4 addr show 
 step "A keepalived crash on the leader (kill -9) must not leave the shared IP on both servers"
 check "keepalived has Restart=on-failure" [ "$(on "$LEADER" 'systemctl show -p Restart --value keepalived')" = "on-failure" ]
 on "$LEADER" "pkill -9 -x keepalived"
-ok=0
-for _ in $(seq 1 30); do
+# systemd starts keepalived again after 2 s. Which server then holds the shared IP depends on timing: the follower
+# (3 missed adverts, about 3.6 s) or the restarted leader. Both are fine (found in the 0.8.0 round). What must hold:
+# never both, then exactly one owner, and the role files agree with it. Checked every second; the timeline is logged.
+both=0; stable=0; timeline=""; prev=""
+for i in $(seq 1 40); do
     sleep 1
-    owners=0
-    for box in "$LEADER" "$FOLLOWER"; do
-        on "$box" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'" && owners=$((owners + 1))
-    done
-    if [ "$owners" = 1 ] && on "$LEADER" "systemctl is-active --quiet keepalived"; then ok=1; break; fi
+    l=0; f=0
+    on "$LEADER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'" && l=1
+    on "$FOLLOWER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'" && f=1
+    [ "$l$f" = 11 ] && both=1
+    timeline+=" ${i}s:L$l/F$f"
+    # The end state: one owner for 8 seconds in a row (longer than a takeover), keepalived running again.
+    if [ "$l$f" = 10 ] || [ "$l$f" = 01 ]; then
+        [ "$l$f" = "$prev" ] && stable=$((stable + 1)) || stable=1
+    else
+        stable=0
+    fi
+    prev="$l$f"
+    [ "$stable" -ge 8 ] && on "$LEADER" "systemctl is-active --quiet keepalived" && break
 done
-check "systemd started keepalived again and only one server owns the shared IP" [ "$ok" = 1 ]
-check "the follower took the shared IP" on "$FOLLOWER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
-check "the crashed server is a follower now (role file)" [ "$(on "$LEADER" 'cat /run/furnace-state/role')" = "follower" ]
+echo "  timeline (L = crashed leader, F = follower, 1 = owns the shared IP):$timeline"
+if [ "$prev" = 01 ]; then OWNER=$FOLLOWER; OTHER=$LEADER; else OWNER=$LEADER; OTHER=$FOLLOWER; fi
+echo "  the shared IP is on $OWNER"
+check "the shared IP was never on both servers" [ "$both" = 0 ]
+check "systemd started keepalived again on the crashed server" on "$LEADER" "systemctl is-active --quiet keepalived"
+check "then exactly one server holds the shared IP" [ "$stable" -ge 8 ]
+check "its role file says leader, the other one's says follower" \
+    [ "$(on "$OWNER" 'cat /run/furnace-state/role'):$(on "$OTHER" 'cat /run/furnace-state/role')" = "leader:follower" ]
 check "the firewall still gets the list" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
 
 step "An expired certificate does not fail the health check (both servers share it)"
-on "$FOLLOWER" 'set -e; d=$(mktemp -d); cd "$d"; touch index.txt; echo 1000 > serial; mkdir certs
+# On the server that holds the shared IP: if the health check failed there, nobody would hold it.
+on "$OWNER" 'set -e; d=$(mktemp -d); cd "$d"; touch index.txt; echo 1000 > serial; mkdir certs
 printf "[ca]\ndefault_ca=c\n[c]\ndir=%s\ndatabase=\$dir/index.txt\nnew_certs_dir=\$dir/certs\nserial=\$dir/serial\ndefault_md=sha256\npolicy=p\nx509_extensions=e\n[p]\ncommonName=supplied\n[e]\nsubjectAltName=IP:127.0.0.1\n" "$d" > ca.cnf
 openssl req -new -key /etc/furnace/tls/furnace.key -subj "/CN=expired" -out r.csr
 openssl ca -batch -config ca.cnf -selfsign -keyfile /etc/furnace/tls/furnace.key -in r.csr \
     -startdate 20250101000000Z -enddate 20250201000000Z -notext -out expired.crt 2>/dev/null
 cp /etc/furnace/tls/furnace.crt /root/furnace.crt.keep
 install -m 0644 expired.crt /etc/furnace/tls/furnace.crt; systemctl reload nginx; sleep 1; rm -rf "$d"'
-check "the served certificate is expired" on "$FOLLOWER" "! openssl s_client -connect 127.0.0.1:443 </dev/null 2>/dev/null | openssl x509 -noout -checkend 0"
-check "the health check still passes" on "$FOLLOWER" "/usr/lib/furnace/bin/furnace-health-check"
+check "the served certificate is expired" on "$OWNER" "! openssl s_client -connect 127.0.0.1:443 </dev/null 2>/dev/null | openssl x509 -noout -checkend 0"
+check "the health check still passes" on "$OWNER" "/usr/lib/furnace/bin/furnace-health-check"
 sleep 16
-check "the follower kept the shared IP (no FAULT)" on "$FOLLOWER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
-on "$FOLLOWER" "install -m 0644 /root/furnace.crt.keep /etc/furnace/tls/furnace.crt && rm -f /root/furnace.crt.keep && systemctl reload nginx"
+check "the server kept the shared IP (no FAULT)" on "$OWNER" "ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
+on "$OWNER" "install -m 0644 /root/furnace.crt.keep /etc/furnace/tls/furnace.crt && rm -f /root/furnace.crt.keep && systemctl reload nginx"
 check "the real certificate is back" grep -qx "$TEST_IP" <<< "$(edl blocklist.txt)"
 # Give the shared IP back to the first server: the uninstall step below removes the second one.
-on "$FOLLOWER" "systemctl restart keepalived"
+[ "$OWNER" = "$FOLLOWER" ] && on "$FOLLOWER" "systemctl restart keepalived"
 ok=0
 for _ in $(seq 1 20); do
     sleep 1
