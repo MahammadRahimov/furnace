@@ -1,6 +1,6 @@
 # Furnace roadmap
 
-State on 2026-11-03: **v0.8.0 is released** (`.deb` and `.rpm`). The list for the next version is in `docs/NEXT-RELEASE.md` (empty so far). Docker step 1 is coded and parked on the branch `docker` (not in v0.8.0). This file holds the plan for the next steps,
+State on 2026-11-04: **v0.8.0 is released** (`.deb` and `.rpm`). The list for the next version is in `docs/NEXT-RELEASE.md` (empty so far). Next work: Docker for v0.9.0 (decision 2026-11-04 below), then the SSH removal. Docker step 1 is coded and parked on the branch `docker` (not in v0.8.0). This file holds the plan for the next steps,
 so the work can continue later exactly where it stopped.
 
 ## Decisions so far
@@ -29,6 +29,7 @@ so the work can continue later exactly where it stopped.
 | 2026-11-03 | **Check the whitelist**, in v0.8.0: `GET /api/v1/whitelist/check/<ip or domain>` (whitelist read only, private IPs allowed) answers `whitelisted` and the entry that protects the value. **URL wildcards may not cover a shared platform** (Public Suffix List): `*.github.io/`, `*.amazonaws.com/` are refused. |
 | 2026-11-02 | **The domain whitelist protects subdomains everywhere** (domains too, not only URLs): whitelisting `x.com` removes and refuses `mail.x.com`. **The whitelist is restricted:** general sites where anyone can make a site cannot be whitelisted. Identified with the **Public Suffix List** (bundled, updated each release; shared platforms like `github.io` and public names like `co.uk`, and names that cover one like `amazonaws.com`), plus an optional local file `/etc/furnace/whitelist-refuse.txt`. The upgrade cleans existing data once; old refused entries stay with a warning. IPs unchanged (ranges already work this way). |
 | 2026-11-01 | **`incident_id` is removed** (it can mean different things to different callers). A request that still sends it is refused (`400`). The upgrade deletes the stored values (schema 5); the columns stay empty so older followers and backups still fit. |
+| 2026-11-04 | **Docker comes first in v0.9.0**, before the SSH removal. Goal: anyone can deploy the leader and the follower as separate containers. **Two ways are supported:** (1) **two hosts, one container each**, for real use (keepalived on the host network moves the shared IP: real failover); (2) **one host, both containers** (one Compose file, private Docker network), **for testing and learning only** (no real failover: one host). **Kubernetes later**, only if someone asks (step 2 below). **Configuration the standard way:** Furnace ships `docker-compose.yml` (never edited) and an example `.env`; the admin edits only `.env` (role and IPs). Leader and follower use the same compose file, only `.env` differs. Optional later: an `init` command that asks the questions and writes `.env`. |
 
 ## Done
 
@@ -58,6 +59,13 @@ so the work can continue later exactly where it stopped.
 ### After v0.7.0: Docker support, both ways (user decision 2026-10-30)
 
 Not in v0.8.0 (user decision 2026-11-01): step 1 is coded and tested (Docker test 48/48) on the branch `docker`, parked until the user continues it. Containers stay unsupported on `main`.
+
+**Continue for v0.9.0 (user decision 2026-11-04).** `main` removed the Docker files on purpose (commit 86a3b9b),
+so a merge of `docker` brings nothing back: restore them from that commit's parent on a new branch from `main`.
+Then bring them up to date with `main`: replication every 20 seconds (container.py still says one minute), the
+URL list, export, the certificate fix, 90 days by default. Then: `.env` example + compose file that reads it, a
+one-host lab compose file (both containers, private network), README step-by-step guide for both ways, the
+Docker test for both, `NEXT-RELEASE.md` line. Image file `furnace-image-0.9.0.tar.gz` on the release.
 
 1. **Shared base + option A** (coded 2026-11-01 on the branch `docker`, Docker test 48/48, parked, not released):
    - One Furnace image (Debian 12 slim, the same bundled Flask and gunicorn). One container per server runs the
