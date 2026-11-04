@@ -1,6 +1,6 @@
 # Furnace roadmap
 
-State on 2026-11-04: **v0.8.0 is released** (`.deb` and `.rpm`). The list for the next version is in `docs/NEXT-RELEASE.md` (empty so far). Next work: Docker for v0.9.0 (decision 2026-11-04 below), then the SSH removal. Docker step 1 is coded and parked on the branch `docker` (not in v0.8.0). This file holds the plan for the next steps,
+State on 2026-11-04: **v0.8.0 is released** (`.deb` and `.rpm`). The list for the next version is in `docs/NEXT-RELEASE.md`. Docker (two hosts, and a one-host test lab) is coded on `main` for v0.9.0, not released. Next: the SSH removal. This file holds the plan for the next steps,
 so the work can continue later exactly where it stopped.
 
 ## Decisions so far
@@ -60,12 +60,14 @@ so the work can continue later exactly where it stopped.
 
 Not in v0.8.0 (user decision 2026-11-01): step 1 is coded and tested (Docker test 48/48) on the branch `docker`, parked until the user continues it. Containers stay unsupported on `main`.
 
-**Continue for v0.9.0 (user decision 2026-11-04).** `main` removed the Docker files on purpose (commit 86a3b9b),
-so a merge of `docker` brings nothing back: restore them from that commit's parent on a new branch from `main`.
-Then bring them up to date with `main`: replication every 20 seconds (container.py still says one minute), the
-URL list, export, the certificate fix, 90 days by default. Then: `.env` example + compose file that reads it, a
-one-host lab compose file (both containers, private network), README step-by-step guide for both ways, the
-Docker test for both, `NEXT-RELEASE.md` line. Image file `furnace-image-0.9.0.tar.gz` on the release.
+**Continued for v0.9.0 (user decision 2026-11-04), coded on `main` 2026-11-04, not released.** The Docker files
+came back from 376477a and follow `main` now: replication every 20 seconds, the Public Suffix List in the image,
+`whitelist-refuse.txt`, the URL list, 90 days, the health check with `-k`. New: `docker/.env.example` (the only
+file the admin edits; the compose file reads it with `env_file`), `docker/docker-compose.lab.yml` (one host,
+leader + follower + client on 203.0.113.0/24, test only), README 3.6 and 3.7, `tests/docker/lab.sh` (the README
+lab steps). Tests: unit 337, `tests/docker/run.sh` 56/56 (now on 198.51.100.0/24, so it runs next to the lab),
+`tests/docker/lab.sh` 18/18. Left for the release: a test on two real hosts with `network_mode: host` (two VMs),
+the image file `furnace-image-0.9.0.tar.gz`.
 
 1. **Shared base + option A** (coded 2026-11-01 on the branch `docker`, Docker test 48/48, parked, not released):
    - One Furnace image (Debian 12 slim, the same bundled Flask and gunicorn). One container per server runs the

@@ -1,0 +1,78 @@
+# Furnace TEST LAB on ONE host: leader, follower and a small client box on a private Docker network.
+#
+#   FOR TESTING AND LEARNING ONLY. One host means no real failover: if this host stops, both stop.
+#   For real use, run one container on each of two hosts (docker-compose.yml and .env).
+#
+# Nothing to change in this file. Steps (README, "Docker test lab on one host"):
+#   docker compose -f docker-compose.lab.yml up -d leader
+#   docker compose -f docker-compose.lab.yml create follower
+#   docker cp furnace-leader:/etc/furnace/furnace-peer-bundle.tar.gz bundle.tar.gz
+#   docker cp bundle.tar.gz furnace-follower:/etc/furnace/furnace-peer-bundle.tar.gz
+#   docker compose -f docker-compose.lab.yml up -d          (then delete bundle.tar.gz)
+# Remove everything, data too:  docker compose -f docker-compose.lab.yml down -v
+#
+# The network uses a documentation range (203.0.113.0/24) that is not used on real networks.
+# The shared IP 203.0.113.10 only exists inside Docker: test it from the client box (README 3.7), for example
+#   docker exec furnace-client curl -k -u paloalto:PASSWORD https://203.0.113.10/edl/blocklist.txt
+
+name: furnace-docker-lab       # the project name (volumes and network start with it)
+
+x-furnace: &furnace
+  image: furnace:0.9.0
+  restart: unless-stopped
+  cap_add: [NET_ADMIN, NET_RAW]   # only for keepalived (the shared IP and VRRP); not privileged
+  stop_grace_period: 20s
+
+x-settings: &settings
+  FURNACE_SHARED_IP: 203.0.113.10
+  FURNACE_SHARED_IP_PREFIX: "24"
+  # LAB ONLY: allow blocking the documentation ranges, so the README examples work here.
+  FURNACE_ALLOW_TEST_RANGES: "true"
+  TZ: UTC
+
+services:
+  leader:
+    <<: *furnace
+    container_name: furnace-leader
+    hostname: furnace-leader
+    environment:
+      <<: *settings
+      FURNACE_ROLE: leader
+      FURNACE_THIS_IP: 203.0.113.11
+      FURNACE_PEER_IP: 203.0.113.12
+    networks:
+      furnace-lab: {ipv4_address: 203.0.113.11}
+    volumes: [leader-config:/etc/furnace, leader-data:/var/lib/furnace]
+
+  follower:
+    <<: *furnace
+    container_name: furnace-follower
+    hostname: furnace-follower
+    environment:
+      <<: *settings
+      FURNACE_ROLE: follower
+      FURNACE_THIS_IP: 203.0.113.12
+      FURNACE_PEER_IP: 203.0.113.11
+    networks:
+      furnace-lab: {ipv4_address: 203.0.113.12}
+    volumes: [follower-config:/etc/furnace, follower-data:/var/lib/furnace]
+
+  # Plays the firewall and the API caller (it has curl). Uses the same image, runs nothing else.
+  client:
+    image: furnace:0.9.0
+    container_name: furnace-client
+    entrypoint: ["sleep", "infinity"]
+    init: true                    # stops at once on docker stop
+    networks:
+      furnace-lab: {ipv4_address: 203.0.113.50}
+
+networks:
+  furnace-lab:
+    ipam:
+      config: [{subnet: 203.0.113.0/24, gateway: 203.0.113.1}]
+
+volumes:
+  leader-config:
+  leader-data:
+  follower-config:
+  follower-data:
