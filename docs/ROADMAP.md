@@ -98,7 +98,8 @@ release: the image file `furnace-image-0.9.0.tar.gz`.
    - Failover as today: keepalived on the host network (`NET_ADMIN`, `NET_RAW`), two hosts, one shared IP.
    - `docker/docker-compose.yml` example. A Docker test (`tests/docker/run.sh`): two containers without
      `--privileged`, a fake list reader and a fake caller, replication, failover and restart with the volumes.
-   - Release: `furnace-image-0.8.0.tar.gz` (`docker load`) next to the `.deb` and `.rpm`.
+   - Release: `furnace-image-V.tar.gz` (`docker load`), `docker-compose.yml`, `.env.example` and
+     `docker-compose.lab.yml` next to the `.deb` and `.rpm`.
 2. **Option B: Kubernetes** (about 2 to 3 more sessions, with the high-availability phase):
    - The leader decision becomes pluggable: the role file from keepalived (today) or a Kubernetes lease.
    - Clients reach the leader through a Kubernetes Service.
@@ -117,4 +118,9 @@ release: the image file `furnace-image-0.9.0.tar.gz`.
   the raw `/var/log/audit/audit.log`, not with `ausearch -ts`. Put the VM back as it was afterwards.
 - Release: build the `.deb` in WSL (`packaging/build-deb.sh dist`), the `.rpm` in an `almalinux:9` container
   (`packaging/build-rpm.sh`), the image with `docker build -f docker/Dockerfile --build-arg VERSION=V -t furnace:V .` and
-  `docker save furnace:V | gzip > dist/furnace-image-V.tar.gz`, then `git tag`, `git push`, `gh release create` with the three files.
+  `docker save furnace:V | gzip > dist/furnace-image-V.tar.gz`, then `git tag`, `git push`, `gh release create` with
+  **all of these files** (user decision 2026-11-04: Docker is important, everything for it goes on the release):
+  the `.deb`, the `.rpm`, `furnace-image-V.tar.gz`, `docker-compose.yml`, `.env.example` (upload it as
+  `env.example`: GitHub drops a leading dot) and `docker-compose.lab.yml`. The release notes get a Docker section
+  (how to load the image, the two files, README 3.6 and 3.7). Before the release: the Docker tests
+  (`tests/docker/run.sh`, `tests/docker/lab.sh`) and the two-VM API test (`furnace-lab/docker-vm/api-test.sh`).
