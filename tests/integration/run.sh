@@ -5,6 +5,8 @@
 #
 #   tests/integration/run.sh [SYSTEM]     run the test on SYSTEM (default ubuntu:24.04)
 #   KEEP=1 tests/integration/run.sh       leave the containers running afterwards
+#   NET_PREFIX=10.99.0 tests/integration/run.sh   another /24 for the test network (default 192.0.2), when
+#                                          192.0.2.0/24 is already used by another Docker network
 #
 # SYSTEM is a Docker image name: ubuntu:22.04, ubuntu:24.04, debian:12, debian:13 (.deb), or
 # almalinux:8, almalinux:9, almalinux:10, rockylinux:9, oraclelinux:9, fedora:42, amazonlinux:2023 (.rpm).
@@ -24,11 +26,12 @@ LEADER=furnace-leader
 FOLLOWER=furnace-follower
 FW=furnace-fw
 XSOAR=furnace-xsoar
-LEADER_IP=192.0.2.11
-FOLLOWER_IP=192.0.2.12
-SHARED_IP=192.0.2.10
-FW_IP=192.0.2.50
-XSOAR_IP=192.0.2.60
+NET_PREFIX="${NET_PREFIX:-192.0.2}"
+LEADER_IP=$NET_PREFIX.11
+FOLLOWER_IP=$NET_PREFIX.12
+SHARED_IP=$NET_PREFIX.10
+FW_IP=$NET_PREFIX.50
+XSOAR_IP=$NET_PREFIX.60
 TEST_IP=198.51.100.77
 case "$SYSTEM" in
     ubuntu:*|debian:*) KIND=deb; DOCKERFILE=Dockerfile; FWTOOL=ufw; NGINX_CONF=/etc/nginx/sites-enabled/furnace; NGINX_GROUP=www-data ;;
@@ -91,7 +94,7 @@ else
 fi
 check "the package was built" test -s "$PKG"
 remove_lab
-docker network create --subnet 192.0.2.0/24 --gateway 192.0.2.1 "$NET" >/dev/null
+docker network create --subnet "$NET_PREFIX.0/24" --gateway "$NET_PREFIX.1" "$NET" >/dev/null
 
 start_box() {
     docker run -d --name "$1" --hostname "$1" --network "$NET" --ip "$2" \

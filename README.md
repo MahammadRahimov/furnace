@@ -279,21 +279,23 @@ The container uses the host network (`network_mode: host`) and gets only two ext
 **The two files.** Furnace gives you `docker/docker-compose.yml` (how to run the container; never edit it) and
 `docker/.env.example` (your settings). Both hosts use the same `docker-compose.yml`; only `.env` differs.
 
-**1. Load the image** (on both hosts). It is a file on the GitHub release:
-
-```bash
-gh release download v0.9.0 -R MahammadRahimov/furnace -p 'furnace-image-*.tar.gz'
-docker load -i furnace-image-0.9.0.tar.gz        # "Loaded image: furnace:0.9.0"
-```
-
-Or build it from the repository: `docker build -f docker/Dockerfile --build-arg VERSION=0.9.0 -t furnace:0.9.0 .`
-
-**2. Leader (host A).** Make a folder with the two files, then write your settings:
+**1. Download and load** (on both hosts). The image and the two files are on the GitHub release:
 
 ```bash
 mkdir ~/furnace && cd ~/furnace
-cp /path/to/furnace/docker/docker-compose.yml /path/to/furnace/docker/.env.example .
-cp .env.example .env
+R=https://github.com/MahammadRahimov/furnace/releases/download/v0.9.0
+curl -fLO $R/furnace-image-0.9.0.tar.gz -fLO $R/docker-compose.yml -fLO $R/env.example
+docker load -i furnace-image-0.9.0.tar.gz        # "Loaded image: furnace:0.9.0"
+mv env.example .env                              # GitHub drops the leading dot of .env.example
+```
+
+Or take them from the repository: `docker build -f docker/Dockerfile --build-arg VERSION=0.9.0 -t furnace:0.9.0 .`,
+then copy `docker/docker-compose.yml` and `docker/.env.example` (as `.env`) into the folder.
+
+**2. Leader (host A).** In the folder, write your settings:
+
+```bash
+cd ~/furnace
 nano .env
 ```
 
@@ -417,7 +419,9 @@ failover and the API, in a few minutes. It also runs on Docker Desktop (Windows,
 
 `docker/docker-compose.lab.yml` has everything filled in: a leader (`203.0.113.11`), a follower (`.12`), the
 shared IP `203.0.113.10` and a small **client** box (`.50`) that plays the firewall and the caller. These addresses
-are a documentation range and exist only inside Docker. Nothing to change. From the folder `docker/`:
+are a documentation range and exist only inside Docker. Nothing to change. Load the image first (step 1 of
+3.6: `furnace-image-0.9.0.tar.gz`; `docker-compose.lab.yml` is on the release too). From the folder with
+`docker-compose.lab.yml` (in the repository: `docker/`):
 
 ```bash
 docker compose -f docker-compose.lab.yml up -d leader client
