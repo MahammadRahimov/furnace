@@ -66,8 +66,11 @@ came back from 376477a and follow `main` now: replication every 20 seconds, the 
 file the admin edits; the compose file reads it with `env_file`), `docker/docker-compose.lab.yml` (one host,
 leader + follower + client on 203.0.113.0/24, test only), README 3.6 and 3.7, `tests/docker/lab.sh` (the README
 lab steps). Tests: unit 337, `tests/docker/run.sh` 56/56 (now on 198.51.100.0/24, so it runs next to the lab),
-`tests/docker/lab.sh` 18/18. Left for the release: a test on two real hosts with `network_mode: host` (two VMs),
-the image file `furnace-image-0.9.0.tar.gz`.
+`tests/docker/lab.sh` 18/18. **Two-VM test PASSED 2026-11-04** (Hyper-V, Ubuntu 24.04, Docker 29, the README 3.6 steps,
+`network_mode: host`): docker stop on the leader 40/40 list downloads OK; hard crash of the leader VM (sysrq reboot)
+44/45 (one failure, about 3 s), no data lost, the crashed host restarted Furnace by itself as the standby. It found
+one README bug: `./config` is root-only, so the bundle is taken out with `docker cp` (fixed). Left for the
+release: the image file `furnace-image-0.9.0.tar.gz`.
 
 1. **Shared base + option A** (coded 2026-11-01 on the branch `docker`, Docker test 48/48, parked, not released):
    - One Furnace image (Debian 12 slim, the same bundled Flask and gunicorn). One container per server runs the

@@ -328,18 +328,28 @@ FURNACE_PEER_IP=192.0.2.11       # host A
 FURNACE_SHARED_IP=192.0.2.10
 ```
 
-Copy the bundle from the leader first, then start:
+Copy the bundle from the leader first, then start. The folder `./config` belongs to root and is closed to normal
+users (on purpose), so take the bundle out of the container with `docker cp`. It needs no sudo:
 
 ```bash
+# on the leader (host A): a copy in your home folder, readable only by you
+docker cp furnace:/etc/furnace/furnace-peer-bundle.tar.gz ~/ && chmod 600 ~/furnace-peer-bundle.tar.gz
+
+# on the follower (host B)
 mkdir -p ~/furnace/config
-scp you@192.0.2.11:furnace/config/furnace-peer-bundle.tar.gz ~/furnace/config/
+scp you@192.0.2.11:furnace-peer-bundle.tar.gz ~/furnace/config/
 cd ~/furnace && docker compose up -d
 docker logs furnace                     # "taken from the leader's bundle" and "Ready."
+
+# on the leader again: delete the copy
+rm ~/furnace-peer-bundle.tar.gz
 ```
 
 The follower takes the certificate and the secrets from the bundle and deletes it. Without the bundle it stops,
-says what to do, and tries again by itself (so it starts as soon as the file is there). Delete any other copy
-of the bundle you made for the transfer.
+says what to do, and tries again by itself (so it starts as soon as the file is there).
+
+On the host, `ls -l ~/furnace` shows other owner names for `config` and `data` (for example `systemd-journal`).
+That is normal: the container's own users have numbers that mean other names on the host.
 
 **4. The first API token and the list login** (on the leader). They are shown once and never written to the
 container log. The follower gets them with the next replication.
@@ -1422,8 +1432,11 @@ replication timer was not allowed to run ssh); it is fixed.
 
 Be aware of these limits before you go live:
 
-- **Docker on two real hosts.** The image was tested with two containers on one Docker host (a test network),
-  not with `network_mode: host` on two machines. Test a failover on your hosts before you go live.
+- **Docker on physical servers, VMware and clouds.** The two-host setup was tested on two Hyper-V VMs (Ubuntu
+  24.04, Docker 29, `network_mode: host`): the steps of section 3.6, `docker stop` on the leader (no failed list
+  download) and a hard crash of the leader VM (one failed download, about 3 seconds; no data lost; the crashed
+  host came back as the standby by itself). Not on physical servers, VMware or a cloud network: test a failover
+  on your hosts before you go live.
 - **A real Palo Alto firewall.** The EDL download, also with the EDL login, was tested with curl from a container.
   The PAN-OS menus in this README come from documentation and may differ in your version.
 - **A real XSOAR server.** The API calls were tested with curl. XSOAR's own way to trust a certificate was not

@@ -6,8 +6,9 @@
 #   cp .env.example .env && nano .env      then:   docker compose up -d
 #
 # First start: the leader makes the certificate, the secrets and the follower bundle
-# ./config/furnace-peer-bundle.tar.gz. Copy that file to ./config/ on the follower host
-# (it is secret; the follower deletes it after reading), then start the follower.
+# furnace-peer-bundle.tar.gz. Take it out with: docker cp furnace:/etc/furnace/furnace-peer-bundle.tar.gz ~/
+# copy it to ./config/ on the follower host (it is secret; the follower deletes it after reading),
+# delete your copy, then start the follower.
 # Then make the first API token and the list login on the leader:
 #   docker exec -it furnace furnace token add api
 #   docker exec -it furnace furnace edl-user add paloalto
