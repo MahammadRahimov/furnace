@@ -1,6 +1,6 @@
 # Furnace roadmap
 
-State on 2026-11-04: **v0.8.0 is released** (`.deb` and `.rpm`). The list for the next version is in `docs/NEXT-RELEASE.md`. Docker (two hosts, and a one-host test lab) is coded on `main` for v0.9.0, not released. Next: the SSH removal. This file holds the plan for the next steps,
+State on 2026-11-04: **v0.9.0 is released** (`.deb`, `.rpm` and the Docker image with its compose files). The list for the next version is in `docs/NEXT-RELEASE.md`. Next: the SSH removal. This file holds the plan for the next steps,
 so the work can continue later exactly where it stopped.
 
 ## Decisions so far
@@ -40,6 +40,7 @@ so the work can continue later exactly where it stopped.
 | 3 | v0.6.0 | Token permissions: a grid of Blocklist / Whitelist and Read / Write (write includes read). Each token has its own expiry, chosen when it is made (no default). `token edit`, `rotate` keeps the days, last use, warnings in `status` and the nightly cleanup log. Setup makes one token and asks its name, boxes and days. Tokens of 0.5 keep their rights and never expire. Integration 108/108 (`.deb`) and 107/107 (`.rpm`) on all 11 systems. |
 | 4 | v0.7.0 | Permanent IPs (`permanent: true` never expires; the same IP again changes nothing). The archive is a record of every different IP and domain ever blocked (first and last blocked, times blocked). Domains never expire. Schema 4 with a migration from 0.6. Unit tests 175. Integration 116/116 (`.deb`) and 115/115 (`.rpm`) on all 11 systems. |
 | 5 | v0.8.0 | Blocklist files through the API, the URL blocklist, replication over HTTPS every 20 seconds (SSH fallback), the domain whitelist protects subdomains and refuses shared platforms (Public Suffix List), the whitelist check, export and upload again, `incident_id` removed, 90 days by default, keepalived crash and expired-certificate fixes, the RHEL 8 certificate fix. Unit tests 323. Integration 159/159 (`.deb`) and 158/158 (`.rpm`) on all 11 systems. |
+| 6 | v0.9.0 | Docker: one image for the leader and the follower on two hosts (`docker-compose.yml` + `.env`, keepalived on the host network, HTTPS replication every 20 seconds, a built-in process manager), a one-host test lab, the image and the compose files on the release. Unit tests 338 (Python 3.9, 3.10, 3.13). Integration 159/159 (`.deb`) and 158/158 (`.rpm`) on all 11 systems. Docker 56/56 and lab 18/18; two Hyper-V VMs: failover, host down, API 120/120. |
 
 ## Next
 
@@ -60,7 +61,7 @@ so the work can continue later exactly where it stopped.
 
 Not in v0.8.0 (user decision 2026-11-01): step 1 is coded and tested (Docker test 48/48) on the branch `docker`, parked until the user continues it. Containers stay unsupported on `main`.
 
-**Continued for v0.9.0 (user decision 2026-11-04), coded on `main` 2026-11-04, not released.** The Docker files
+**Continued for v0.9.0 (user decision 2026-11-04), released in v0.9.0 on 2026-11-04.** The Docker files
 came back from 376477a and follow `main` now: replication every 20 seconds, the Public Suffix List in the image,
 `whitelist-refuse.txt`, the URL list, 90 days, the health check with `-k`. New: `docker/.env.example` (the only
 file the admin edits; the compose file reads it with `env_file`), `docker/docker-compose.lab.yml` (one host,

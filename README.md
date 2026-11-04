@@ -108,7 +108,7 @@ You need one file:
 - **Ubuntu and Debian:** `furnace_<version>_all.deb`, installed with `sudo apt install ./FILE`.
 - **Red Hat family, Fedora, Amazon Linux:** `furnace-<version>-1.noarch.rpm`, installed with `sudo dnf install ./FILE`.
 
-The examples below use version 0.8.0 and the `.deb`. With the `.rpm`, use `dnf` where they say `apt`.
+The examples below use version 0.9.0 and the `.deb`. With the `.rpm`, use `dnf` where they say `apt`.
 Everything else (setup, questions, the `furnace` command) is the same on every system.
 
 ### 3.1 Get the package
@@ -116,19 +116,19 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
 - **Download it** from the GitHub releases page: <https://github.com/MahammadRahimov/furnace/releases>.
   The repository is private, so log in to GitHub first. Or, with the GitHub command line tool:
   ```bash
-  gh release download v0.8.0 -R MahammadRahimov/furnace -p '*.deb'    # or -p '*.rpm'
+  gh release download v0.9.0 -R MahammadRahimov/furnace -p '*.deb'    # or -p '*.rpm'
   ```
 - **Or build it yourself:** `packaging/build-deb.sh` on Ubuntu, Debian or WSL, or `packaging/build-rpm.sh` on a
   Red Hat family system (needs `rpm-build`). The file lands in `dist/`.
   The build needs `curl` and `python3`. The first build downloads the bundled libraries once (into
   `build/vendor-cache/`) and stops if one does not match its SHA-256 hash.
-- Copy it to both servers, for example: `scp furnace_0.8.0_all.deb you@SERVER_IP:~/`
+- Copy it to both servers, for example: `scp furnace_0.9.0_all.deb you@SERVER_IP:~/`
 
 ### 3.2 Leader
 
 1. Install the package:
    ```bash
-   sudo apt install ./furnace_0.8.0_all.deb
+   sudo apt install ./furnace_0.9.0_all.deb
    ```
    apt also installs what Furnace needs from the system: nginx, keepalived, Python and a few tools.
    Nothing starts yet.
@@ -190,7 +190,7 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    ```
 2. On the follower, install the package and run setup:
    ```bash
-   sudo apt install ./furnace_0.8.0_all.deb
+   sudo apt install ./furnace_0.9.0_all.deb
    sudo furnace setup
    ```
 3. Answer `follower`. Setup finds the bundle in your home folder, in `/root` or in `/tmp`, or asks where it is.
@@ -509,8 +509,8 @@ Setup cannot do these things for you.
 - [ ] List reader (its download source address) -> shared IP, TCP 443.
 - [ ] Caller (and any helper servers it uses, for example SOAR engines) -> shared IP, TCP 443.
 - [ ] Leader <-> follower: HTTPS (TCP 443) both ways, for replication and the health check.
-- [ ] Leader <-> follower: SSH (TCP 22) both ways. Version 0.8 needs it only as the replication fallback while one
-  server still runs an older Furnace (during an upgrade). The version after 0.8 no longer uses it.
+- [ ] Leader <-> follower: SSH (TCP 22) both ways. Versions 0.8 and 0.9 need it only as the replication fallback while one
+  server still runs an older Furnace (during an upgrade). The next version no longer uses it.
 - [ ] Leader <-> follower: VRRP (IP protocol 112) both ways, unicast.
 - [ ] The network must allow the shared IP to move between the two servers (ARP updates). In a virtual
       environment (VMware, Hyper-V, cloud), check that MAC spoofing / IP moves are allowed for these VMs.
@@ -894,7 +894,7 @@ The new key also gives a new replication secret. Both servers get it from the sa
 IPs). Callers and list readers cannot reach it. It is for keepalived and the admins.
 
 ```json
-{"status": "ok", "version": "0.8.0", "role": "leader", "ips": 1234, "domains": 56}
+{"status": "ok", "version": "0.9.0", "role": "leader", "ips": 1234, "domains": 56}
 ```
 
 ---
@@ -1035,7 +1035,7 @@ Export on the server (`sudo furnace export ips -o ips.csv`) or through the API
 
 ```
 # furnace-export ips v1
-# Furnace 0.8.0, exported 2026-11-03T10:00:00Z. Upload it again with /api/v1/ips/bulk or furnace import-ips.
+# Furnace 0.9.0, exported 2026-11-03T10:00:00Z. Upload it again with /api/v1/ips/bulk or furnace import-ips.
 ip,added_at,added_by,reason,permanent,counted_from
 203.0.113.5,2026-10-01T10:00:00Z,soar,phishing,no,2026-10-01T10:00:00Z
 ```
@@ -1193,9 +1193,9 @@ The nightly cleanup:
   `https://PEER_IP/replica/snapshot`, with the replication secret both servers share. nginx lets only the other
   server reach this address. The follower checks the secret, loads the snapshot, rebuilds its EDL files and
   answers at once, so the leader knows that it worked. `sudo furnace status` on the leader shows the last result.
-- **SSH fallback (this version only):** if HTTPS does not work, for example while the follower still runs an older
+- **SSH fallback (0.8 and 0.9 only):** if HTTPS does not work, for example while the follower still runs an older
   Furnace during an upgrade, the leader pushes the snapshot over SSH as before (a dedicated key that can only run
-  the receive command). `furnace status` then says so. The version after 0.8 removes SSH replication.
+  the receive command). `furnace status` then says so. The next version removes SSH replication.
 - The follower refuses all changes while it is not the leader (`503 not_leader`).
 
 ### 10.1 Risks
@@ -1260,13 +1260,16 @@ Logs: `journalctl -u furnace-api`, `/var/log/nginx/furnace-access.log`.
 **Upgrade:** install the new package. Do the follower first, then the leader.
 
 ```bash
-sudo apt install ./furnace_0.8.0_all.deb
+sudo apt install ./furnace_0.9.0_all.deb
 ```
 
 The package runs `furnace setup --upgrade` by itself. It uses the saved answers and asks no questions.
 Data, tokens and the certificate are kept. The API is reloaded without downtime, and keepalived is restarted only
 if its settings changed, so an upgrade does not move the shared IP. If you change answers that affect keepalived
 (for example the VRRP router ID), the restart can move the shared IP to the other server. That is safe.
+
+**From 0.8 to 0.9:** nothing to do on the servers. 0.9 adds the Docker image (section 3.6); the `.deb` and `.rpm`
+work as in 0.8.
 
 **From 0.7 to 0.8:** nothing to do. Replication now goes over HTTPS. Setup makes the replication secret from
 the certificate key both servers already share, so no new bundle is needed. While one server is upgraded and the
@@ -1393,7 +1396,7 @@ a failover.
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
-Results for v0.8.0 (every system with the same final package):
+Results for v0.9.0 (every system with the same final package):
 
 | System | Checks |
 |---|---|
@@ -1421,8 +1424,12 @@ expired certificate (the shared IP stays).
 On the Red Hat family the same test installs the `.rpm` with dnf, uses firewalld, and checks that `dnf remove`
 keeps the data and removes the firewall rules.
 
-The unit tests also pass with the bundled libraries on Python 3.9 (the oldest supported) and Python 3.13
+The unit tests (338) also pass with the bundled libraries on Python 3.9 (the oldest supported) and Python 3.13
 (Debian 13).
+
+Docker results for v0.9.0 (the final code): `tests/docker/run.sh` 56 of 56, `tests/docker/lab.sh` 18 of 18,
+and on the two Hyper-V VMs (section 14) every API route and every `furnace` command through the shared IP, 120
+of 120.
 
 **SELinux test** on a real AlmaLinux 9.8 VM with SELinux enforcing (26 of 26 checks, v0.5.0): install with dnf,
 setup without questions (secrets written to the root-only file), the SELinux labels, keepalived making the server
