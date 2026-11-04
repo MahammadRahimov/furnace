@@ -72,7 +72,9 @@ lab steps). Tests: unit 337, `tests/docker/run.sh` 56/56 (now on 198.51.100.0/24
 test (power off, host stays off): leader host off 17 min, the other served everything, the returning host caught
 up within 20 s as the standby; the reverse (new leader host off) and follower host off: 33/33. Fixed after it: the
 container logged "replication FAILED" every 20 s while a host was down; now the first failure, a reminder every
-10 minutes and "works again after N failed tries". The upgrade (new image + docker compose up -d) kept the roles. It found
+10 minutes and "works again after N failed tries". The upgrade (new image + docker compose up -d) kept the roles. Full API test
+on the two VMs (furnace-lab/docker-vm/api-test.sh): every API route and every furnace command through the shared
+IP, then all 8 lists the same on both hosts: 120/120. It found
 one README bug: `./config` is root-only, so the bundle is taken out with `docker cp` (fixed). Left for the
 release: the image file `furnace-image-0.9.0.tar.gz`.
 
