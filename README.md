@@ -1435,7 +1435,8 @@ Be aware of these limits before you go live:
 - **Docker on physical servers, VMware and clouds.** The two-host setup was tested on two Hyper-V VMs (Ubuntu
   24.04, Docker 29, `network_mode: host`): the steps of section 3.6, `docker stop` on the leader (no failed list
   download) and a hard crash of the leader VM (one failed download, about 3 seconds; no data lost; the crashed
-  host came back as the standby by itself). Not on physical servers, VMware or a cloud network: test a failover
+  host came back as the standby by itself). Also each host powered off for minutes (leader, then the new leader, then
+  the follower): the other host served everything, and the returning host caught up within 20 seconds. Not on physical servers, VMware or a cloud network: test a failover
   on your hosts before you go live.
 - **A real Palo Alto firewall.** The EDL download, also with the EDL login, was tested with curl from a container.
   The PAN-OS menus in this README come from documentation and may differ in your version.

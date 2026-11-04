@@ -47,6 +47,7 @@ BUNDLE_FILES = ("tls/furnace.crt", "tls/furnace.key", "secrets/keepalived-passwo
 USER = "furnace"
 WEB_GROUP = "www-data"
 REPLICATE_EVERY = 20  # seconds, as the timer on the servers
+REPLICA_REMIND = 600  # seconds: while replication keeps failing, log a reminder this often
 DAILY_JOBS = {"backup": (1, 30, False), "cleanup": (2, 30, True)}  # name: (hour, minute, leader only)
 
 
@@ -391,6 +392,10 @@ class Supervisor:
         self.job: tuple[str, subprocess.Popen] | None = None
         self.next_replica = time.monotonic() + 10
         self.replica_state = ""
+        self.replica_failures = 0        # failed tries in a row
+        self.replica_logged_ok = False   # the success was logged (once, until the next failure)
+        self.replica_last_failure = ""   # the last failure text that was logged
+        self.replica_last_log = 0.0      # when a failure was last logged (monotonic seconds)
 
     def spawn(self, p: Process) -> None:
         extra = {"user": USER, "group": USER, "umask": 0o027} if p.as_user else {}
@@ -409,16 +414,41 @@ class Supervisor:
         self.job = None
         text = (proc.stdout.read() if proc.stdout else "").strip()
         if name == "replicate":
-            state = text.splitlines()[-1] if text else ""
-            ok = proc.returncode == 0
-            # Every 20 seconds: log only a change (first success, a failure, back to normal).
-            if not ok or not self.replica_state.startswith("ok"):
-                log(f"replication: {state or 'no output'}" if ok else f"replication FAILED: {state}")
-            self.replica_state = ("ok " if ok else "failed ") + state
+            line = self.note_replication(proc.returncode == 0, text.splitlines()[-1] if text else "")
+            if line:
+                log(line)
         else:
             for line in text.splitlines():
                 log(f"{name}: {line}")
             log(f"{name} {'done' if proc.returncode == 0 else f'FAILED (exit {proc.returncode})'}.")
+
+    def note_replication(self, ok: bool, state: str, now: float | None = None) -> str:
+        """Remember the result of one replication. Returns the line to log, or "" for nothing.
+
+        It runs every 20 seconds, so only changes are logged: the first success, the first failure,
+        a different failure, and back to normal. While the other host stays down, one reminder
+        every REPLICA_REMIND seconds instead of a line every 20 seconds."""
+        now = time.monotonic() if now is None else now
+        self.replica_state = ("ok " if ok else "failed ") + state
+        if ok:
+            failures, self.replica_failures = self.replica_failures, 0
+            if failures:
+                self.replica_logged_ok = True
+                return f"replication works again after {failures} failed tries: {state or 'no output'}"
+            if not self.replica_logged_ok:
+                self.replica_logged_ok = True
+                return f"replication: {state or 'no output'}"
+            return ""
+        self.replica_failures += 1
+        self.replica_logged_ok = False
+        if (self.replica_failures == 1 or state != self.replica_last_failure
+                or now - self.replica_last_log >= REPLICA_REMIND):
+            self.replica_last_failure, self.replica_last_log = state, now
+            if self.replica_failures == 1:
+                return f"replication FAILED: {state}"
+            return (f"replication still FAILED ({self.replica_failures} tries in a row): {state}. "
+                    f"Next reminder in {REPLICA_REMIND // 60} minutes unless it changes.")
+        return ""
 
     def role(self) -> str:
         try:

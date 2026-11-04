@@ -160,3 +160,21 @@ def test_the_refuse_text_is_the_same_as_setup():
 def test_the_image_has_the_public_suffix_list():
     dockerfile = (Path(__file__).resolve().parents[1] / "docker/Dockerfile").read_text(encoding="utf-8")
     assert "furnace/public_suffix_list.dat" in dockerfile
+
+
+def test_replication_log_only_changes_and_a_reminder_while_down():
+    s = container.ContainerSettings(role="leader", this_ip="192.0.2.11", peer_ip="192.0.2.12", shared_ip="192.0.2.10")
+    sup = container.Supervisor(s)
+    note = sup.note_replication
+    assert note(True, "sent (1 IPs)", 0) == "replication: sent (1 IPs)"
+    assert note(True, "sent (2 IPs)", 20) == ""                       # every 20 s: nothing new
+    down = "cannot reach the other server at 192.0.2.12: No route to host"
+    assert note(False, down, 40) == f"replication FAILED: {down}"
+    lines = [note(False, down, 40 + 20 * i) for i in range(1, 29)]     # the other host stays down 9+ minutes
+    assert lines == [""] * 28
+    reminder = note(False, down, 40 + container.REPLICA_REMIND)
+    assert reminder.startswith("replication still FAILED (30 tries in a row)") and down in reminder
+    assert note(False, "the other server refused the secret", 660).startswith("replication still FAILED")  # a new reason
+    assert note(True, "sent (3 IPs)", 680) == "replication works again after 31 failed tries: sent (3 IPs)"
+    assert note(True, "sent (3 IPs)", 700) == ""
+    assert sup.replica_state == "ok sent (3 IPs)"

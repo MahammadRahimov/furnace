@@ -68,7 +68,11 @@ leader + follower + client on 203.0.113.0/24, test only), README 3.6 and 3.7, `t
 lab steps). Tests: unit 337, `tests/docker/run.sh` 56/56 (now on 198.51.100.0/24, so it runs next to the lab),
 `tests/docker/lab.sh` 18/18. **Two-VM test PASSED 2026-11-04** (Hyper-V, Ubuntu 24.04, Docker 29, the README 3.6 steps,
 `network_mode: host`): docker stop on the leader 40/40 list downloads OK; hard crash of the leader VM (sysrq reboot)
-44/45 (one failure, about 3 s), no data lost, the crashed host restarted Furnace by itself as the standby. It found
+44/45 (one failure, about 3 s), no data lost, the crashed host restarted Furnace by itself as the standby. Host-down
+test (power off, host stays off): leader host off 17 min, the other served everything, the returning host caught
+up within 20 s as the standby; the reverse (new leader host off) and follower host off: 33/33. Fixed after it: the
+container logged "replication FAILED" every 20 s while a host was down; now the first failure, a reminder every
+10 minutes and "works again after N failed tries". The upgrade (new image + docker compose up -d) kept the roles. It found
 one README bug: `./config` is root-only, so the bundle is taken out with `docker cp` (fixed). Left for the
 release: the image file `furnace-image-0.9.0.tar.gz`.
 
