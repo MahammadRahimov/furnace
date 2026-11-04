@@ -283,8 +283,10 @@ The container uses the host network (`network_mode: host`) and gets only two ext
 
 ```bash
 mkdir ~/furnace && cd ~/furnace
-R=https://github.com/MahammadRahimov/furnace/releases/download/v0.9.0
-curl -fLO $R/furnace-image-0.9.0.tar.gz -fLO $R/docker-compose.yml -fLO $R/env.example
+gh release download v0.9.0 -R MahammadRahimov/furnace -p 'furnace-image-*.tar.gz' -p docker-compose.yml -p env.example
+# without gh (only when the repository is public):
+#   R=https://github.com/MahammadRahimov/furnace/releases/download/v0.9.0
+#   curl -fLO $R/furnace-image-0.9.0.tar.gz -fLO $R/docker-compose.yml -fLO $R/env.example
 docker load -i furnace-image-0.9.0.tar.gz        # "Loaded image: furnace:0.9.0"
 mv env.example .env                              # GitHub drops the leading dot of .env.example
 ```
