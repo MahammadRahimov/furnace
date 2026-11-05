@@ -12,7 +12,13 @@ How a release happens (user decision 2026-11-01):
 
 ## What changes
 
-Nothing yet.
+Nothing built yet.
+
+Decided, not started (user decision 2026-11-05): the package (`furnace setup`) configures the host firewall
+that is ACTIVE, not the one that is only installed. Today it picks ufw on Ubuntu whenever ufw is installed, so on
+an Ubuntu server that runs firewalld it turns on ufw as a second firewall. New rule: firewalld running -> firewalld;
+ufw active -> ufw; both active -> stop and say so; none active -> the installed one, and ask before turning it on.
+Plus an integration test: Ubuntu with firewalld running.
 
 Already decided (user decision 2026-11-01): SSH replication is removed (HTTPS only). Not started.
 
