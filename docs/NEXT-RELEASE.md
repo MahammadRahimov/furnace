@@ -15,3 +15,7 @@ How a release happens (user decision 2026-11-01):
 Nothing yet.
 
 Already decided (user decision 2026-11-01): SSH replication is removed (HTTPS only). Not started.
+
+To talk about first (user, 2026-11-05): an "external keepalived" mode for Docker. The host runs keepalived, not
+the container. Needs: a setting that turns off the built-in keepalived, a notify script that writes the role
+file for the container, and a health check on the host. Nothing decided yet.
