@@ -175,6 +175,7 @@ EOF
 out="$(on "$LEADER" "$FPY /root/answer.py /root/answers.txt -- furnace setup" 2>&1)" && rc=0 || rc=$?
 printf '%s\n' "$out"
 check "leader setup finished with the self-test passed" [ "$rc" = 0 ]
+check "the host firewall was off: setup asked, then turned it on" grep -q "was off: turned it on" <<< "$out"
 check "a wrong answer is explained and asked again" grep -q "PEER_IP '999.1.1.1' is not a valid IPv4 address" <<< "$out"
 check "an IP as the network card is explained" grep -q "is an IP address, not a network card name" <<< "$out"
 check "a wrong box number is explained" grep -q "Type 1, 2, 3 or 4" <<< "$out"
@@ -206,16 +207,18 @@ check "the EDL users file has a SHA-512 hash, readable by nginx only" \
     on "$LEADER" "grep -q '^lists:\\\$6\\\$' /var/lib/furnace-auth/edl-users && [ \"\$(stat -c '%U %G %a' /var/lib/furnace-auth/edl-users)\" = 'furnace $NGINX_GROUP 640' ]"
 check "cleanup timer runs on the leader" on "$LEADER" "systemctl is-active --quiet furnace-cleanup.timer"
 
-step "Set up the follower (bundle copied from the leader, only two questions)"
+step "Set up the follower (bundle copied from the leader: the role, the card and turning on the host firewall)"
 copy_between "$LEADER" /root/furnace-peer-bundle.tar.gz "$FOLLOWER" /root/furnace-peer-bundle.tar.gz
 put "$FOLLOWER" /root/answers.txt <<EOF
 leader or the follower?${TAB}follower
 Network card name [${TAB}
+own firewall ($FWTOOL)?${TAB}
 Set up Furnace with these settings?${TAB}y
 EOF
 out="$(on "$FOLLOWER" "$FPY /root/answer.py /root/answers.txt -- furnace setup" 2>&1)" && rc=0 || rc=$?
 printf '%s\n' "$out"
 check "follower setup finished with the self-test passed" [ "$rc" = 0 ]
+check "the follower asked before it turned on its host firewall" grep -q "Turn on and set up this server's own firewall ($FWTOOL)?" <<< "$out"
 check "follower took its settings from the bundle" on "$FOLLOWER" "grep -qx 'THIS_IP=$FOLLOWER_IP' /etc/furnace/setup.conf && grep -qx 'PEER_IP=$LEADER_IP' /etc/furnace/setup.conf && grep -qx 'API_ALLOW_FROM=$XSOAR_IP' /etc/furnace/setup.conf"
 check "same keepalived password on both" [ "$(on "$LEADER" 'grep ^KEEPALIVED_PASSWORD= /etc/furnace/setup.conf')" = "$(on "$FOLLOWER" 'grep ^KEEPALIVED_PASSWORD= /etc/furnace/setup.conf')" ]
 check "follower does not own the shared IP" on "$FOLLOWER" "! ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"

@@ -106,14 +106,39 @@ else
     NGINX_GROUP=nginx
     SSH_UNIT=sshd
 fi
-# The host firewall tool on this server: ufw (Debian family), firewalld (Red Hat family), or none.
-if [ "$FAMILY" = "debian" ] && command -v ufw >/dev/null 2>&1; then
-    HOST_FW_TOOL=ufw
-elif command -v firewall-cmd >/dev/null 2>&1; then
-    HOST_FW_TOOL=firewalld
-else
-    HOST_FW_TOOL=none
+# The host firewall. Furnace sets up the one that is ACTIVE, not the one that is only installed:
+#   firewalld running -> firewalld; ufw active -> ufw; both active -> stop (every packet must pass both);
+#   none active -> the installed one, turned on only after a yes; none installed -> leave it alone.
+# FW_ACTIVE: ufw, firewalld, both or none. HOST_FW_TOOL: the tool setup offers (ufw, firewalld or none).
+ufw_installed() { command -v ufw >/dev/null 2>&1; }
+firewalld_installed() { command -v firewall-cmd >/dev/null 2>&1; }
+ufw_active() { ufw_installed && grep -q '^Status: active' <<< "$(ufw status 2>/dev/null || true)"; }
+firewalld_active() { firewalld_installed && systemctl is-active --quiet firewalld; }
+if ufw_active && firewalld_active; then FW_ACTIVE=both
+elif firewalld_active; then FW_ACTIVE=firewalld
+elif ufw_active; then FW_ACTIVE=ufw
+else FW_ACTIVE=none
 fi
+case "$FW_ACTIVE" in
+    ufw|firewalld) HOST_FW_TOOL="$FW_ACTIVE" ;;
+    *)  # both or none active: the usual tool of this family first
+        if [ "$FAMILY" = "debian" ] && ufw_installed; then HOST_FW_TOOL=ufw
+        elif firewalld_installed; then HOST_FW_TOOL=firewalld
+        elif ufw_installed; then HOST_FW_TOOL=ufw
+        else HOST_FW_TOOL=none
+        fi ;;
+esac
+FW_DEFAULTED=0   # config mode: 1 = HOST_FIREWALL is not in the settings file
+FW_TURN_ON=0     # 1 = the chosen firewall is off now and setup turns it on (the user said yes)
+FW_APPLY=""      # the firewall setup really configures (decide_host_firewall)
+
+two_firewalls_text() {
+    printf '%s\n' "Two host firewalls are active on this server: ufw and firewalld." \
+        "  Every packet must pass both, so Furnace cannot open its ports in only one of them." \
+        "  Turn one off, then run setup again:" \
+        "    sudo ufw disable                          (keep firewalld)" \
+        "    sudo systemctl disable --now firewalld    (keep ufw)"
+}
 FW_RULES="/etc/furnace/firewalld.rules"   # the firewalld rules Furnace added, so it can remove them again
 
 if [ -d /opt/furnace/venv ]; then
@@ -255,8 +280,44 @@ check_SSH_ALLOW_FROM() {
 }
 check_HOST_FIREWALL() {
     [[ "$1" =~ ^(ufw|firewalld|none)$ ]] || { echo "HOST_FIREWALL must be 'ufw', 'firewalld' or 'none'."; return 1; }
-    [ "$1" = "none" ] || [ "$1" = "$HOST_FW_TOOL" ] \
-        || { echo "HOST_FIREWALL is '$1', but this server has $HOST_FW_TOOL. Use '$HOST_FW_TOOL' or 'none'."; return 1; }
+    [ "$1" = "none" ] && return 0
+    "${1}_installed" && return 0
+    if [ "$HOST_FW_TOOL" = "none" ]; then
+        echo "HOST_FIREWALL is '$1', but no host firewall (ufw or firewalld) is installed here. Use 'none'."
+    else
+        echo "HOST_FIREWALL is '$1', but $1 is not installed here. Use '$HOST_FW_TOOL' or 'none'."
+    fi
+    return 1
+}
+
+# Decide what happens to the host firewall, after the settings are checked. Sets FW_APPLY and FW_TURN_ON.
+# A package upgrade (--upgrade) never stops and never turns a firewall on: it leaves the firewall alone and says why.
+fw_skip() { FW_APPLY=none; warn "$1"; FW_NONE_NOTE="$1"; }
+decide_host_firewall() {
+    local fw="$CFG_HOST_FIREWALL"
+    FW_APPLY="$fw"
+    FW_NONE_NOTE="Host firewall was not configured (HOST_FIREWALL=none). Open port $WEB_PORT, SSH and VRRP (protocol 112) yourself."
+    [ "$fw" = "none" ] && return 0
+    if [ "$FW_ACTIVE" = "both" ]; then
+        [ "$MODE" = "upgrade" ] && { fw_skip "Two host firewalls are active (ufw and firewalld). Furnace changed neither. Turn one off, then run: sudo furnace setup"; return 0; }
+        die "$(two_firewalls_text)
+  Or set HOST_FIREWALL=none in the settings file and open the ports yourself."
+    fi
+    if [ "$FW_ACTIVE" != "none" ] && [ "$FW_ACTIVE" != "$fw" ]; then
+        [ "$MODE" = "upgrade" ] && { fw_skip "The active host firewall is $FW_ACTIVE now, but Furnace was set up with $fw. Furnace did not change the host firewall. Choose again with: sudo furnace setup"; return 0; }
+        die "HOST_FIREWALL is '$fw', but the active host firewall on this server is $FW_ACTIVE. Use '$FW_ACTIVE' or 'none'."
+    fi
+    if [ "$FW_ACTIVE" = "none" ]; then
+        if [ "$MODE" = "upgrade" ]; then
+            fw_skip "The host firewall $fw is off. Furnace leaves it off and did not change it. To let Furnace turn it on: sudo furnace setup"
+        elif [ "$FW_DEFAULTED" -eq 1 ]; then
+            CFG_HOST_FIREWALL=none
+            FW_APPLY=none
+            FW_NONE_NOTE="The host firewall $fw is off, so Furnace left it alone. To let setup turn it on and set it up, add HOST_FIREWALL=$fw to the settings file. Or open port $WEB_PORT, SSH and VRRP (protocol 112) yourself."
+        else
+            FW_TURN_ON=1
+        fi
+    fi
 }
 
 check_TOKEN_NAME() {
@@ -439,6 +500,7 @@ ask_follower_from_bundle() {
     note "Network card for $CFG_THIS_IP and the shared IP ($CFG_SHARED_IP): its name, not its IP."
     ask INTERFACE "Network card name" "$CFG_INTERFACE"
     msg="$(check_THIS_IP "$CFG_THIS_IP")" || die "$msg"
+    ask_host_firewall follower
 }
 
 ask_all() {
@@ -472,14 +534,43 @@ ask_all() {
     ask VRRP_ROUTER_ID "VRRP router ID (1-255)" "${CFG_VRRP_ROUTER_ID:-51}"
     note "Who may log in with SSH: 'any', or IPs separated by commas. The other server is always allowed."
     ask SSH_ALLOW_FROM "SSH allowed from" "${CFG_SSH_ALLOW_FROM:-any}"
+    ask_host_firewall leader
+}
+
+# The host firewall question. leader: always asked. follower: the leader's answer counts (no = none);
+# only turning on a firewall that is off is asked. Two active firewalls: stop, or go on without one.
+ask_host_firewall() {
+    local fw_default=yes
     if [ "$HOST_FW_TOOL" = "none" ]; then
         note "No host firewall tool (ufw or firewalld) is installed. Furnace leaves the host firewall alone."
         CFG_HOST_FIREWALL=none
         return
     fi
-    local fw_default=yes
+    if [ "$1" = "follower" ] && [ "$CFG_HOST_FIREWALL" = "none" ]; then
+        return   # the leader was set up without the host firewall
+    fi
+    if [ "$FW_ACTIVE" = "both" ]; then
+        note "$(two_firewalls_text)"
+        if ask_yes_no "Go on without setting up the host firewall? (You open the ports yourself.)" no; then
+            CFG_HOST_FIREWALL=none
+            return
+        fi
+        printf '\nStopped. Nothing was changed. Turn one host firewall off, then run: sudo furnace setup\n'
+        exit 1
+    fi
     [ "${CFG_HOST_FIREWALL:-$HOST_FW_TOOL}" = "none" ] && fw_default=no
-    if ask_yes_no "Let Furnace set up this server's own firewall ($HOST_FW_TOOL)?" "$fw_default"; then
+    if [ "$FW_ACTIVE" = "$HOST_FW_TOOL" ]; then
+        [ "$1" = "follower" ] && { CFG_HOST_FIREWALL="$HOST_FW_TOOL"; return; }
+        note "Furnace opens only what it needs: the web port (API, lists, the other server), SSH, and VRRP from the other server."
+        if ask_yes_no "Let Furnace set up this server's own firewall ($HOST_FW_TOOL)?" "$fw_default"; then
+            CFG_HOST_FIREWALL="$HOST_FW_TOOL"
+        else
+            CFG_HOST_FIREWALL=none
+        fi
+        return
+    fi
+    note "The host firewall $HOST_FW_TOOL is installed but off. Furnace allows SSH before it turns it on."
+    if ask_yes_no "Turn on and set up this server's own firewall ($HOST_FW_TOOL)?" "$fw_default"; then
         CFG_HOST_FIREWALL="$HOST_FW_TOOL"
     else
         CFG_HOST_FIREWALL=none
@@ -569,6 +660,7 @@ case "$MODE" in
         ;;
     config)
         load_file "$CONFIG" CFG
+        [ -n "$CFG_HOST_FIREWALL" ] || FW_DEFAULTED=1
         msg="$(check_ROLE "$CFG_ROLE")" || die "$msg"
         if [ "$CFG_ROLE" = "follower" ] && ! have_secrets; then
             place="$(find_bundle)" || die "The follower needs $BUNDLE_NAME from the leader.
@@ -603,6 +695,7 @@ if [ "$CFG_ROLE" = "leader" ]; then PRIORITY=150; else PRIORITY=100; fi
 if [ "$CFG_USE_HTTPS" = "yes" ]; then WEB_PORT=443; SCHEME=https; else WEB_PORT=80; SCHEME=http; fi
 SSH_PORT="$( (sshd -T 2>/dev/null || true) | awk '$1=="port"{print $2; exit}')"
 SSH_PORT="${SSH_PORT:-22}"
+decide_host_firewall
 
 # --------------------------------------------------------------------------- check mode
 
@@ -627,12 +720,14 @@ if [ "$CHECK" -eq 1 ]; then
     info "System: ${PRETTY_NAME:-unknown} ($FAMILY family)"
     info "Files written: $SETUP_CONF, $ETC/furnace.env, $ETC/install.env, $NGINX_CONF,"
     info "  /etc/keepalived/keepalived.conf (priority $PRIORITY)"
-    if [ "$CFG_HOST_FIREWALL" != "none" ]; then
-        info "Host firewall ($CFG_HOST_FIREWALL): allow SSH port $SSH_PORT from $CFG_SSH_ALLOW_FROM and $CFG_PEER_IP,"
+    info "Host firewall active now: $FW_ACTIVE."
+    if [ "$FW_APPLY" != "none" ]; then
+        [ "$FW_TURN_ON" -eq 1 ] && info "Host firewall $FW_APPLY is off now: setup turns it on."
+        info "Host firewall ($FW_APPLY): allow SSH port $SSH_PORT from $CFG_SSH_ALLOW_FROM and $CFG_PEER_IP,"
         info "  port $WEB_PORT from $(web_sources_text),"
         info "  VRRP (protocol 112) from $CFG_PEER_IP. Deny everything else coming in."
     else
-        info "Host firewall: not touched (HOST_FIREWALL=none)."
+        info "Host firewall: not touched. $FW_NONE_NOTE"
     fi
     selinux_on && info "SELinux is on: setup labels the Furnace folders and scripts and lets nginx reach the API."
     info "Services: furnace-api, nginx, keepalived, timers furnace-replicate, furnace-backup,"
@@ -932,7 +1027,7 @@ ok "systemd units ready"
 
 # --------------------------------------------------------------------------- host firewall
 
-if [ "$CFG_HOST_FIREWALL" = "ufw" ]; then
+if [ "$FW_APPLY" = "ufw" ]; then
     say "Configuring the host firewall (ufw)"
     ufw default deny incoming >/dev/null
     ufw default allow outgoing >/dev/null
@@ -964,8 +1059,9 @@ if [ "$CFG_HOST_FIREWALL" = "ufw" ]; then
         fi
     fi
     ufw --force enable >/dev/null
+    [ "$FW_TURN_ON" -eq 1 ] && ok "ufw was off: turned it on, after the SSH rules were in"
     ok "Host firewall on: SSH ($SSH_PORT), port $WEB_PORT from $(web_sources_text), VRRP from $CFG_PEER_IP"
-elif [ "$CFG_HOST_FIREWALL" = "firewalld" ]; then
+elif [ "$FW_APPLY" = "firewalld" ]; then
     say "Configuring the host firewall (firewalld)"
     systemctl enable --quiet --now firewalld
     ZONE="$(firewall-cmd --get-default-zone)"
@@ -1011,9 +1107,10 @@ elif [ "$CFG_HOST_FIREWALL" = "firewalld" ]; then
     printf '%s\n' "${RULES[@]}" > "$FW_RULES"
     chmod 0600 "$FW_RULES"
     firewall-cmd --reload >/dev/null
+    [ "$FW_TURN_ON" -eq 1 ] && ok "firewalld was off: turned it on (SSH stays open)"
     ok "Host firewall (firewalld, zone $ZONE): SSH ($SSH_PORT), port $WEB_PORT from $(web_sources_text), VRRP from $CFG_PEER_IP"
 else
-    TODO+=("Host firewall was not configured (HOST_FIREWALL=none). Open port $WEB_PORT, SSH and VRRP (protocol 112) yourself.")
+    TODO+=("$FW_NONE_NOTE")
 fi
 
 # --------------------------------------------------------------------------- SELinux

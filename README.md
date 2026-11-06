@@ -82,7 +82,7 @@ for testing only. Kubernetes is not supported (`docs/ROADMAP.md`).
 
 | | Debian family (`.deb`) | Red Hat family (`.rpm`) |
 |---|---|---|
-| Host firewall | ufw | firewalld |
+| Host firewall | the active one: ufw or firewalld (section 3.5) | the active one: firewalld or ufw |
 | nginx site | `/etc/nginx/sites-available/furnace` | `/etc/nginx/conf.d/furnace.conf` |
 | Security layer | AppArmor (nothing to do) | SELinux: setup sets the labels (section 3.5) |
 | Python | the system's `python3` | `python3` (3.9+), or `python3.11` / `python3.12` on RHEL 8 (installed by dnf) |
@@ -152,7 +152,7 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    Days an IP stays blocked (permanent IPs never expire) [30]:
    VRRP router ID (1-255) [51]:
    SSH allowed from [any]:
-   Let Furnace set up this server's own firewall (ufw)? [yes]:      (firewalld on the Red Hat family)
+   Let Furnace set up this server's own firewall (ufw)? [yes]:      (the firewall that is active here)
 
      The first API token, for the system that calls the API (for example a SOAR or a script).
    Token name [api]: soar
@@ -224,8 +224,16 @@ For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is 
 - On the server that owns the shared IP: creates the first API token and the list login, if there are none yet.
   They are in the database, so the follower gets them with the replication.
 - Writes the nginx and keepalived files from the templates in `/usr/lib/furnace/templates`.
-- Opens only the needed ports on the host firewall (ufw or firewalld): HTTPS, SSH, and VRRP (protocol 112) between
-  the servers. With firewalld it adds rich rules to the default zone and remembers them in
+- Opens only the needed ports on the host firewall: HTTPS, SSH, and VRRP (protocol 112) between the servers.
+  It uses the host firewall that is **active**, not the one that is only installed:
+  - firewalld running: firewalld (also on Ubuntu, where ufw is installed too). ufw active: ufw.
+  - Both active: setup stops and explains. Every packet must pass both, so opening ports in one is not enough.
+    Turn one off (`sudo ufw disable` or `sudo systemctl disable --now firewalld`) and run setup again, or answer
+    that setup goes on without the host firewall and open the ports yourself.
+  - None active: setup asks before it turns the installed one on (SSH is allowed first). A settings file turns it
+    on only with `HOST_FIREWALL` in the file. A package upgrade never turns a firewall on and never stops for it:
+    it leaves the firewall alone and says why.
+   With firewalld it adds rich rules to the default zone and remembers them in
   `/etc/furnace/firewalld.rules`, so it can remove them again.
 - With SELinux on (Red Hat family): labels the list folders for nginx (`httpd_sys_content_t`), the replication key
   folder for sshd (`ssh_home_t`) and the two keepalived scripts (`keepalived_unconfined_script_exec_t`), and turns on
@@ -471,7 +479,7 @@ Each question saves one setting in `/etc/furnace/setup.conf`. The same names are
 | Days an IP stays blocked | `ARCHIVE_AFTER_DAYS` | `90` | Days a temporary IP stays in the list before the nightly job removes it. Permanent IPs and domains never expire. |
 | VRRP router ID | `VRRP_ROUTER_ID` | `51` | 1-255. Same on both servers. Must be unique in the network segment. |
 | SSH allowed from | `SSH_ALLOW_FROM` | `any` | Who may use SSH. `any` or a list of IPs. The other server is always allowed. |
-| Set up the host firewall? | `HOST_FIREWALL` | `ufw` or `firewalld` | The tool on this server (`ufw` on the Debian family, `firewalld` on the Red Hat family) = configure it. `none` = leave it alone. |
+| Set up the host firewall? | `HOST_FIREWALL` | the active one | `ufw` or `firewalld` = configure it; it must be the active one, or the only one installed when none is active (then setup turns it on). `none` = leave it alone. Not in a settings file: the active one, or `none` when no firewall is active. Both active: setup stops (use `none` and open the ports yourself). |
 | (not asked) | `KEEPALIVED_PASSWORD` | random | VRRP (Virtual Router Redundancy Protocol) password, 6-8 characters. Created on the leader. The follower gets it from the bundle. |
 | (not asked) | `USE_HTTPS` | `yes` | `yes` = HTTPS. `no` = plain HTTP, for a test lab only (settings file only). |
 
