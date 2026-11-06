@@ -76,7 +76,7 @@ ufw_on() { on "ufw --force enable >/dev/null"; }
 firewalld_on() { on "systemctl start firewalld && firewall-cmd --state >/dev/null"; }
 ufw_is_active() { on "ufw status | grep -q '^Status: active' || grep -q '^ENABLED=yes' /etc/ufw/ufw.conf"; }  # on now or at the next boot
 firewalld_is_active() { on "systemctl is-active --quiet firewalld || systemctl is-enabled --quiet firewalld"; }
-ufw_has_furnace() { on "grep -q furnace /etc/ufw/user.rules"; }  # the saved rules (ufw status shows none while firewalld wiped them)
+ufw_has_furnace() { on "grep -qiE 'furnace|6675726e616365' /etc/ufw/user.rules"; }  # saved rules; ufw keeps comments in hex (6675726e616365 = furnace)
 firewalld_has_furnace() { on "firewall-cmd --list-rich-rules | grep -q 'port=\"443\"' && firewall-cmd --list-rich-rules | grep -q vrrp"; }
 not_set_up() { on "! test -e /etc/furnace/setup.conf"; }
 saved_fw() { on "grep -qx 'HOST_FIREWALL=$1' /etc/furnace/setup.conf"; }
@@ -173,10 +173,13 @@ check "the questions: the default answer (no) stops" [ "$RC" != 0 ]
 check "it says nothing was changed" grep -q "Stopped. Nothing was changed. Turn one host firewall off" <<< "$OUT"
 check "nothing was set up" not_set_up
 check "no Furnace rules in ufw or firewalld" none_of ufw_has_furnace firewalld_has_furnace
-setup_config "HOST_FIREWALL=none"
-check "with HOST_FIREWALL=none setup goes on and finishes" [ "$RC" = 0 ]
-check "the end of setup says to open the ports yourself" grep -q "Open port 443, SSH and VRRP (protocol 112) yourself" <<< "$OUT"
-check "still no Furnace rules in ufw or firewalld" none_of ufw_has_furnace firewalld_has_furnace
+# HOST_FIREWALL=none is accepted. Checked with --check: a real run cannot pass its self-test here, because two
+# firewalls can leave the host dropping everything (Ubuntu 22.04: firewalld wipes ufw's rules, ufw's DROP stays).
+on "cp /root/leader.env /root/none.env && echo HOST_FIREWALL=none >> /root/none.env"
+OUT="$(on "furnace setup --check --config /root/none.env 2>&1")" && RC=0 || RC=$?
+check "HOST_FIREWALL=none is accepted (setup --check)" [ "$RC" = 0 ]
+check "it warns that both are on and Furnace changes neither" grep -q "Two host firewalls are on (ufw and firewalld) and Furnace changed neither" <<< "$OUT"
+check "still nothing set up and no Furnace rules" bash -c '[ "$1" = 0 ]' _ "$(none_of ufw_has_furnace firewalld_has_furnace && not_set_up; echo $?)"
 check "both firewalls are still on" all_of ufw_is_active firewalld_is_active
 
 step "3. Only ufw active (firewalld installed, off): Furnace uses ufw"

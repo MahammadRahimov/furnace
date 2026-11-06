@@ -306,6 +306,10 @@ decide_host_firewall() {
     local fw="$CFG_HOST_FIREWALL"
     FW_APPLY="$fw"
     FW_NONE_NOTE="Host firewall was not configured (HOST_FIREWALL=none). Open port $WEB_PORT, SSH and VRRP (protocol 112) yourself."
+    if [ "$fw" = "none" ] && [ "$FW_ACTIVE" = "both" ]; then
+        FW_NONE_NOTE="Two host firewalls are on (ufw and firewalld) and Furnace changed neither. Every packet must pass both: open port $WEB_PORT, SSH and VRRP (protocol 112) in both, or turn one off. Starting firewalld can leave ufw dropping everything, even SSH."
+        warn "$FW_NONE_NOTE"
+    fi
     [ "$fw" = "none" ] && return 0
     if [ "$FW_ACTIVE" = "both" ]; then
         [ "$MODE" = "upgrade" ] && { fw_skip "Two host firewalls are active (ufw and firewalld). Furnace changed neither. Turn one off, then run: sudo furnace setup"; return 0; }
