@@ -82,6 +82,12 @@ Oracle 9, Fedora 42 and Amazon Linux 2023; the firewall test 46/46 on 4 systems;
 (upgrade from 0.9.0 with the same `.env` on both, follower rejoins with a join code over the real network,
 keepalived on the hosts with another service's shared IP that does not move when Furnace fails over).
 
+### 5. Deployment guides (done 2026-11-07)
+
+New `docs/deploy/`: one step-by-step guide for each way to deploy: packages (`.deb`/`.rpm`), Docker with
+keepalived in the container, and Docker with the host's own keepalived. Each guide has the order of the steps, the
+ports to open and the failover test. Linked from the README.
+
 ### Decided, not started
 
 Already decided (user decision 2026-11-01): SSH replication is removed (HTTPS only). Not started.

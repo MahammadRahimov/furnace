@@ -33,6 +33,9 @@ HTTPS requests, and any list reader that can download a text file over HTTPS wit
 14. [What was not tested](#14-what-was-not-tested)
 15. [Examples: Palo Alto and Cortex XSOAR](#15-examples-palo-alto-and-cortex-xsoar)
 
+**Step-by-step deployment guides**, one for each way to deploy (packages; Docker with keepalived in the
+container; Docker with the host's own keepalived): [docs/deploy](docs/deploy/README.md).
+
 The plan for the next versions (Kubernetes, high availability) is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ---
@@ -103,6 +106,8 @@ a security fix in Flask or gunicorn reaches you with a new Furnace release, not 
   By default every address may connect, and the token and the login protect Furnace.
 
 ## 3. Install
+
+Short on time? The [deployment guides](docs/deploy/README.md) take you through each way to deploy, step by step.
 
 You need one file:
 - **Ubuntu and Debian:** `furnace_<version>_all.deb`, installed with `sudo apt install ./FILE`.
