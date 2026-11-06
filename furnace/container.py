@@ -39,6 +39,8 @@ LIB = Path("/usr/lib/furnace")
 ETC = Path("/etc/furnace")
 DATA = Path("/var/lib/furnace")
 STATE = Path("/run/furnace-state")
+HOST_STATE = Path("/run/furnace-host")  # external keepalived: the host's /run/furnace (a volume)
+HOST_STATE_ON_HOST = "/run/furnace"
 PY = str(LIB / "bin" / "furnace-python")
 NGINX_CONF = Path("/etc/nginx/conf.d/furnace.conf")
 KEEPALIVED_CONF = Path("/etc/keepalived/keepalived.conf")
@@ -74,6 +76,7 @@ class ContainerSettings:
     lists_allow_from: str = "any"
     vrrp_router_id: int = 51
     join_code: str = ""  # follower: FURNACE_JOIN_CODE, to fetch the secrets from the leader
+    keepalived: str = "builtin"  # builtin: in this container; external: the host's own keepalived
     problems: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)  # shown at the start, for example "use the new names"
 
@@ -192,6 +195,9 @@ def load_settings(env: dict[str, str] | None = None,
             this_ip = peer_ip = ""
         this_name = f"FURNACE_{role.upper()}_IP" if role else "FURNACE_LEADER_IP"
     shared_ip = address("SHARED_IP")
+    keepalived = get("KEEPALIVED") or "builtin"
+    if keepalived not in ("builtin", "external"):
+        problems.append(f"FURNACE_KEEPALIVED must be 'builtin' (the default) or 'external', not '{keepalived}'.")
     join_code = get("JOIN_CODE")
     if join_code:
         from .join import JoinError, parse_code
@@ -207,6 +213,7 @@ def load_settings(env: dict[str, str] | None = None,
 
     s = ContainerSettings(
         role=role, this_ip=this_ip, peer_ip=peer_ip, shared_ip=shared_ip, notes=notes, join_code=join_code,
+        keepalived=keepalived,
         shared_ip_prefix=_number("SHARED_IP_PREFIX", get("SHARED_IP_PREFIX"), 24, 8, 32, problems),
         interface=get("INTERFACE"),
         api_allow_from=_ip_list("API_ALLOW_FROM", get("API_ALLOW_FROM"), problems),
@@ -427,11 +434,12 @@ def template_values(s: ContainerSettings, etc: Path = ETC) -> dict[str, str]:
 def write_configs(s: ContainerSettings, etc: Path = ETC, lib: Path = LIB) -> None:
     values = template_values(s, etc)
     NGINX_CONF.write_text(render(lib / "templates" / "nginx-furnace.conf.tmpl", values), encoding="utf-8")
-    old = os.umask(0o077)
-    try:
-        KEEPALIVED_CONF.write_text(render(lib / "templates" / "keepalived.conf.tmpl", values), encoding="utf-8")
-    finally:
-        os.umask(old)
+    if s.keepalived == "builtin":
+        old = os.umask(0o077)
+        try:
+            KEEPALIVED_CONF.write_text(render(lib / "templates" / "keepalived.conf.tmpl", values), encoding="utf-8")
+        finally:
+            os.umask(old)
     (etc / "install.env").write_text(
         "# Non-secret settings for the Furnace helper scripts. Written at every container start.\n"
         f"ROLE={s.role}\nTHIS_IP={s.this_ip}\nPEER_IP={s.peer_ip}\nSHARED_IP={s.shared_ip}\n"
@@ -473,9 +481,10 @@ class Supervisor:
                             "--forwarded-allow-ips", "127.0.0.1",  # nginx logs the requests
                             "--timeout", "120", "--graceful-timeout", "5", "furnace.wsgi:app"], as_user=True),
             Process("nginx", ["nginx", "-g", "daemon off;"]),
-            Process("keepalived", ["keepalived", "--dont-fork", "--log-console", "--log-detail",
-                                   "--use-file", str(KEEPALIVED_CONF)]),
         ]
+        if s.keepalived == "builtin":
+            self.processes.append(Process("keepalived", ["keepalived", "--dont-fork", "--log-console", "--log-detail",
+                                                         "--use-file", str(KEEPALIVED_CONF)]))
         self.job: tuple[str, subprocess.Popen] | None = None
         self.next_replica = time.monotonic() + 10
         self.replica_state = ""
@@ -540,7 +549,7 @@ class Supervisor:
     def role(self) -> str:
         try:
             return (STATE / "role").read_text(encoding="utf-8").strip()
-        except OSError:
+        except OSError:  # external keepalived that has not written the role yet
             return "follower"
 
     def due_daily(self, name: str, hour: int, minute: int) -> bool:
@@ -572,6 +581,8 @@ class Supervisor:
         rows = {p.name: ("running" if p.proc and p.proc.poll() is None else "stopped", p.restarts)
                 for p in self.processes}
         status = {"processes": rows, "replication": self.replica_state, "role": self.role(),
+                  "keepalived": self.s.keepalived,
+                  "host_role_missing": self.s.keepalived == "external" and not (STATE / "role").exists(),
                   "updated": datetime.now().isoformat(timespec="seconds")}
         tmp = STATE / ".status.tmp"
         tmp.write_text(json.dumps(status), encoding="utf-8")
@@ -581,11 +592,14 @@ class Supervisor:
         self.stopping = True
 
     def shutdown(self) -> None:
-        log("Stopping (keepalived first, so the other server takes the shared IP).")
+        if self.s.keepalived == "builtin":
+            log("Stopping (keepalived first, so the other server takes the shared IP).")
+        else:
+            log("Stopping. The host's keepalived moves the shared IP when its health check fails.")
         order = {"keepalived": signal.SIGTERM, "nginx": signal.SIGQUIT, "api": signal.SIGTERM}
         for name in ("keepalived", "nginx", "api"):
-            p = next(x for x in self.processes if x.name == name)
-            if p.proc and p.proc.poll() is None:
+            p = next((x for x in self.processes if x.name == name), None)
+            if p and p.proc and p.proc.poll() is None:
                 p.proc.send_signal(order[name])
                 try:
                     p.proc.wait(timeout=8)
@@ -608,12 +622,20 @@ class Supervisor:
     def run(self) -> int:
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
-        api, nginx, keepalived = self.processes
+        api, nginx, *keepalived = self.processes
         self.spawn(api)
         self.wait_api()
         self.spawn(nginx)
-        self.spawn(keepalived)
-        log(f"Ready. This host is the {self.s.role} by setting; keepalived decides who owns {self.s.shared_ip}.")
+        for p in keepalived:
+            self.spawn(p)
+        if keepalived:
+            log(f"Ready. This host is the {self.s.role} by setting; keepalived decides who owns {self.s.shared_ip}.")
+        else:
+            log(f"Ready. This host is the {self.s.role} by setting; the HOST's keepalived decides who owns "
+                f"{self.s.shared_ip} (FURNACE_KEEPALIVED=external).")
+            if not (STATE / "role").exists():
+                log("No role from the host's keepalived yet: this host works as the follower until it writes "
+                    f"{HOST_STATE_ON_HOST}/role. Set it up with: docker exec furnace furnace host-keepalived")
         while not self.stopping:
             for p in self.processes:
                 if p.proc is not None and p.proc.poll() is not None and not self.stopping:
@@ -631,12 +653,8 @@ class Supervisor:
 # --------------------------------------------------------------------------- start
 
 
-def prepare_folders() -> None:
-    STATE.mkdir(parents=True, exist_ok=True)
-    os.chmod(STATE, 0o755)
-    role = STATE / "role"
-    role.write_text("follower\n", encoding="utf-8")  # keepalived writes leader when it takes the shared IP
-    os.chmod(role, 0o644)
+def prepare_folders(keepalived: str = "builtin") -> None:
+    prepare_role(keepalived)
     ETC.mkdir(parents=True, exist_ok=True)
     os.chmod(ETC, 0o750)
     shutil.chown(ETC, group=USER)
@@ -650,6 +668,26 @@ def prepare_folders() -> None:
     shutil.chown(Path(os.environ.get("FURNACE_EDL_DIR", "/var/lib/furnace-edl")), USER, USER)
     shutil.chown(auth, USER, WEB_GROUP)
     os.chmod(auth, 0o2750)  # nginx reads the list users file
+
+
+def prepare_role(keepalived: str = "builtin") -> None:
+    """The role file: written by the keepalived in this container, or a link to the host's (external)."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    os.chmod(STATE, 0o755)
+    role = STATE / "role"
+    if role.is_symlink() or role.exists():
+        role.unlink()
+    if keepalived == "external":
+        # The host's keepalived writes the role (its notify script) into /run/furnace on the host,
+        # which docker-compose.yml mounts here as /run/furnace-host.
+        if not HOST_STATE.is_dir():
+            raise SettingsError(f"  - FURNACE_KEEPALIVED=external needs the host folder {HOST_STATE_ON_HOST} in the "
+                                f"container as {HOST_STATE}. docker-compose.yml has it as a volume: "
+                                f"- {HOST_STATE_ON_HOST}:{HOST_STATE}")
+        role.symlink_to(HOST_STATE / "role")
+    else:
+        role.write_text("follower\n", encoding="utf-8")  # keepalived writes leader when it takes the shared IP
+        os.chmod(role, 0o644)
 
 
 REFUSE_TEXT = """\
@@ -680,7 +718,7 @@ def start() -> int:
         log(f"This host is the {s.role} ({s.this_ip}); the other host is {s.peer_ip}.")
         for note in s.notes:
             log(note)
-        prepare_folders()
+        prepare_folders(s.keepalived)
         for note in prepare_secrets(s):
             log(note)
         note = write_refuse_file()
@@ -732,6 +770,123 @@ The follower fetches the certificate and the secrets from this leader over HTTPS
     return 0
 
 
+HOST_NOTIFY = """#!/bin/sh
+# Furnace (Docker, FURNACE_KEEPALIVED=external): the host's keepalived calls this when its state changes.
+# It writes the role file that the Furnace container reads (/run/furnace on the host).
+# Arguments: TYPE NAME STATE (STATE is MASTER, BACKUP, FAULT or STOP).
+set -eu
+case "${3:-}" in
+    MASTER) role=leader ;;
+    BACKUP|FAULT|STOP) role=follower ;;
+    *) exit 0 ;;
+esac
+mkdir -p /run/furnace
+printf '%s\\n' "$role" > /run/furnace/role.tmp
+chmod 0644 /run/furnace/role.tmp
+mv -f /run/furnace/role.tmp /run/furnace/role
+"""
+
+HOST_HEALTH = """#!/bin/sh
+# Furnace health check for the host's keepalived: the container's nginx and API answer /health.
+# -k: it asks this same host over 127.0.0.1, so it does not check the certificate (the expiry is
+# reported by Furnace itself; both hosts must never give up the shared IP at the same moment).
+exec curl -fsSk --max-time 3 -o /dev/null https://127.0.0.1/health
+"""
+
+HOST_SCRIPTS = "/usr/local/sbin"
+
+
+def host_keepalived_config(s: ContainerSettings, etc: Path = ETC) -> str:
+    """The Furnace block for the host's keepalived.conf: its own vrrp_instance next to the host's others."""
+    password = (etc / "secrets" / "keepalived-password").read_text(encoding="utf-8").strip()
+    return f"""# Furnace: its own shared IP {s.shared_ip}. Paste this into /etc/keepalived/keepalived.conf on this host.
+# Both hosts start as BACKUP with nopreempt: a host that comes back does not take the shared IP back.
+vrrp_script chk_furnace {{
+    script "{HOST_SCRIPTS}/furnace-health-check"
+    interval 5
+    timeout 4
+    fall 3
+    rise 2
+}}
+
+vrrp_instance FURNACE {{
+    state BACKUP
+    nopreempt
+    interface {s.interface}
+    virtual_router_id {s.vrrp_router_id}
+    priority {s.priority}
+    advert_int 1
+
+    unicast_src_ip {s.this_ip}
+    unicast_peer {{
+        {s.peer_ip}
+    }}
+
+    authentication {{
+        auth_type PASS
+        auth_pass {password}
+    }}
+
+    virtual_ipaddress {{
+        {s.shared_ip}/{s.shared_ip_prefix} dev {s.interface}
+    }}
+
+    track_script {{
+        chk_furnace
+    }}
+
+    notify {HOST_SCRIPTS}/furnace-notify
+}}
+"""
+
+
+def host_keepalived(part: str = "") -> int:
+    """Print what the host's own keepalived needs (FURNACE_KEEPALIVED=external). Furnace never edits the host."""
+    try:
+        s = load_settings()
+    except SettingsError as exc:
+        print(f"Settings are not right:\n{exc}")
+        return 2
+    if part in ("notify", "health-check"):
+        print(HOST_NOTIFY if part == "notify" else HOST_HEALTH, end="")
+        return 0
+    if not have_secrets(ETC):
+        print("This host has no secrets yet (the keepalived password). Start the container first.")
+        return 2
+    if part == "config":
+        print(host_keepalived_config(s), end="")
+        return 0
+    if part:
+        print("usage: furnace host-keepalived [notify|health-check|config]")
+        return 2
+    mode = "" if s.keepalived == "external" else (
+        "NOTE: this container still runs its own keepalived (FURNACE_KEEPALIVED is not 'external').\n"
+        "Set FURNACE_KEEPALIVED=external in .env first, then docker compose up -d.\n\n")
+    print(f"""{mode}The host's own keepalived for Furnace (this host is the {s.role}, {s.this_ip}). Do this on BOTH hosts.
+Furnace never changes the host: run these commands yourself.
+
+1. The two small scripts (the role file and the health check):
+
+    docker exec furnace furnace host-keepalived notify | sudo tee {HOST_SCRIPTS}/furnace-notify >/dev/null
+    docker exec furnace furnace host-keepalived health-check | sudo tee {HOST_SCRIPTS}/furnace-health-check >/dev/null
+    sudo chmod 755 {HOST_SCRIPTS}/furnace-notify {HOST_SCRIPTS}/furnace-health-check
+
+   With SELinux on (RHEL family), let keepalived run them:
+    sudo semanage fcontext -a -t keepalived_unconfined_script_exec_t '{HOST_SCRIPTS}/furnace-(notify|health-check)'
+    sudo restorecon -v {HOST_SCRIPTS}/furnace-notify {HOST_SCRIPTS}/furnace-health-check
+
+2. Add this block to /etc/keepalived/keepalived.conf (next to your other vrrp_instance blocks; the
+   virtual_router_id {s.vrrp_router_id} must not be used by them). Your global_defs should have
+   "script_user root" and "enable_script_security".
+   Show only the block:  docker exec furnace furnace host-keepalived config
+
+{host_keepalived_config(s)}
+3. Restart keepalived:  sudo systemctl restart keepalived
+   Then: docker exec furnace furnace status   (the role comes from the host's keepalived)
+""")
+    return 0
+
+
 def _version() -> str:
     from . import __version__
     return __version__
@@ -754,6 +909,8 @@ def main(argv: list[str]) -> int:
         return 0
     if command == "join-code":
         return join_code()
+    if command == "host-keepalived":
+        return host_keepalived(argv[2] if len(argv) > 2 else "")
     if command == "replicate":
         try:
             print(replicate(load_settings().peer_ip))

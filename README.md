@@ -419,6 +419,7 @@ shared IP). Test a failover (below) before you go live.
 | `FURNACE_FOLLOWER_IP` | (required) | the follower host's IP (the same on both hosts) |
 | `FURNACE_ROLE` | found from the IP | only when one host has both IPs: `leader` or `follower` |
 | `FURNACE_JOIN_CODE` | (none) | follower only: the one-time code from `furnace join-code` on the leader |
+| `FURNACE_KEEPALIVED` | `builtin` | `external` = the host's own keepalived moves the shared IP (below) |
 | `FURNACE_SHARED_IP` | (required) | the shared IP (VIP) everyone uses |
 | `FURNACE_SHARED_IP_PREFIX` | `24` | network prefix of the shared IP |
 | `FURNACE_INTERFACE` | the card that has this host's IP | the host's network card |
@@ -444,6 +445,27 @@ docker logs --since 1h furnace              # what happened (no secrets in it)
 **Failover test:** `docker stop furnace` on the leader. Within a few seconds the follower owns the shared IP and
 becomes the leader. `docker start furnace` brings the old host back as the standby (it does not take the shared
 IP back). It gets the new data with the next replication, within 20 seconds.
+
+**The host's own keepalived (`FURNACE_KEEPALIVED=external`).** Use this when the hosts already run keepalived
+for other services, and you want one keepalived per host that you look after yourself. The container then runs
+no keepalived and needs no `NET_ADMIN`/`NET_RAW` (you may remove `cap_add` from `docker-compose.yml`). The
+host's keepalived moves the shared IP, and a small notify script on the host writes the role into
+`/run/furnace/role`, which the container reads (`docker-compose.yml` mounts `/run/furnace`).
+
+Furnace gets **its own** `vrrp_instance` with its own shared IP and router ID, next to your other blocks: a
+Furnace problem moves only Furnace's shared IP, never your other services. Furnace never changes the host:
+it prints what to add, and you add it.
+
+1. In `.env` on both hosts: `FURNACE_KEEPALIVED=external`, then `docker compose up -d`.
+2. On each host: `docker exec furnace furnace host-keepalived`. It shows the commands for the two small
+   scripts (`/usr/local/sbin/furnace-notify` and `furnace-health-check`), and the block for
+   `/etc/keepalived/keepalived.conf`, already filled in for this host (card, IPs, router ID, priority,
+   password). Its `virtual_router_id` must not be used by your other blocks.
+3. `sudo systemctl restart keepalived`, then `docker exec furnace furnace status`.
+
+Until the host's keepalived writes the role, the container works as the follower and `furnace status` warns.
+If the Furnace container stops, the host's health check fails and the shared IP moves after about 15 seconds
+(the built-in keepalived moves it at once, because it stops first).
 
 **Backup:** the leader makes a daily backup in `./data/backups`. To be safe from a lost host, copy `./config` and
 `./data` somewhere else from time to time.

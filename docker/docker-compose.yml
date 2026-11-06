@@ -18,9 +18,10 @@ services:
     container_name: furnace
     restart: unless-stopped
     network_mode: host            # keepalived moves the shared IP on the host's network card
-    cap_add: [NET_ADMIN, NET_RAW] # only for keepalived (the shared IP and VRRP); not privileged
+    cap_add: [NET_ADMIN, NET_RAW] # only for the built-in keepalived; not needed with FURNACE_KEEPALIVED=external
     stop_grace_period: 20s
     env_file: .env                # all FURNACE_ settings and TZ
     volumes:
       - ./config:/etc/furnace     # certificate and secrets (keep it private)
       - ./data:/var/lib/furnace   # database, archive, backups
+      - /run/furnace:/run/furnace-host  # FURNACE_KEEPALIVED=external only: the role from the host's keepalived

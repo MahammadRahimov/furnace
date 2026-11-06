@@ -261,3 +261,55 @@ def test_a_follower_without_anything_says_both_ways():
     with pytest.raises(SettingsError) as info:
         container.prepare_secrets(load_settings(BOTH, FOLLOWER_CARDS), Path("/nonexistent-furnace-test"), group=None)
     assert "furnace join-code" in str(info.value) and "furnace-peer-bundle.tar.gz" in str(info.value)
+
+
+# --------------------------------------------------------------------------- external keepalived (the host's own)
+
+
+def test_the_keepalived_setting():
+    assert load_settings(BOTH, CARDS).keepalived == "builtin"
+    assert load_settings({**BOTH, "FURNACE_KEEPALIVED": "external"}, CARDS).keepalived == "external"
+    assert "FURNACE_KEEPALIVED must be 'builtin' (the default) or 'external', not 'host'" in problems(
+        {**BOTH, "FURNACE_KEEPALIVED": "host"})
+
+
+def test_external_mode_runs_no_keepalived_in_the_container():
+    builtin = container.Supervisor(load_settings(BOTH, CARDS))
+    external = container.Supervisor(load_settings({**BOTH, "FURNACE_KEEPALIVED": "external"}, CARDS))
+    assert [p.name for p in builtin.processes] == ["api", "nginx", "keepalived"]
+    assert [p.name for p in external.processes] == ["api", "nginx"]
+
+
+def test_external_mode_reads_the_role_from_the_host(tmp_path, monkeypatch):
+    state, host = tmp_path / "state", tmp_path / "host"
+    monkeypatch.setattr(container, "STATE", state)
+    monkeypatch.setattr(container, "HOST_STATE", host)
+    with pytest.raises(SettingsError, match="needs the host folder /run/furnace"):
+        container.prepare_role("external")
+    host.mkdir()
+    container.prepare_role("external")
+    sup = container.Supervisor(load_settings({**BOTH, "FURNACE_KEEPALIVED": "external"}, CARDS))
+    assert sup.role() == "follower"  # nothing from the host yet
+    (host / "role").write_text("leader\n")
+    assert sup.role() == "leader"
+    (host / "role").write_text("follower\n")
+    assert sup.role() == "follower"
+    # Back to the built-in keepalived: a plain role file again.
+    container.prepare_role("builtin")
+    assert not (state / "role").is_symlink() and (state / "role").read_text() == "follower\n"
+
+
+def test_the_block_for_the_host_keepalived(tmp_path):
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "keepalived-password").write_text("Ab3dE6gH\n")
+    s = load_settings({**BOTH, "FURNACE_KEEPALIVED": "external", "FURNACE_VRRP_ROUTER_ID": "77"}, FOLLOWER_CARDS)
+    text = container.host_keepalived_config(s, tmp_path)
+    for part in ("vrrp_instance FURNACE {", "interface eth0", "virtual_router_id 77", "priority 100",
+                 "unicast_src_ip 192.0.2.12", "        192.0.2.11", "auth_pass Ab3dE6gH",
+                 "192.0.2.10/24 dev eth0", "notify /usr/local/sbin/furnace-notify",
+                 'script "/usr/local/sbin/furnace-health-check"', "nopreempt"):
+        assert part in text
+    assert "global_defs" not in text  # only Furnace's own block, the host keeps its global part
+    assert "MASTER) role=leader" in container.HOST_NOTIFY and "/run/furnace/role" in container.HOST_NOTIFY
+    assert "printf '%s\\n'" in container.HOST_NOTIFY  # the script writes a newline, not a broken line
+    assert "https://127.0.0.1/health" in container.HOST_HEALTH
