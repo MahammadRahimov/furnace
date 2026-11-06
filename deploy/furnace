@@ -109,8 +109,9 @@ status() {
         fi
     done
     echo
-    # The leader writes the result of every replication (HTTPS, or SSH as the fallback).
-    local last="/var/lib/furnace/replica/last-result" when what age
+    # The leader writes the result of every replication (HTTPS, or SSH as the backup copy when it is on).
+    local last="/var/lib/furnace/replica/last-result" when what age fallback
+    fallback="$(sed -n 's/^REPLICATION_SSH_FALLBACK=//p' "$ETC/install.env" 2>/dev/null || true)"
     if [ "$role" != "leader" ]; then
         echo "Replication: this server receives the snapshots from the leader"
     elif [ -f "$last" ]; then
@@ -119,12 +120,18 @@ status() {
         echo "Replication: $state $what ($age seconds ago)"
         if [ "$state" != "ok" ] || [ "$age" -gt 300 ]; then
             echo "             <-- the other server does not get the changes"
+            echo "             Check: port 443 from here to the other server, nginx there, and the same certificate on both."
+            [ "$fallback" = "yes" ] || echo "             (The SSH backup copy is off. It is optional: README, section 10.)"
             problems=1
         elif [[ "$what" == "over SSH"* ]]; then
-            echo "             (SSH is the fallback for this version. Upgrade the other server to use HTTPS.)"
+            echo "             <-- HTTPS does not work: the copy went over the SSH backup. Fix HTTPS (the reason is above)."
+            problems=1
         fi
     else
-        echo "Replication: no result yet (it runs every minute)"
+        echo "Replication: no result yet (it runs every 20 seconds)"
+    fi
+    if [ "$fallback" = "yes" ]; then
+        echo "SSH backup: on (the copy uses SSH only when HTTPS does not work)"
     fi
     # A certificate made by setup before 0.8 on RHEL 8 has "Basic Constraints" twice. Not valid.
     local crt="$ETC/tls/furnace.crt"
@@ -147,14 +154,10 @@ status() {
 join_code() {
     need_root join-code
     need_setup
-    local ROLE="" THIS_IP="" PEER_IP="" USE_HTTPS="" code
+    local ROLE="" THIS_IP="" PEER_IP="" code
     # shellcheck source=/dev/null
     . "$ETC/install.env"
     [ "$ROLE" = leader ] || { echo "Make the join code on the leader." >&2; exit 1; }
-    if [ "$USE_HTTPS" != yes ]; then
-        echo "The join code needs HTTPS (USE_HTTPS=yes). Copy /root/furnace-peer-bundle.tar.gz to the follower instead." >&2
-        exit 1
-    fi
     code="$(tar -czf - -C "$ETC" tls/furnace.crt tls/furnace.key ssh/replica_key ssh/replica_key.pub setup.conf |
         py -m furnace.join make --bundle - --cert "$ETC/tls/furnace.crt" --leader-ip "$THIS_IP" \
             --dir /var/lib/furnace/join --owner furnace)"

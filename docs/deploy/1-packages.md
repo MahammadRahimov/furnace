@@ -17,8 +17,8 @@ everything: the API, nginx, keepalived, the host firewall, replication, the back
   keepalived, use [guide 3](3-docker-host-keepalived.md) instead.
 - Port 443 free (no other web server on it).
 - The network allows: list reader and caller -> shared IP TCP 443; between the servers TCP 443 and VRRP
-  (IP protocol 112). Setup opens these on the **host** firewall itself. During an upgrade from 0.9 or older, also
-  SSH (TCP 22) between the servers.
+  (IP protocol 112). Setup opens these on the **host** firewall itself. SSH (TCP 22) between the servers is needed
+  only if you turn on the optional SSH backup copy.
 
 ## Step 1. Get the package (both servers)
 
@@ -53,7 +53,8 @@ Who may download the lists [any]:                  <- or the list reader's IPs
 Most entries per list [50000]:
 Days an IP stays blocked (permanent IPs never expire) [90]:
 VRRP router ID (1-255) [51]:                       <- must be unused by other keepalived on this network
-SSH allowed from [any]:
+SSH allowed from [any]:                            <- your own SSH login (admins)
+Use SSH as a backup for the copy to the other server? [no]:   <- no is right for most servers
 Let Furnace set up this server's own firewall (ufw)? [yes]:
 Token name [api]: soar
 ... the permission grid, then: Token expires after how many days: 365
@@ -66,6 +67,10 @@ Setup configures and starts everything and runs a self-test. At the end it shows
 - the **list login** (user `lists` and a password, for the list reader, for example the firewall).
 
 Store them now. Furnace keeps only hashes and cannot show them again.
+
+**The copy to the follower** goes over HTTPS every 20 seconds. The SSH backup copy is optional: say yes only if
+you want a second way when HTTPS between the servers does not work. Then `furnace status` warns whenever the copy
+had to use SSH.
 
 **Host firewall.** Setup uses the firewall that is **active** (ufw or firewalld). If both are active it stops and
 explains; if none is active it asks before it turns one on.
@@ -155,6 +160,7 @@ sudo furnace setup --config config.env
   (README [section 7](../../README.md#7-daily-admin-work-the-furnace-command)).
 - Upgrade: install the new package, **follower first**, then the leader (`sudo apt install ./NEW.deb`). The package runs
   `furnace setup --upgrade` by itself: no questions, and your answers, data and secrets are kept. An upgrade from
-  0.9 saves the settings with the new IP names; nothing to do.
+  0.9 saves the settings with the new IP names and removes the old SSH replication login (`furnace-sync`);
+  nothing to do.
 - Change a setting: `sudo furnace setup` again (the brackets show the current answers).
 - Uninstall: README [section 12](../../README.md#12-upgrade-and-uninstall).

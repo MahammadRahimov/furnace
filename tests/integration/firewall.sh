@@ -100,6 +100,7 @@ Most entries per list${TAB}
 Days an IP stays${TAB}
 VRRP router ID (1-255)${TAB}
 SSH allowed from${TAB}
+SSH as a backup for the copy${TAB}
 $1${TAB}$2
 EOF
     if [ "${3:-}" = "full" ]; then

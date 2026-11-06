@@ -1,9 +1,9 @@
 #!/bin/bash
 # Runs every 20 seconds on both servers (systemd timer), as the furnace user.
 # Only the leader does something: it sends a database snapshot to the other server,
-# over HTTPS with the replication secret. If that does not work (for example while the
-# other server still runs an older Furnace during an upgrade), it falls back to SSH
-# with the dedicated key. The SSH fallback goes away in the version after 0.8.
+# over HTTPS with the replication secret. Only when the SSH backup copy is on
+# (REPLICATION_SSH_FALLBACK=yes, off by default) does it try SSH with the dedicated key
+# after HTTPS did not work.
 set -euo pipefail
 
 ROLE="$(cat /run/furnace-state/role 2>/dev/null || echo follower)"
@@ -11,6 +11,7 @@ if [ "$ROLE" != "leader" ]; then
     exit 0
 fi
 
+REPLICATION_SSH_FALLBACK=no
 # shellcheck source=/dev/null
 . /etc/furnace/install.env
 
@@ -22,24 +23,31 @@ record() {  # record STATE TEXT: the last result, for 'furnace status'
     printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$1" "$2" > "$RESULT.tmp" && mv -f "$RESULT.tmp" "$RESULT"
 }
 
-why=""
-if [ "${USE_HTTPS:-yes}" = "yes" ] && [ -r /etc/furnace/secrets/replica-secret ]; then
+if [ -r /etc/furnace/secrets/replica-secret ]; then
     if out="$("$LIB/bin/furnace-python" -m furnace send-replica "$PEER_IP" 2>&1)"; then
         record ok "over HTTPS: ${out##*$'\n'}"
         exit 0
     fi
     why="${out##*$'\n'}"
     why="${why#Error: }"
-    echo "Replication over HTTPS did not work ($why). Trying SSH." >&2
+else
+    why="this server has no replication secret (run: sudo furnace setup)"
 fi
 
+if [ "$REPLICATION_SSH_FALLBACK" != "yes" ]; then
+    record failed "over HTTPS: $why"
+    echo "Replication over HTTPS did not work: $why" >&2
+    exit 1
+fi
+
+echo "Replication over HTTPS did not work ($why). Trying the SSH backup copy." >&2
 "$LIB/bin/furnace-python" -m furnace snapshot "$OUT"
 if gzip -c "$OUT" | ssh -i /etc/furnace/ssh/replica_key \
     -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 \
     -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/var/lib/furnace/replica/known_hosts \
     "furnace-sync@${PEER_IP}"; then
-    record ok "over SSH${why:+ (HTTPS: $why)}"
+    record ok "over SSH (HTTPS: $why)"
 else
-    record failed "HTTPS: ${why:-not used}; SSH failed too"
+    record failed "HTTPS: $why; the SSH backup copy failed too"
     exit 1
 fi

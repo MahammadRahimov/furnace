@@ -55,6 +55,11 @@ fw_web_open_to_all() {
     if [ "$FWTOOL" = ufw ]; then grep -E '^443/tcp +ALLOW +Anywhere' <<< "$1" | grep -q 'furnace web'
     else grep -qx 'rule port port="443" protocol="tcp" accept' <<< "$1"; fi
 }
+fw_peer_ssh() {  # fw_peer_ssh RULES PEER_IP: the other server's SSH rule (only with the SSH backup copy)
+    if [ "$FWTOOL" = ufw ]; then grep -q 'furnace replication' <<< "$1"
+    else grep -q "source address=\"$2\" port port=\"22\"" <<< "$1"; fi
+}
+no_peer_ssh() { ! fw_peer_ssh "$@"; }
 PASSED=0
 FAILED=0
 
@@ -163,6 +168,9 @@ PEER_IP=$FOLLOWER_IP
 SHARED_IP=$SHARED_IP"
 out="$(on "$LEADER" "furnace setup --check --config /root/mixed.env 2>&1" || true)"
 check "old and new IP names together are refused" grep -q "not both" <<< "$out"
+on "$LEADER" "cp /root/same.env /root/http.env && echo USE_HTTPS=no >> /root/http.env"
+out="$(on "$LEADER" "furnace setup --check --config /root/http.env 2>&1" || true)"
+check "plain HTTP (USE_HTTPS=no) is refused: it was removed" grep -q "USE_HTTPS=no (plain HTTP) was removed" <<< "$out"
 
 step "Set up the leader by answering the questions"
 TAB=$'\t'
@@ -181,6 +189,7 @@ Most entries per list${TAB}
 Days an IP stays${TAB}
 VRRP router ID (1-255)${TAB}
 SSH allowed from${TAB}
+SSH as a backup for the copy to the other server? [no]${TAB}
 own firewall ($FWTOOL)?${TAB}
 Token name [api]:${TAB}soar
 Box number, or Enter when done:${TAB}5
@@ -225,6 +234,10 @@ check "no secret in the database" on "$LEADER" "! sqlite3 /var/lib/furnace/furna
 check "the EDL users file has a SHA-512 hash, readable by nginx only" \
     on "$LEADER" "grep -q '^lists:\\\$6\\\$' /var/lib/furnace-auth/edl-users && [ \"\$(stat -c '%U %G %a' /var/lib/furnace-auth/edl-users)\" = 'furnace $NGINX_GROUP 640' ]"
 check "cleanup timer runs on the leader" on "$LEADER" "systemctl is-active --quiet furnace-cleanup.timer"
+check "the SSH backup copy is off by default (saved as no)" on "$LEADER" "grep -qx 'REPLICATION_SSH_FALLBACK=no' /etc/furnace/setup.conf"
+check "no furnace-sync user and no SSH login for the other server" \
+    on "$LEADER" "! id furnace-sync >/dev/null 2>&1 && ! test -e /var/lib/furnace-sync && ! systemctl is-enabled --quiet furnace-apply-replica.path"
+check "the host firewall has no SSH rule for the other server" no_peer_ssh "$(fw_rules "$LEADER")" "$FOLLOWER_IP"
 
 step "The leader bundle file still works (setup --check with --bundle on the follower)"
 copy_between "$LEADER" /root/furnace-peer-bundle.tar.gz "$FOLLOWER" /root/copied-bundle.tgz
@@ -437,7 +450,7 @@ check "the follower got the tokens and the EDL login" \
     [ "$(on "$LEADER" 'furnace token list; furnace edl-user list')" = "$(on "$FOLLOWER" 'furnace token list; furnace edl-user list')" ]
 check "the follower refuses token changes" on "$FOLLOWER" "furnace token add late 2>&1 | grep -q 'Run this on the leader'"
 
-step "Replication goes over HTTPS (SSH only as the fallback for an older follower)"
+step "Replication goes over HTTPS (SSH only as an optional backup, off by default)"
 check "both servers have the same replication secret, readable by the furnace group only" bash -c '
     [ "$(docker exec "$1" sha256sum < /etc/furnace/secrets/replica-secret)" = "$(docker exec "$2" sha256sum < /etc/furnace/secrets/replica-secret)" ] &&
     [ "$(docker exec "$1" stat -c "%U %G %a" /etc/furnace/secrets/replica-secret)" = "root furnace 640" ] &&
@@ -452,15 +465,52 @@ check "the leader sends over HTTPS" wait_result ' ok over HTTPS: sent'
 check "status shows the replication" bash -c 'grep -q "Replication: ok over HTTPS" <<< "$1"' _ "$(on "$LEADER" "furnace status")"
 check "only the other server may send a snapshot (403)" \
     [ "$(code_from "$XSOAR" "https://$FOLLOWER_IP/replica/snapshot")" = "403" ]
-# An older follower (0.7) has no HTTPS replication: take it away for a moment, the leader must use SSH.
-on "$FOLLOWER" "sed -i 's/^FURNACE_REPLICA_SECRET_FILE=/#OFF_FURNACE_REPLICA_SECRET_FILE=/' /etc/furnace/furnace.env && systemctl restart furnace-api"
-check "with an older follower the leader falls back to SSH" wait_result ' ok over SSH \(HTTPS: .*older Furnace'
+break_https() { on "$FOLLOWER" "sed -i 's/^FURNACE_REPLICA_SECRET_FILE=/#OFF_FURNACE_REPLICA_SECRET_FILE=/' /etc/furnace/furnace.env && systemctl restart furnace-api"; }
+fix_https() { on "$FOLLOWER" "sed -i 's/^#OFF_FURNACE_REPLICA_SECRET_FILE=/FURNACE_REPLICA_SECRET_FILE=/' /etc/furnace/furnace.env && systemctl restart furnace-api"; }
+# HTTPS broken (the follower acts like 0.7, without HTTPS replication), SSH backup off: the copy fails, and says so.
+break_https
+check "SSH backup off: when HTTPS does not work the copy fails (no SSH)" wait_result ' failed over HTTPS: .*older Furnace'
+out="$(on "$LEADER" "furnace status" || true)"
+check "status says the other server does not get the changes, and that the SSH backup is off" \
+    bash -c 'grep -q "does not get the changes" <<< "$1" && grep -q "The SSH backup copy is off" <<< "$1"' _ "$out"
+fix_https
+check "HTTPS works again" wait_result ' ok over HTTPS: sent'
+# Turn the SSH backup on, the way an upgrade from 0.7 does it: a server without a replication secret
+# (set up before 0.8) keeps SSH, because the other server may still be 0.7.
+for box in "$LEADER" "$FOLLOWER"; do
+    on "$box" "mv /etc/furnace/secrets/replica-secret /root/replica-secret.saved && sed -i '/^REPLICATION_SSH_FALLBACK=/d' /etc/furnace/setup.conf"
+    out="$(on "$box" "furnace setup --upgrade 2>&1")" && rc=0 || rc=$?
+    check "$box: an upgrade from 0.7 keeps the SSH backup on, and says when to turn it off" \
+        bash -c '[ "$1" = 0 ] && grep -q "came from Furnace 0.7 or older" <<< "$2"' _ "$rc" "$out"
+    check "$box: saved as on, the furnace-sync user is there" \
+        on "$box" "grep -qx 'REPLICATION_SSH_FALLBACK=yes' /etc/furnace/setup.conf && id furnace-sync >/dev/null && test -s /var/lib/furnace-sync/.ssh/authorized_keys"
+    check "$box: the replication secret is the same as before" on "$box" "cmp -s /etc/furnace/secrets/replica-secret /root/replica-secret.saved"
+    on "$box" "rm -f /root/replica-secret.saved"
+done
+lab_allow_test_ranges
+check "the host firewall lets the other server in over SSH" fw_peer_ssh "$(fw_rules "$LEADER")" "$FOLLOWER_IP"
+break_https
+check "SSH backup on: when HTTPS does not work the leader uses SSH" wait_result ' ok over SSH \(HTTPS: .*older Furnace'
 api POST /api/v1/ips '{"ip":"198.51.100.79","reason":"over ssh"}' >/dev/null
 check "and the follower still gets the changes" bash -c 'for _ in $(seq 1 90); do
     docker exec "$1" grep -qx 198.51.100.79 /var/lib/furnace-edl/blocklist.txt && exit 0; sleep 1; done; exit 1' _ "$FOLLOWER"
-check "status names the fallback" bash -c 'grep -q "SSH is the fallback" <<< "$1"' _ "$(on "$LEADER" "furnace status")"
-on "$FOLLOWER" "sed -i 's/^#OFF_FURNACE_REPLICA_SECRET_FILE=/FURNACE_REPLICA_SECRET_FILE=/' /etc/furnace/furnace.env && systemctl restart furnace-api"
-check "after the upgrade of the follower it is HTTPS again" wait_result ' ok over HTTPS: sent'
+out="$(on "$LEADER" "furnace status" || true)"
+check "status warns that HTTPS does not work and the copy went over SSH" \
+    bash -c 'grep -q "HTTPS does not work: the copy went over the SSH backup" <<< "$1" && grep -q "SSH backup: on" <<< "$1"' _ "$out"
+fix_https
+check "when HTTPS works again it is HTTPS again" wait_result ' ok over HTTPS: sent'
+# Turn the SSH backup off again (as the setup message says): the user, the login and the firewall rule go.
+for box in "$LEADER" "$FOLLOWER"; do
+    on "$box" "sed -i 's/^REPLICATION_SSH_FALLBACK=.*/REPLICATION_SSH_FALLBACK=no/' /etc/furnace/setup.conf"
+    out="$(on "$box" "furnace setup --upgrade 2>&1")" && rc=0 || rc=$?
+    check "$box: SSH backup off again: furnace-sync and its login removed" \
+        bash -c '[ "$1" = 0 ] && grep -q "removed the user furnace-sync" <<< "$2"' _ "$rc" "$out"
+    check "$box: no furnace-sync user" on "$box" "! id furnace-sync >/dev/null 2>&1 && ! test -e /var/lib/furnace-sync"
+    other="$FOLLOWER_IP"; [ "$box" = "$LEADER" ] || other="$LEADER_IP"
+    check "$box: no SSH rule for the other server" no_peer_ssh "$(fw_rules "$box")" "$other"
+done
+lab_allow_test_ranges
+check "replication still goes over HTTPS" wait_result ' ok over HTTPS: sent'
 api DELETE /api/v1/ips/198.51.100.79 >/dev/null
 # Let the next copy carry the delete before the failover below. Otherwise the new leader still has the IP
 # (changes of the last 20 seconds are lost in a failover: the known window, README 10.1).
@@ -477,7 +527,12 @@ check "the imported IP is served" grep -qx "198.51.100.90" <<< "$(edl blocklist.
 step "Package upgrade (apt install --reinstall) keeps data and tokens"
 before_tokens="$(on "$LEADER" 'furnace token list; furnace edl-user list')"
 # Make the saved settings look like 0.9.0 (THIS_IP/PEER_IP): the upgrade must keep them and save the new names.
-on "$LEADER" "sed -i -e 's/^LEADER_IP=/THIS_IP=/' -e 's/^FOLLOWER_IP=/PEER_IP=/' /etc/furnace/setup.conf"
+on "$LEADER" "sed -i -e 's/^LEADER_IP=/THIS_IP=/' -e 's/^FOLLOWER_IP=/PEER_IP=/' -e '/^REPLICATION_SSH_FALLBACK=/d' /etc/furnace/setup.conf && echo USE_HTTPS=yes >> /etc/furnace/setup.conf"
+# 0.9.0 always had the SSH replication login: put it back, the upgrade must remove it.
+on "$LEADER" "useradd --system --user-group --home-dir /var/lib/furnace-sync --create-home --shell /bin/sh furnace-sync && mkdir -p /var/lib/furnace-incoming"
+if [ "$FWTOOL" = ufw ]; then
+    on "$LEADER" "ufw allow from $FOLLOWER_IP to any port 22 proto tcp comment 'furnace replication' >/dev/null"
+fi
 out="$(pkg_reinstall "$LEADER")"
 printf '%s\n' "$out" | tail -n 5
 lab_allow_test_ranges
@@ -485,6 +540,9 @@ check "the upgrade ran setup with the saved settings" grep -q "self-test passed"
 check "settings from 0.9.0 (THIS_IP/PEER_IP) are saved with the new names" on "$LEADER" \
     "grep -qx 'LEADER_IP=$LEADER_IP' /etc/furnace/setup.conf && grep -qx 'FOLLOWER_IP=$FOLLOWER_IP' /etc/furnace/setup.conf && ! grep -q '^THIS_IP=' /etc/furnace/setup.conf"
 check "the upgrade made no new secrets" bash -c '! grep -q "NEW SECRETS" <<< "$1"' _ "$out"
+check "an upgrade from 0.9 turns the SSH backup off and removes furnace-sync" on "$LEADER" \
+    "grep -qx 'REPLICATION_SSH_FALLBACK=no' /etc/furnace/setup.conf && ! grep -q '^USE_HTTPS=' /etc/furnace/setup.conf && ! id furnace-sync >/dev/null 2>&1 && ! test -e /var/lib/furnace-sync && ! test -e /var/lib/furnace-incoming"
+check "and its SSH firewall rule for the other server" no_peer_ssh "$(fw_rules "$LEADER")" "$FOLLOWER_IP"
 check "no secrets file after the upgrade" on "$LEADER" "! test -e /root/furnace-new-secrets.txt"
 check "tokens and EDL login unchanged" [ "$before_tokens" = "$(on "$LEADER" 'furnace token list; furnace edl-user list')" ]
 check "the old token still works" grep -q ' 200$' <<< "$(api GET "/api/v1/ips/$TEST_IP")"

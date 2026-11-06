@@ -22,13 +22,8 @@ has_shared_ip() {
     ip -o -4 addr show dev "$INTERFACE" | grep -qF "inet ${SHARED_IP}/"
 }
 
-if [ "$USE_HTTPS" = "yes" ]; then
-    URL="https://${SHARED_IP}/health"
-    CURL_TLS=(--cacert /etc/furnace/tls/furnace.crt)
-else
-    URL="http://${SHARED_IP}/health"
-    CURL_TLS=()
-fi
+URL="https://${SHARED_IP}/health"
+CURL_TLS=(--cacert /etc/furnace/tls/furnace.crt)
 
 if ! has_shared_ip; then
     echo "This server does not own the shared IP ${SHARED_IP}. Run the test on the leader." >&2

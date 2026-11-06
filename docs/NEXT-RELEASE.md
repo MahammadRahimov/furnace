@@ -90,4 +90,9 @@ ports to open and the failover test. Linked from the README.
 
 ### Decided, not started
 
-Already decided (user decision 2026-11-01): SSH replication is removed (HTTPS only). Not started.
+Decided 2026-11-07 (user), being built now (replaces the 2026-11-01 decision to remove SSH replication):
+**SSH replication stays, but as an optional backup, off by default.** HTTPS is always on; with
+`REPLICATION_SSH_FALLBACK=yes` the leader copies over SSH only when HTTPS does not work, and `furnace status` warns.
+(1) Plain HTTP (`USE_HTTPS=no`, a test setting) is removed. (2) The admin's own SSH rule (`SSH allowed from`)
+stays. (3) An upgrade from 0.9 turns SSH off and removes `furnace-sync` and its login; a server from 0.7 or older
+keeps SSH on during the upgrade, with a note to turn it off. Your own certificate: not wanted (user, 2026-11-07).

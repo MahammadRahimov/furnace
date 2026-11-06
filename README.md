@@ -157,6 +157,7 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    Days an IP stays blocked (permanent IPs never expire) [30]:
    VRRP router ID (1-255) [51]:
    SSH allowed from [any]:
+   Use SSH as a backup for the copy to the other server? [no]:
    Let Furnace set up this server's own firewall (ufw)? [yes]:      (the firewall that is active here)
 
      The first API token, for the system that calls the API (for example a SOAR or a script).
@@ -246,7 +247,8 @@ work; setup then suggests the new names.)
 - Stops at the first error (strict mode) and tells you what went wrong.
 - Checks that it runs as root on a supported system, and checks every answer.
 - Saves the answers in `/etc/furnace/setup.conf` (readable by root only, it holds the keepalived password).
-- Creates the user `furnace` (no login) and the user `furnace-sync` (can only receive replication snapshots).
+- Creates the user `furnace` (no login). Only with the SSH backup copy on: also the user `furnace-sync` (can only
+  receive replication snapshots).
 - Leader: creates a self-signed certificate (10 years, names the shared IP and both server IPs), the replication
   SSH key and the keepalived password. Follower: copies them from the bundle. Both: the replication secret,
   derived from the certificate key they share (so both have the same one, without copying anything new).
@@ -265,8 +267,8 @@ work; setup then suggests the new names.)
     it leaves the firewall alone and says why.
    With firewalld it adds rich rules to the default zone and remembers them in
   `/etc/furnace/firewalld.rules`, so it can remove them again.
-- With SELinux on (Red Hat family): labels the list folders for nginx (`httpd_sys_content_t`), the replication key
-  folder for sshd (`ssh_home_t`) and the two keepalived scripts (`keepalived_unconfined_script_exec_t`), and turns on
+- With SELinux on (Red Hat family): labels the list folders for nginx (`httpd_sys_content_t`), the SSH backup
+  login folder for sshd (`ssh_home_t`, only when it is on) and the two keepalived scripts (`keepalived_unconfined_script_exec_t`), and turns on
   `httpd_can_network_connect` so nginx may pass API calls to Furnace on `127.0.0.1:8081`.
 - Starts everything and runs a **self-test**: it adds the fake IP `192.0.2.123`, checks that nginx serves it in
   `blocklist.txt`, removes it, and checks that it is gone. It also checks that the archive and the database are
@@ -541,16 +543,16 @@ Each question saves one setting in `/etc/furnace/setup.conf`. The same names are
 | Most entries per list | `MAX_IPS`, `MAX_DOMAINS` | `50000` | The list reader's limit per list. Adds beyond it are refused. 0 = no limit. The question sets both; a settings file can set them apart. |
 | Days an IP stays blocked | `ARCHIVE_AFTER_DAYS` | `90` | Days a temporary IP stays in the list before the nightly job removes it. Permanent IPs and domains never expire. |
 | VRRP router ID | `VRRP_ROUTER_ID` | `51` | 1-255. Same on both servers. Must be unique in the network segment. |
-| SSH allowed from | `SSH_ALLOW_FROM` | `any` | Who may use SSH. `any` or a list of IPs. The other server is always allowed. |
+| SSH allowed from | `SSH_ALLOW_FROM` | `any` | Who may log in with SSH (people, for example admins). `any` or a list of IPs. |
+| Use SSH as a backup for the copy? | `REPLICATION_SSH_FALLBACK` | `no` | `yes` = when HTTPS does not work, the leader copies over SSH (adds the user `furnace-sync` and SSH from the other server). `no` = HTTPS only. Section 10. |
 | Set up the host firewall? | `HOST_FIREWALL` | the active one | `ufw` or `firewalld` = configure it; it must be the active one, or the only one installed when none is active (then setup turns it on). `none` = leave it alone. Not in a settings file: the active one, or `none` when no firewall is active. Both active: setup stops (use `none` and open the ports yourself). |
 | (not asked) | `KEEPALIVED_PASSWORD` | random | VRRP (Virtual Router Redundancy Protocol) password, 6-8 characters. Created on the leader. The follower gets it from the bundle. |
-| (not asked) | `USE_HTTPS` | `yes` | `yes` = HTTPS. `no` = plain HTTP, for a test lab only (settings file only). |
 
 Before 0.3.1, `API_ALLOW_FROM` was called `XSOAR_IP` and `LISTS_ALLOW_FROM` was called `FIREWALL_IP`. The old names
 still work in a settings file. Setup saves the new names.
 
 The follower takes `SHARED_IP`, `SHARED_IP_PREFIX`, `API_ALLOW_FROM`, `LISTS_ALLOW_FROM`, `MAX_IPS`, `MAX_DOMAINS`,
-`ARCHIVE_AFTER_DAYS`, `KEEPALIVED_PASSWORD`, `VRRP_ROUTER_ID` and `USE_HTTPS` from the leader. If you change one of
+`ARCHIVE_AFTER_DAYS`, `KEEPALIVED_PASSWORD`, `VRRP_ROUTER_ID` and `REPLICATION_SSH_FALLBACK` from the leader. If you change one of
 them later, run `sudo furnace setup` on both servers with the same answer.
 
 The program settings live in `/etc/furnace/furnace.env` (written by setup). They all start with `FURNACE_`:
@@ -582,8 +584,7 @@ Setup cannot do these things for you.
 - [ ] List reader (its download source address) -> shared IP, TCP 443.
 - [ ] Caller (and any helper servers it uses, for example SOAR engines) -> shared IP, TCP 443.
 - [ ] Leader <-> follower: HTTPS (TCP 443) both ways, for replication and the health check.
-- [ ] Leader <-> follower: SSH (TCP 22) both ways. Versions 0.8 and 0.9 need it only as the replication fallback while one
-  server still runs an older Furnace (during an upgrade). The next version no longer uses it.
+- [ ] Only with the SSH backup copy on (`REPLICATION_SSH_FALLBACK=yes`): leader <-> follower, SSH (TCP 22) both ways.
 - [ ] Leader <-> follower: VRRP (IP protocol 112) both ways, unicast.
 - [ ] The network must allow the shared IP to move between the two servers (ARP updates). In a virtual
       environment (VMware, Hyper-V, cloud), check that MAC spoofing / IP moves are allowed for these VMs.
@@ -1266,9 +1267,13 @@ The nightly cleanup:
   `https://OTHER_SERVER_IP/replica/snapshot`, with the replication secret both servers share. nginx lets only the other
   server reach this address. The follower checks the secret, loads the snapshot, rebuilds its EDL files and
   answers at once, so the leader knows that it worked. `sudo furnace status` on the leader shows the last result.
-- **SSH fallback (0.8 and 0.9 only):** if HTTPS does not work, for example while the follower still runs an older
-  Furnace during an upgrade, the leader pushes the snapshot over SSH as before (a dedicated key that can only run
-  the receive command). `furnace status` then says so. The next version removes SSH replication.
+- **SSH backup copy (optional, off by default since 0.10.0).** With `REPLICATION_SSH_FALLBACK=yes` (the setup
+  question "Use SSH as a backup for the copy to the other server?"), the leader pushes the snapshot over SSH when
+  HTTPS does not work. It uses a dedicated key that can only run the receive command, as the user `furnace-sync`.
+  `furnace status` then warns that HTTPS does not work, so the backup never hides a problem. Off, there is no
+  `furnace-sync` user and no SSH between the servers: when HTTPS does not work, the copy fails and
+  `furnace status` says so. Docker has no SSH backup (HTTPS only).
+  Turn it on or off: `sudo furnace setup` on **both** servers with the same answer.
 - The follower refuses all changes while it is not the leader (`503 not_leader`).
 
 ### 10.1 Risks
@@ -1276,7 +1281,7 @@ The nightly cleanup:
 - **Split brain.** If the two servers cannot see each other but both are alive, both take the shared IP.
   Each one accepts changes, and neither takes snapshots from the other. When the link comes back, one keeps the IP.
   Changes made on the other server during the split are overwritten by the next snapshot. Check the audit log of
-  both servers after a network problem. Keep VRRP and SSH between the servers on a reliable path.
+  both servers after a network problem. Keep VRRP and HTTPS between the servers on a reliable path.
 - **Up to 20 seconds of lost changes.** If the leader dies, changes from its last 20 seconds may not have reached the
   follower. The caller got a success answer for them. Ask analysts to re-click after a failover, or check the audit log.
   The duplicate rule makes a re-click harmless.
@@ -1311,7 +1316,7 @@ shared IP as the leader, and then starts the service again. Afterwards the other
 | `/etc/furnace/whitelist-refuse.txt` | Your own names that may never be whitelisted (optional, the same on both servers). |
 | `/usr/lib/furnace/furnace/public_suffix_list.dat` | The Public Suffix List (shared platforms and public names), MPL 2.0, updated with each release. |
 | `/etc/furnace/secrets/replica-secret` | The replication secret (from the certificate key). Root and the furnace group. |
-| `/etc/furnace/ssh/` | SSH replication key (the fallback in this version). |
+| `/etc/furnace/ssh/` | The SSH key for the SSH backup copy. It opens nothing while the backup is off (no login accepts it). |
 | `/var/lib/furnace/furnace.db` | The database (master record), with the API tokens and list logins as hashes. |
 | `/var/lib/furnace/lockout.db` | Addresses locked after wrong tokens (this server only). |
 | `/var/lib/furnace-auth/edl-users` | List logins for nginx (name and hash), written from the database. Never served. |
@@ -1319,13 +1324,13 @@ shared IP as the leader, and then starts the service again. Afterwards the other
 | `/var/lib/furnace/backups/` | Database backups. |
 | `/var/lib/furnace/reports/` | Import reports. |
 | `/var/lib/furnace-edl/` | `blocklist.txt`, `domains.txt` and `urls.txt` (served by nginx). |
-| `/var/lib/furnace-incoming/` | Snapshots received from the other server. |
+| `/var/lib/furnace-incoming/` | Snapshots received over SSH (only with the SSH backup copy on). |
 | `/run/furnace-state/role` | `leader` or `follower` (written by keepalived). |
 | `/var/log/furnace-setup.log` | Setup log. No secrets. |
 | `/root/furnace-new-secrets.txt` | Only when setup made new secrets without a person at the terminal (package upgrade). Read it, then delete it. |
 
 Services: `furnace-api` (gunicorn), `nginx`, `keepalived`. Timers: `furnace-cleanup`, `furnace-backup`,
-`furnace-replicate`. Path unit: `furnace-apply-replica`.
+`furnace-replicate`. Path unit: `furnace-apply-replica` (only with the SSH backup copy on).
 Logs: `journalctl -u furnace-api`, `/var/log/nginx/furnace-access.log`.
 
 ## 12. Upgrade and uninstall
@@ -1340,6 +1345,17 @@ The package runs `furnace setup --upgrade` by itself. It uses the saved answers 
 Data, tokens and the certificate are kept. The API is reloaded without downtime, and keepalived is restarted only
 if its settings changed, so an upgrade does not move the shared IP. If you change answers that affect keepalived
 (for example the VRRP router ID), the restart can move the shared IP to the other server. That is safe.
+
+**From 0.9 to 0.10:** nothing to do. The servers copy over HTTPS only: the upgrade removes the SSH replication
+login of older versions (the user `furnace-sync`, its folders and the firewall rule that let the other server in
+over SSH). Your own SSH rule (`SSH allowed from`) stays. Want SSH as a backup for the copy? Run `sudo furnace setup`
+on both servers and answer yes (section 10). `setup.conf` is saved with the new IP names (`LEADER_IP`,
+`FOLLOWER_IP`). Plain HTTP (`USE_HTTPS=no`, a test setting) is gone: such a server is switched to HTTPS and setup
+says so.
+
+**From 0.7 or older straight to 0.10:** do the follower first, as always. A 0.7 server can only copy over SSH, so
+on a server that comes from 0.7 the upgrade keeps the SSH backup on, and says so. When both servers run 0.10, turn
+it off: `sudo furnace setup` on both, answer no to the SSH backup question.
 
 **From 0.8 to 0.9:** nothing to do on the servers. 0.9 adds the Docker image (section 3.6); the `.deb` and `.rpm`
 work as in 0.8.
@@ -1417,7 +1433,7 @@ RPM has no "purge". To delete all Furnace data after `dnf remove furnace`:
 ```bash
 sudo rm -rf /var/lib/furnace /var/lib/furnace-edl /var/lib/furnace-auth /var/lib/furnace-incoming \
     /var/lib/furnace-sync /etc/furnace /root/furnace-peer-bundle.tar.gz /var/log/furnace-setup.log
-sudo userdel furnace-sync; sudo userdel furnace
+sudo userdel furnace-sync 2>/dev/null; sudo userdel furnace
 ```
 
 SELinux: setup turns on `httpd_can_network_connect`. Removing Furnace leaves it on, because other programs may need
@@ -1489,8 +1505,7 @@ replicated to the follower, nginx and ufw rules with limited IPs and with `any` 
 replication both ways, the follower refusing changes, `furnace status`, an import from a file only root can read,
 a package upgrade that keeps data and tokens without moving the shared IP, both failover modes, the cleanup timer
 moving with the shared IP, `apt remove` (data kept) and `apt purge` (data deleted).
-New in 0.8: the certificate is valid and has no extension twice, replication over HTTPS every 20 seconds (and the
-SSH fallback with an older follower), blocklist files and URLs through the API, a keepalived crash (`kill -9`:
+New in 0.8: the certificate is valid and has no extension twice, replication over HTTPS every 20 seconds, blocklist files and URLs through the API, a keepalived crash (`kill -9`:
 it is restarted, and the shared IP is never on both servers; either server may then be the leader) and an
 expired certificate (the shared IP stays).
 
@@ -1540,8 +1555,9 @@ Be aware of these limits before you go live:
   not by a person over SSH.
 - **An upgrade from 0.2 on real servers.** The token migration was tested in unit tests, not with a real 0.2
   install.
-- **`USE_HTTPS=no`** (HTTP test mode; the EDL password would travel in clear text), `HOST_FIREWALL=none` and `furnace setup --config` for a follower were
-  not run in the integration test.
+- `HOST_FIREWALL=none` and `furnace setup --config` for a follower were not run in the integration test.
+- **An upgrade from a real 0.7 pair straight to 0.10.** The test makes a server look like 0.7 (no replication
+  secret) and checks that the SSH backup stays on; it does not install 0.7 first.
 
 ## 15. Examples: Palo Alto and Cortex XSOAR
 
