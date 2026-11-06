@@ -40,6 +40,23 @@ firewall).
 
 Already decided (user decision 2026-11-01): SSH replication is removed (HTTPS only). Not started.
 
-To talk about first (user, 2026-11-05): an "external keepalived" mode for Docker. The host runs keepalived, not
-the container. Needs: a setting that turns off the built-in keepalived, a notify script that writes the role
-file for the container, and a health check on the host. Nothing decided yet.
+Decided 2026-11-06 (user), being built now (order: A, B, C):
+
+**A. Clearer IP settings: the same file on both hosts.** `THIS_IP`/`PEER_IP` ("me"/"the other one") had to be
+swapped on the follower, which is easy to get wrong. New names: `LEADER_IP`, `FOLLOWER_IP`, `SHARED_IP`. The file
+is the same on both hosts; Furnace sees which of the two IPs is on its network card and so knows its role (no
+`ROLE` line needed). Neither IP on this host: it stops with a clear message. Old files with `THIS_IP`/`PEER_IP`
+keep working, with a note to switch. Docker (`FURNACE_LEADER_IP`, ...) and the packages use the same names.
+
+**B. Join code instead of copying the bundle file.** The leader shows a one-time code
+(`furnace join-code`); the follower gets it in `.env` (`FURNACE_JOIN_CODE`) or in a setup question, and fetches
+the certificate and secrets from the leader over HTTPS itself. The code works once, for 1 hour, only from the
+follower's IP; 5 wrong codes stop it; part of the code is the leader certificate's fingerprint, so the follower
+checks it talks to the real leader. The bundle file stays as a fallback. Docker and the packages.
+
+**C. External keepalived mode (Docker).** `FURNACE_KEEPALIVED=external`: the container does not run keepalived
+and needs no `NET_ADMIN`/`NET_RAW`; the host's own keepalived owns the shared IP. Furnace gets its own
+`vrrp_instance` (own shared IP, own router ID) next to the host's other services. Furnace prints the block and
+the two small scripts (notify, health check); the user pastes them, Furnace never edits `keepalived.conf`. Host
+network stays. The host writes the role file into a folder shared with the container. The built-in keepalived
+stays the default.
