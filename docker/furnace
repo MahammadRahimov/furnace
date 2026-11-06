@@ -19,6 +19,7 @@ Usage: docker exec -it CONTAINER furnace COMMAND [options]
 Health:
   status                 Show the role, the processes, replication and the list counts.
   check                  Check the FURNACE_ settings of this container.
+  join-code              Leader: make a one-time code for the follower (FURNACE_JOIN_CODE, 1 hour).
   version                Show the version.
 
 Data (details: furnace COMMAND --help):
@@ -116,6 +117,7 @@ case "${1:-help}" in
     version|--version) version ;;
     status) status ;;
     check) py -m furnace.container check ;;
+    join-code) py -m furnace.container join-code ;;
     setup|failover-test)
         echo "In Docker, the settings come from the container's environment (FURNACE_...), see docker-compose.yml." >&2
         [ "$1" = failover-test ] && echo "Test a failover with: docker stop furnace (on the leader host), then docker start furnace." >&2

@@ -117,6 +117,10 @@ class Settings:
         return self.auth_dir / "edl-users"
 
     @property
+    def join_dir(self) -> Path:
+        return self.data_dir / "join"  # the waiting join code and the encrypted bundle (furnace.join)
+
+    @property
     def lockout_db_path(self) -> Path:
         return self.data_dir / "lockout.db"
 

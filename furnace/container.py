@@ -73,6 +73,7 @@ class ContainerSettings:
     api_allow_from: str = "any"
     lists_allow_from: str = "any"
     vrrp_router_id: int = 51
+    join_code: str = ""  # follower: FURNACE_JOIN_CODE, to fetch the secrets from the leader
     problems: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)  # shown at the start, for example "use the new names"
 
@@ -191,11 +192,21 @@ def load_settings(env: dict[str, str] | None = None,
             this_ip = peer_ip = ""
         this_name = f"FURNACE_{role.upper()}_IP" if role else "FURNACE_LEADER_IP"
     shared_ip = address("SHARED_IP")
+    join_code = get("JOIN_CODE")
+    if join_code:
+        from .join import JoinError, parse_code
+        try:
+            code_ip = parse_code(join_code)[2]
+            if role == "follower" and peer_ip and code_ip != peer_ip:
+                problems.append(f"FURNACE_JOIN_CODE was made by {code_ip}, but the leader is {peer_ip}. "
+                                "Make the code on the leader: docker exec furnace furnace join-code")
+        except JoinError as exc:
+            problems.append(f"FURNACE_JOIN_CODE: {exc}")
     if shared_ip and shared_ip in (this_ip, peer_ip, get("LEADER_IP"), get("FOLLOWER_IP")):
         problems.append("FURNACE_SHARED_IP must be a third address, not the IP of one of the hosts.")
 
     s = ContainerSettings(
-        role=role, this_ip=this_ip, peer_ip=peer_ip, shared_ip=shared_ip, notes=notes,
+        role=role, this_ip=this_ip, peer_ip=peer_ip, shared_ip=shared_ip, notes=notes, join_code=join_code,
         shared_ip_prefix=_number("SHARED_IP_PREFIX", get("SHARED_IP_PREFIX"), 24, 8, 32, problems),
         interface=get("INTERFACE"),
         api_allow_from=_ip_list("API_ALLOW_FROM", get("API_ALLOW_FROM"), problems),
@@ -313,15 +324,37 @@ def prepare_secrets(s: ContainerSettings, etc: Path = ETC, group: str | None = U
             _write_secret(etc / "secrets" / "replica-secret", secrets.token_urlsafe(32), 0o640, group)
             notes.append("Replication secret made.")
         write_bundle(etc)
-        notes.append(f"Follower bundle: {bundle} (secret: copy it into the follower's /etc/furnace volume).")
+        notes.append(f"Follower bundle: {bundle} (secret: copy it into the follower's /etc/furnace volume). "
+                     "Easier: docker exec furnace furnace join-code, and give the follower the code.")
+        if s.join_code:
+            notes.append("FURNACE_JOIN_CODE is only for the follower. The leader ignores it.")
     elif not have_secrets(etc):
-        if not bundle.is_file():
+        if bundle.is_file():
+            open_bundle(bundle, etc)
+            bundle.unlink()
+            notes.append("Certificate and secrets taken from the leader's bundle (bundle file deleted).")
+        elif s.join_code:
+            from .join import JoinError, fetch
+            try:
+                data = fetch(s.join_code, s.peer_ip)
+            except JoinError as exc:
+                raise SettingsError(f"  - The join code did not work: {exc}") from None
+            etc.mkdir(parents=True, exist_ok=True)
+            old = os.umask(0o077)
+            try:
+                bundle.write_bytes(data)
+            finally:
+                os.umask(old)
+            open_bundle(bundle, etc)
+            bundle.unlink()
+            notes.append(f"Certificate and secrets fetched from the leader {s.peer_ip} with the join code. "
+                         "You can remove FURNACE_JOIN_CODE from .env now (it is used up).")
+        else:
             raise SettingsError(
-                f"  - This follower has no secrets yet. Copy {BUNDLE_NAME} from the leader's /etc/furnace "
-                f"volume into this host's /etc/furnace volume, then start the container again.")
-        open_bundle(bundle, etc)
-        bundle.unlink()
-        notes.append("Certificate and secrets taken from the leader's bundle (bundle file deleted).")
+                "  - This follower has no secrets yet. Either: make a join code on the leader "
+                "(docker exec furnace furnace join-code), put it in .env as FURNACE_JOIN_CODE=... and start "
+                f"again. Or: copy {BUNDLE_NAME} from the leader's /etc/furnace volume into this host's "
+                "/etc/furnace volume, then start the container again.")
     # The furnace user (replication) reads the certificate and the replication secret, never the key.
     os.chmod(etc / "tls", 0o750)
     os.chmod(etc / "tls" / "furnace.key", 0o600)
@@ -379,6 +412,14 @@ def template_values(s: ContainerSettings, etc: Path = ETC) -> dict[str, str]:
                     "        proxy_pass http://127.0.0.1:8081/replica/snapshot;\n"
                     "        proxy_set_header X-Forwarded-For $remote_addr;\n"
                     "        proxy_read_timeout 120s;\n"
+                    "    }\n"
+                    "    # Join code: only the follower may fetch the (encrypted) secrets, once (furnace join-code).\n"
+                    "    location = /join {\n"
+                    f"        allow {s.peer_ip};\n"
+                    "        deny all;\n"
+                    "        client_max_body_size 4k;\n"
+                    "        proxy_pass http://127.0.0.1:8081/join;\n"
+                    "        proxy_set_header X-Forwarded-For $remote_addr;\n"
                     "    }\n"),
     }
 
@@ -665,6 +706,32 @@ def start() -> int:
         return 2
 
 
+def join_code(etc: Path = ETC, data: Path = DATA, owner: str | None = USER) -> int:
+    """Leader: make a one-time code the follower uses to fetch the secrets (FURNACE_JOIN_CODE)."""
+    from .join import LIFETIME, cert_der, make
+    try:
+        s = load_settings()
+    except SettingsError as exc:
+        print(f"Settings are not right:\n{exc}")
+        return 2
+    if s.role != "leader":
+        print("Make the join code on the leader (the host that has FURNACE_LEADER_IP).")
+        return 2
+    if not have_secrets(etc):
+        print("The leader has no secrets yet. Start it first (docker compose up -d), then make the code.")
+        return 2
+    bundle = write_bundle(etc).read_bytes()
+    code = make(bundle, cert_der(etc / "tls" / "furnace.crt"), s.this_ip, data / "join", owner)
+    print(f"""Join code for the follower (works once, for {LIFETIME // 60} minutes, only from {s.peer_ip}):
+
+    {code}
+
+On the follower host, add this line to .env, then start the follower:
+    FURNACE_JOIN_CODE={code}
+The follower fetches the certificate and the secrets from this leader over HTTPS. A new code replaces this one.""")
+    return 0
+
+
 def _version() -> str:
     from . import __version__
     return __version__
@@ -685,6 +752,8 @@ def main(argv: list[str]) -> int:
         for note in s.notes:
             print(f"Note: {note}")
         return 0
+    if command == "join-code":
+        return join_code()
     if command == "replicate":
         try:
             print(replicate(load_settings().peer_ip))

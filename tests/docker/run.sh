@@ -142,18 +142,38 @@ check "the API runs as the furnace user, not root" \
     on "$LEADER" "[ \"\$(ps -o user= -C gunicorn -C python3 | grep -c furnace)\" -ge 1 ] || pgrep -u furnace -f gunicorn >/dev/null"
 docker cp "$LEADER:/etc/furnace/tls/furnace.crt" - | docker cp - "$CLIENT:/root/"
 
-step "The follower needs the leader's bundle"
+step "The follower gets the leader's secrets with a join code"
 create_host "$FOLLOWER" "$FOLLOWER_IP"
 docker start "$FOLLOWER" >/dev/null
 wait_for 30 bash -c "[ \"\$(docker inspect -f '{{.State.Running}}' $FOLLOWER)\" = false ]" || true
-check "without the bundle it stops and says what to do" \
-    bash -c 'docker logs "$1" 2>&1 | grep -q "Copy furnace-peer-bundle.tar.gz from the leader"' _ "$FOLLOWER"
-docker cp "$LEADER:/etc/furnace/furnace-peer-bundle.tar.gz" - | docker cp - "$FOLLOWER:/etc/furnace/"
+check "without a code or the bundle it stops and says what to do" \
+    bash -c 'docker logs "$1" 2>&1 | grep -q "furnace join-code" && docker logs "$1" 2>&1 | grep -q "furnace-peer-bundle.tar.gz"' _ "$FOLLOWER"
+out="$(docker exec "$LEADER" furnace join-code)"
+CODE="$(grep -oE 'FJ1(-[A-Z2-7]{4}){8}' <<< "$out" | head -n1)"
+check "the leader makes a join code" [ -n "$CODE" ]
+check "only the follower may use it (nginx refuses the client box)" \
+    [ "$(code "-X" POST "https://$LEADER_IP/join")" = 403 ]
+# One letter of the secret changed: a wrong code, refused by the leader, the follower stops and says why.
+c="${CODE:4:1}"; [ "$c" = A ] && n=B || n=A
+BAD="${CODE:0:4}$n${CODE:5}"
+docker rm -f "$FOLLOWER" >/dev/null
+create_host "$FOLLOWER" "$FOLLOWER_IP" -e FURNACE_JOIN_CODE="$BAD"
 docker start "$FOLLOWER" >/dev/null
-check "with the bundle the follower is ready" wait_ready "$FOLLOWER"
-check "the follower found its role from its own IP"     bash -c 'docker logs "$1" 2>&1 | grep -q "This host is the follower (198.51.100.12)"' _ "$FOLLOWER"
-check "it took the secrets from the bundle and deleted it" bash -c 'docker logs "$1" 2>&1 | grep -q "taken from the leader.s bundle" &&
+wait_for 30 bash -c "[ \"\$(docker inspect -f '{{.State.Running}}' $FOLLOWER)\" = false ]" || true
+check "a wrong join code is refused and explained" \
+    bash -c 'docker logs "$1" 2>&1 | grep -q "The join code did not work: The leader said: The join code is wrong"' _ "$FOLLOWER"
+docker rm -f "$FOLLOWER" >/dev/null
+create_host "$FOLLOWER" "$FOLLOWER_IP" -e FURNACE_JOIN_CODE="$CODE"
+docker start "$FOLLOWER" >/dev/null
+check "with the right code the follower is ready" wait_ready "$FOLLOWER"
+check "the follower found its role from its own IP" \
+    bash -c 'docker logs "$1" 2>&1 | grep -q "This host is the follower (198.51.100.12)"' _ "$FOLLOWER"
+check "it fetched the secrets with the join code (no bundle file left)" \
+    bash -c 'docker logs "$1" 2>&1 | grep -q "fetched from the leader 198.51.100.11 with the join code" &&
     docker exec "$1" test ! -e /etc/furnace/furnace-peer-bundle.tar.gz' _ "$FOLLOWER"
+out="$(on "$FOLLOWER" "/usr/lib/furnace/bin/furnace-python -m furnace.join fetch --code '$CODE' --out /tmp/again 2>&1" || true)"
+check "the code works only once" grep -q "No join code is waiting" <<< "$out"
+check "the leader keeps nothing of the code" on "$LEADER" "! ls /var/lib/furnace/join/code.json /var/lib/furnace/join/bundle.enc 2>/dev/null"
 check "same certificate on both" [ "$(on "$LEADER" 'sha256sum < /etc/furnace/tls/furnace.crt')" = "$(on "$FOLLOWER" 'sha256sum < /etc/furnace/tls/furnace.crt')" ]
 check "the follower does not own the shared IP" bash -c '! docker exec "$1" ip -4 addr show eth0 | grep -q "inet $2/"' _ "$FOLLOWER" "$SHARED_IP"
 check "the follower says follower" [ "$(role_of "$FOLLOWER")" = "follower" ]

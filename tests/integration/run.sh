@@ -226,10 +226,33 @@ check "the EDL users file has a SHA-512 hash, readable by nginx only" \
     on "$LEADER" "grep -q '^lists:\\\$6\\\$' /var/lib/furnace-auth/edl-users && [ \"\$(stat -c '%U %G %a' /var/lib/furnace-auth/edl-users)\" = 'furnace $NGINX_GROUP 640' ]"
 check "cleanup timer runs on the leader" on "$LEADER" "systemctl is-active --quiet furnace-cleanup.timer"
 
-step "Set up the follower (bundle copied from the leader: the role, the card and turning on the host firewall)"
-copy_between "$LEADER" /root/furnace-peer-bundle.tar.gz "$FOLLOWER" /root/furnace-peer-bundle.tar.gz
+step "The leader bundle file still works (setup --check with --bundle on the follower)"
+copy_between "$LEADER" /root/furnace-peer-bundle.tar.gz "$FOLLOWER" /root/copied-bundle.tgz
+out="$(on "$FOLLOWER" "furnace setup --check --config /root/same.env --bundle /root/copied-bundle.tgz 2>&1" || true)"
+check "the follower reads the copied bundle" grep -q "Follower: secrets come from the leader bundle /root/copied-bundle.tgz" <<< "$out"
+check "and takes this server's IP from it" grep -q "Settings: role follower, this server $FOLLOWER_IP" <<< "$out"
+on "$FOLLOWER" "rm -f /root/copied-bundle.tgz"
+
+step "Set up the follower with a join code (the role, the code, the card and turning on the host firewall)"
+out="$(on "$LEADER" "furnace join-code")"
+CODE="$(grep -oE 'FJ1(-[A-Z2-7]{4}){8}' <<< "$out" | head -n1)"
+check "the leader makes a join code" [ -n "$CODE" ]
+check "it says it works only from the follower" grep -q "only from $FOLLOWER_IP" <<< "$out"
+check "the code waits on the leader, readable by the furnace user only" \
+    on "$LEADER" "[ \"\$(stat -c '%U %a' /var/lib/furnace/join/bundle.enc)\" = 'furnace 600' ]"
+out="$(on "$FW" "curl -sk -o /dev/null -w '%{http_code}' -X POST https://$LEADER_IP/join" || true)"
+check "only the follower may use it (nginx refuses another address)" [ "$out" = 403 ]
+on "$FOLLOWER" "printf 'JOIN_CODE=$CODE\n' >> /root/same.env"
+out="$(on "$FOLLOWER" "furnace setup --check --config /root/same.env 2>&1" || true)"
+check "check mode does not use the code up" grep -q "Check mode does not use the join code" <<< "$out"
+on "$FOLLOWER" "sed -i '/^JOIN_CODE=/d' /root/same.env"
+c="${CODE:4:1}"; [ "$c" = A ] && n=B || n=A
+BAD="${CODE:0:4}$n${CODE:5}"
 put "$FOLLOWER" /root/answers.txt <<EOF
 leader or the follower?${TAB}follower
+Join code from the leader${TAB}FJ1-NOT-A-CODE
+Join code from the leader${TAB}$BAD
+Join code from the leader${TAB}$CODE
 Network card name [${TAB}
 own firewall ($FWTOOL)?${TAB}
 Set up Furnace with these settings?${TAB}y
@@ -237,6 +260,10 @@ EOF
 out="$(on "$FOLLOWER" "$FPY /root/answer.py /root/answers.txt -- furnace setup" 2>&1)" && rc=0 || rc=$?
 printf '%s\n' "$out"
 check "follower setup finished with the self-test passed" [ "$rc" = 0 ]
+check "a code with a typo is explained" grep -q "not complete or has a typo" <<< "$out"
+check "a wrong code is refused by the leader" grep -q "The leader said: The join code is wrong" <<< "$out"
+check "the right code fetched the secrets" grep -q "fetched from the leader with the join code" <<< "$out"
+check "the code is used up on the leader" on "$LEADER" "! test -e /var/lib/furnace/join/code.json"
 check "the follower asked before it turned on its host firewall" grep -q "Turn on and set up this server's own firewall ($FWTOOL)?" <<< "$out"
 check "follower took its settings from the bundle" on "$FOLLOWER" "grep -qx 'ROLE=follower' /etc/furnace/setup.conf && grep -qx 'FOLLOWER_IP=$FOLLOWER_IP' /etc/furnace/setup.conf && grep -qx 'LEADER_IP=$LEADER_IP' /etc/furnace/setup.conf && grep -qx 'API_ALLOW_FROM=$XSOAR_IP' /etc/furnace/setup.conf"
 check "same keepalived password on both" [ "$(on "$LEADER" 'grep ^KEEPALIVED_PASSWORD= /etc/furnace/setup.conf')" = "$(on "$FOLLOWER" 'grep ^KEEPALIVED_PASSWORD= /etc/furnace/setup.conf')" ]

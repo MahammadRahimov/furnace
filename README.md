@@ -179,23 +179,44 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    the log, and Furnace keeps only hashes, so it cannot show them again. Lost one? Make a new one
    ([section 7.1](#71-api-tokens-list-logins-and-the-lockout)).
 5. It writes `/root/furnace-peer-bundle.tar.gz` for the follower. It holds the certificate, the
-   replication key and the leader's settings. It is secret.
+   replication key and the leader's settings. It is secret. You only need it if you do not use a join code
+   (next section).
 
 ### 3.3 Follower
 
-1. Copy the bundle from the leader to the follower:
+The follower needs the leader's certificate and secrets. The easy way is a **join code**: nothing to copy.
+
+1. On the leader, make the code:
    ```bash
-   # on the leader
-   sudo scp /root/furnace-peer-bundle.tar.gz you@FOLLOWER_IP:~/
+   sudo furnace join-code
    ```
+   It shows a code like `FJ1-ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567`. It works **once**, for **1 hour**, and
+   only from the follower's IP. A new code replaces the old one.
 2. On the follower, install the package and run setup:
    ```bash
    sudo apt install ./furnace_0.9.0_all.deb
    sudo furnace setup
    ```
-3. Answer `follower`. Setup finds the bundle in your home folder, in `/root` or in `/tmp`, or asks where it is.
-   It takes all shared settings from the leader, so it asks only for the network card. Then it deletes the bundle.
-4. Delete the bundle copy wherever else you put it. Keep the one in `/root` on the leader only if you want to set
+3. Answer `follower`, then type the join code. The follower fetches the certificate and the secrets from the
+   leader over HTTPS (port 443). It takes all shared settings from the leader, so it asks only for the network
+   card.
+
+How the code is safe: the follower checks the leader's certificate against the code before it sends anything,
+so a fake server gets nothing. The secrets wait on the leader encrypted with a key made from the code, and the
+code itself never goes over the network. After 5 wrong codes the code is gone. In a settings file the code is
+`JOIN_CODE=...` (used once, never saved).
+
+**Or copy the bundle file** (for example when the leader's port 443 is not reachable from the follower yet):
+
+1. Copy `/root/furnace-peer-bundle.tar.gz` from the leader to the follower:
+   ```bash
+   # on the leader
+   sudo scp /root/furnace-peer-bundle.tar.gz you@FOLLOWER_IP:~/
+   ```
+2. On the follower, run `sudo furnace setup` and answer `follower`. Setup finds the bundle in your home folder,
+   in `/root` or in `/tmp` (or press Enter at the join code question and give the path). Then it deletes the
+   bundle.
+3. Delete the bundle copy wherever else you put it. Keep the one in `/root` on the leader only if you want to set
    up the follower again later.
 
 ### 3.4 Setup without questions
@@ -337,8 +358,25 @@ secret and the **follower bundle** `./config/furnace-peer-bundle.tar.gz`. All of
 **3. Follower (host B).** The same folder, the same `docker-compose.yml` and **the same `.env`** (copy it as it
 is: nothing is swapped).
 
-Copy the bundle from the leader first, then start. The folder `./config` belongs to root and is closed to normal
-users (on purpose), so take the bundle out of the container with `docker cp`. It needs no sudo:
+The follower needs the leader's certificate and secrets. The easy way is a **join code**:
+
+```bash
+# on the leader (host A)
+docker exec furnace furnace join-code       # shows FJ1-....-....  (works once, for 1 hour, only from host B)
+
+# on the follower (host B): add the code to .env, then start
+echo 'FURNACE_JOIN_CODE=FJ1-ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567' >> .env
+docker compose up -d
+docker logs furnace                     # "fetched from the leader 192.0.2.11 with the join code" and "Ready."
+```
+
+The follower checks the leader's certificate against the code before it sends anything, and fetches the
+secrets over HTTPS. The code is then used up: you can remove the line from `.env`. A wrong or old code stops the
+follower with a clear message; make a new code on the leader.
+
+**Or copy the bundle file** (for example when host B cannot reach port 443 on host A yet). The folder `./config`
+belongs to root and is closed to normal users (on purpose), so take the bundle out of the container with
+`docker cp`. It needs no sudo:
 
 ```bash
 # on the leader (host A): a copy in your home folder, readable only by you
@@ -354,8 +392,8 @@ docker logs furnace                     # "taken from the leader's bundle" and "
 rm ~/furnace-peer-bundle.tar.gz
 ```
 
-The follower takes the certificate and the secrets from the bundle and deletes it. Without the bundle it stops,
-says what to do, and tries again by itself (so it starts as soon as the file is there).
+The follower takes the certificate and the secrets from the bundle and deletes it. Without a code or the bundle
+it stops, says what to do, and tries again by itself (so it starts as soon as the file is there).
 
 On the host, `ls -l ~/furnace` shows other owner names for `config` and `data` (for example `systemd-journal`).
 That is normal: the container's own users have numbers that mean other names on the host.
@@ -380,6 +418,7 @@ shared IP). Test a failover (below) before you go live.
 | `FURNACE_LEADER_IP` | (required) | the leader host's IP (the same on both hosts) |
 | `FURNACE_FOLLOWER_IP` | (required) | the follower host's IP (the same on both hosts) |
 | `FURNACE_ROLE` | found from the IP | only when one host has both IPs: `leader` or `follower` |
+| `FURNACE_JOIN_CODE` | (none) | follower only: the one-time code from `furnace join-code` on the leader |
 | `FURNACE_SHARED_IP` | (required) | the shared IP (VIP) everyone uses |
 | `FURNACE_SHARED_IP_PREFIX` | `24` | network prefix of the shared IP |
 | `FURNACE_INTERFACE` | the card that has this host's IP | the host's network card |

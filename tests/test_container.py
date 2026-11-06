@@ -81,7 +81,7 @@ def test_leader_makes_secrets_and_the_follower_takes_them(tmp_path):
     assert before == {n: (leader_etc / n).read_bytes() for n in container.BUNDLE_FILES}
 
     follower = load_settings(FOLLOWER, FOLLOWER_CARDS)
-    with pytest.raises(SettingsError, match="Copy furnace-peer-bundle.tar.gz"):
+    with pytest.raises(SettingsError, match="copy furnace-peer-bundle.tar.gz"):
         container.prepare_secrets(follower, follower_etc, group=None)
     follower_etc.mkdir()
     shutil.copy(leader_etc / container.BUNDLE_NAME, follower_etc)
@@ -215,3 +215,49 @@ def test_the_old_names_still_work_with_a_note():
     s = load_settings(LEADER, CARDS)
     assert (s.role, s.this_ip, s.peer_ip) == ("leader", "192.0.2.11", "192.0.2.12")
     assert any("old names" in n for n in s.notes)
+
+
+# --------------------------------------------------------------------------- the join code (Docker)
+
+
+def test_a_bad_join_code_is_reported():
+    assert "FURNACE_JOIN_CODE: This is not a Furnace join code" in problems({**BOTH, "FURNACE_JOIN_CODE": "hello"},
+                                                                            FOLLOWER_CARDS)
+    from furnace.join import format_code
+    other = format_code(b"\x01" * 8, b"\x02" * 8, "192.0.2.99")
+    assert "was made by 192.0.2.99, but the leader is 192.0.2.11" in problems(
+        {**BOTH, "FURNACE_JOIN_CODE": other}, FOLLOWER_CARDS)
+
+
+@needs_openssl
+def test_the_follower_fetches_the_secrets_with_a_join_code(tmp_path, monkeypatch):
+    from furnace import join
+    leader_etc, follower_etc = tmp_path / "leader", tmp_path / "follower"
+    container.prepare_secrets(load_settings(BOTH, CARDS), leader_etc, group=None)
+    bundle = (leader_etc / container.BUNDLE_NAME).read_bytes()
+    code = join.make(bundle, join.cert_der(leader_etc / "tls/furnace.crt"), "192.0.2.11", tmp_path / "join")
+    asked = []
+
+    def fake_fetch(given, leader_ip):  # the network part is tested in test_join.py
+        asked.append((given, leader_ip))
+        return bundle
+    monkeypatch.setattr(join, "fetch", fake_fetch)
+    s = load_settings({**BOTH, "FURNACE_JOIN_CODE": code}, FOLLOWER_CARDS)
+    notes = container.prepare_secrets(s, follower_etc, group=None)
+    assert asked == [(code, "192.0.2.11")]
+    assert any("fetched from the leader 192.0.2.11 with the join code" in n for n in notes)
+    for name in container.BUNDLE_FILES:
+        assert (follower_etc / name).read_bytes() == (leader_etc / name).read_bytes()
+    assert not (follower_etc / container.BUNDLE_NAME).exists()
+
+    def failing(given, leader_ip):
+        raise join.JoinError("The leader said: The join code is wrong.")
+    monkeypatch.setattr(join, "fetch", failing)
+    with pytest.raises(SettingsError, match="The join code did not work: The leader said"):
+        container.prepare_secrets(s, tmp_path / "other", group=None)
+
+
+def test_a_follower_without_anything_says_both_ways():
+    with pytest.raises(SettingsError) as info:
+        container.prepare_secrets(load_settings(BOTH, FOLLOWER_CARDS), Path("/nonexistent-furnace-test"), group=None)
+    assert "furnace join-code" in str(info.value) and "furnace-peer-bundle.tar.gz" in str(info.value)
