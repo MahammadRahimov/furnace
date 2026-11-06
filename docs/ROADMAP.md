@@ -30,6 +30,7 @@ so the work can continue later exactly where it stopped.
 | 2026-11-02 | **The domain whitelist protects subdomains everywhere** (domains too, not only URLs): whitelisting `x.com` removes and refuses `mail.x.com`. **The whitelist is restricted:** general sites where anyone can make a site cannot be whitelisted. Identified with the **Public Suffix List** (bundled, updated each release; shared platforms like `github.io` and public names like `co.uk`, and names that cover one like `amazonaws.com`), plus an optional local file `/etc/furnace/whitelist-refuse.txt`. The upgrade cleans existing data once; old refused entries stay with a warning. IPs unchanged (ranges already work this way). |
 | 2026-11-01 | **`incident_id` is removed** (it can mean different things to different callers). A request that still sends it is refused (`400`). The upgrade deletes the stored values (schema 5); the columns stay empty so older followers and backups still fit. |
 | 2026-11-04 | **Docker comes first in v0.9.0**, before the SSH removal. Goal: anyone can deploy the leader and the follower as separate containers. **Two ways are supported:** (1) **two hosts, one container each**, for real use (keepalived on the host network moves the shared IP: real failover); (2) **one host, both containers** (one Compose file, private Docker network), **for testing and learning only** (no real failover: one host). **Kubernetes later**, only if someone asks (step 2 below). **Configuration the standard way:** Furnace ships `docker-compose.yml` (never edited) and an example `.env`; the admin edits only `.env` (role and IPs). Leader and follower use the same compose file, only `.env` differs. Optional later: an `init` command that asks the questions and writes `.env`. |
+| 2026-11-05/06 | **The package sets up the ACTIVE host firewall** (v0.10.0). firewalld running -> firewalld (also on Ubuntu); ufw active -> ufw; **both active -> setup stops and explains** (going on without the host firewall is possible, default no); none active -> the installed one, **asked before it is turned on**. Active = running now or switched on for the next boot. A package upgrade never stops for it and never turns a firewall on. Docker unchanged. |
 
 ## Done
 
@@ -114,6 +115,8 @@ release: the image file `furnace-image-0.9.0.tar.gz`.
 - Docker integration, one system at a time (the PC has little free memory):
   `tests/integration/run.sh ubuntu:24.04` (or `debian:12`, `almalinux:9`, `fedora:42`, `amazonlinux:2023`, ...).
   Docker Desktop must be running. A failure at the install step is often a short DNS problem in Docker: run again.
+- Host firewall choice (Debian family, ufw and firewalld side by side): `tests/integration/firewall.sh ubuntu:24.04`
+  (or `ubuntu:22.04`, `debian:12`, `debian:13`). Uses 203.0.113.0/24 (`NET_PREFIX=` to change).
 - Real SELinux: the AlmaLinux VM `omerta-alma9` (Hyper-V). Starting it and reading its IP needs admin PowerShell:
   `Start-VM omerta-alma9` and `(Get-VMNetworkAdapter -VMName omerta-alma9).IPAddresses`. Count SELinux denials in
   the raw `/var/log/audit/audit.log`, not with `ausearch -ts`. Put the VM back as it was afterwards.
