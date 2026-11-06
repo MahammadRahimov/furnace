@@ -36,27 +36,52 @@ firewall).
 - `furnace setup --check` shows which firewall is active and whether setup would turn one on.
 - New test `tests/integration/firewall.sh` (Debian family, ufw and firewalld side by side).
 
+### 2. Clearer IP settings: the same file on both hosts (done 2026-11-06, tests passed)
+
+`THIS_IP`/`PEER_IP` ("me"/"the other one") had to be swapped on the follower, which was easy to get wrong. The new
+names say which host is which, so the settings file is **the same on both hosts**:
+
+- `LEADER_IP`, `FOLLOWER_IP`, `SHARED_IP` (Docker: `FURNACE_LEADER_IP`, `FURNACE_FOLLOWER_IP`, `FURNACE_SHARED_IP`).
+- Furnace sees which of the two IPs is on this host's network card and so knows its role. `ROLE` is needed only
+  when both IPs are on the same host (a test setup).
+- Clear messages when neither IP is on this host, when `ROLE` does not match the IP, when both IPs are the same,
+  and when old and new names are mixed.
+- At start it says: "This host is the leader (…); the other host is …".
+- Old files with `THIS_IP`/`PEER_IP` keep working, with a note to switch. `furnace setup` saves the new names
+  (also after an upgrade from 0.9.0).
+
+### 3. Join code: the follower fetches the certificate and secrets itself (done 2026-11-06, tests passed)
+
+No more copying `furnace-peer-bundle.tar.gz` by hand. Docker and the packages.
+
+- On the leader: `furnace join-code` (Docker: `docker exec furnace furnace join-code`) prints a one-time code.
+- On the follower: put it in `.env` as `FURNACE_JOIN_CODE=...` (Docker), in the settings file as `JOIN_CODE=`, or
+  type it at the setup question "Join code from the leader". The follower fetches everything over HTTPS.
+- The code works **once**, for **1 hour**, and **only from the follower's IP**. 5 wrong tries remove it.
+- Part of the code is the leader certificate's fingerprint. The follower checks it **before** it sends anything,
+  so a fake leader gets nothing. The secrets travel encrypted with a key from the code.
+- The code is never saved in `setup.conf`. `furnace setup --check` does not use it.
+- The bundle file still works as a fallback.
+
+### 4. Docker: use the host's own keepalived (done 2026-11-06, tests passed)
+
+For hosts that already run keepalived for other services. `FURNACE_KEEPALIVED=external` in `.env`:
+
+- The container runs no keepalived and needs no `NET_ADMIN`/`NET_RAW`.
+- Furnace gets its **own** `vrrp_instance` (its own shared IP and router ID) next to the host's other services.
+- `docker exec furnace furnace host-keepalived` prints the steps; `... host-keepalived config`, `notify` and
+  `health-check` print the block and the two small scripts. You paste them; Furnace never edits
+  `keepalived.conf`.
+- The host's keepalived writes the role into `/run/furnace`, which the container reads.
+  `furnace status` warns when no role has come from the host yet.
+- The built-in keepalived stays the default.
+
+**Tests for 2–4:** 359 unit tests; Docker test 63/63; new Docker test with keepalived on the host 31/31; the
+integration round 176/176 on Ubuntu 22.04/24.04 and Debian 12/13 and 175/175 on AlmaLinux 8/9/10, Rocky 9,
+Oracle 9, Fedora 42 and Amazon Linux 2023; the firewall test 46/46 on 4 systems; the two real lab VMs 44/44
+(upgrade from 0.9.0 with the same `.env` on both, follower rejoins with a join code over the real network,
+keepalived on the hosts with another service's shared IP that does not move when Furnace fails over).
+
 ### Decided, not started
 
 Already decided (user decision 2026-11-01): SSH replication is removed (HTTPS only). Not started.
-
-Decided 2026-11-06 (user), being built now (order: A, B, C):
-
-**A. Clearer IP settings: the same file on both hosts.** `THIS_IP`/`PEER_IP` ("me"/"the other one") had to be
-swapped on the follower, which is easy to get wrong. New names: `LEADER_IP`, `FOLLOWER_IP`, `SHARED_IP`. The file
-is the same on both hosts; Furnace sees which of the two IPs is on its network card and so knows its role (no
-`ROLE` line needed). Neither IP on this host: it stops with a clear message. Old files with `THIS_IP`/`PEER_IP`
-keep working, with a note to switch. Docker (`FURNACE_LEADER_IP`, ...) and the packages use the same names.
-
-**B. Join code instead of copying the bundle file.** The leader shows a one-time code
-(`furnace join-code`); the follower gets it in `.env` (`FURNACE_JOIN_CODE`) or in a setup question, and fetches
-the certificate and secrets from the leader over HTTPS itself. The code works once, for 1 hour, only from the
-follower's IP; 5 wrong codes stop it; part of the code is the leader certificate's fingerprint, so the follower
-checks it talks to the real leader. The bundle file stays as a fallback. Docker and the packages.
-
-**C. External keepalived mode (Docker).** `FURNACE_KEEPALIVED=external`: the container does not run keepalived
-and needs no `NET_ADMIN`/`NET_RAW`; the host's own keepalived owns the shared IP. Furnace gets its own
-`vrrp_instance` (own shared IP, own router ID) next to the host's other services. Furnace prints the block and
-the two small scripts (notify, health check); the user pastes them, Furnace never edits `keepalived.conf`. Host
-network stays. The host writes the role file into a folder shared with the container. The built-in keepalived
-stays the default.
