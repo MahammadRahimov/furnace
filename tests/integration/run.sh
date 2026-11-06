@@ -150,8 +150,8 @@ put "$FOLLOWER" /root/same.env <<< "$SAME_ENV"
 out="$(on "$LEADER" "furnace setup --check --config /root/same.env 2>&1" || true)"
 check "the same file: the leader finds it is the leader" grep -q "Settings: role leader, this server $LEADER_IP" <<< "$out"
 out="$(on "$FOLLOWER" "furnace setup --config /root/same.env 2>&1" || true)"
-check "the same file: the follower finds it is the follower (and needs the leader bundle)" \
-    grep -q "needs furnace-peer-bundle.tar.gz" <<< "$out"
+check "the same file: the follower finds it is the follower (and needs the join code or the bundle)" \
+    grep -q "The follower needs the leader's certificate and secrets" <<< "$out"
 put "$LEADER" /root/neither.env <<< "LEADER_IP=$NET_PREFIX.98
 FOLLOWER_IP=$NET_PREFIX.99
 SHARED_IP=$SHARED_IP"
