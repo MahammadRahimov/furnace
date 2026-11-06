@@ -96,6 +96,8 @@ status() {
     echo "Services:"
     for unit in furnace-api.service nginx.service keepalived.service furnace-replicate.timer \
                 furnace-backup.timer furnace-apply-replica.path furnace-cleanup.timer; do
+        # The path unit loads snapshots that came over SSH: it runs only with the SSH backup copy on.
+        if [ "$unit" = furnace-apply-replica.path ] && [ "${REPLICATION_SSH_FALLBACK:-no}" != yes ]; then continue; fi
         state="$(systemctl is-active "$unit" 2>/dev/null || true)"
         want=active
         if [ "$unit" = "furnace-cleanup.timer" ]; then
@@ -110,8 +112,7 @@ status() {
     done
     echo
     # The leader writes the result of every replication (HTTPS, or SSH as the backup copy when it is on).
-    local last="/var/lib/furnace/replica/last-result" when what age fallback
-    fallback="$(sed -n 's/^REPLICATION_SSH_FALLBACK=//p' "$ETC/install.env" 2>/dev/null || true)"
+    local last="/var/lib/furnace/replica/last-result" when what age fallback="${REPLICATION_SSH_FALLBACK:-no}"
     if [ "$role" != "leader" ]; then
         echo "Replication: this server receives the snapshots from the leader"
     elif [ -f "$last" ]; then
