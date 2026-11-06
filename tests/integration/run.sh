@@ -141,9 +141,28 @@ check "--check created no secrets and no settings" on "$LEADER" "! test -e /var/
 on "$LEADER" "sed 's/^ROLE=.*/ROLE=boss/' /root/leader.env > /root/bad.env"
 out="$(on "$LEADER" "furnace setup --config /root/bad.env 2>&1" || true)"
 check "wrong ROLE refused" grep -q "ROLE must be 'leader' or 'follower'" <<< "$out"
-on "$FOLLOWER" "printf 'ROLE=follower\n' > /root/follower.env"
-out="$(on "$FOLLOWER" "furnace setup --config /root/follower.env 2>&1" || true)"
-check "a follower without the leader bundle is refused" grep -q "needs furnace-peer-bundle.tar.gz" <<< "$out"
+# The new IP names: ONE file for both servers, each finds its role from its own IP.
+SAME_ENV="LEADER_IP=$LEADER_IP
+FOLLOWER_IP=$FOLLOWER_IP
+SHARED_IP=$SHARED_IP"
+put "$LEADER" /root/same.env <<< "$SAME_ENV"
+put "$FOLLOWER" /root/same.env <<< "$SAME_ENV"
+out="$(on "$LEADER" "furnace setup --check --config /root/same.env 2>&1" || true)"
+check "the same file: the leader finds it is the leader" grep -q "Settings: role leader, this server $LEADER_IP" <<< "$out"
+out="$(on "$FOLLOWER" "furnace setup --config /root/same.env 2>&1" || true)"
+check "the same file: the follower finds it is the follower (and needs the leader bundle)" \
+    grep -q "needs furnace-peer-bundle.tar.gz" <<< "$out"
+put "$LEADER" /root/neither.env <<< "LEADER_IP=$NET_PREFIX.98
+FOLLOWER_IP=$NET_PREFIX.99
+SHARED_IP=$SHARED_IP"
+out="$(on "$LEADER" "furnace setup --check --config /root/neither.env 2>&1" || true)"
+check "neither IP on this server is explained" grep -q "This server has neither $NET_PREFIX.98 (LEADER_IP)" <<< "$out"
+put "$LEADER" /root/mixed.env <<< "ROLE=leader
+LEADER_IP=$LEADER_IP
+PEER_IP=$FOLLOWER_IP
+SHARED_IP=$SHARED_IP"
+out="$(on "$LEADER" "furnace setup --check --config /root/mixed.env 2>&1" || true)"
+check "old and new IP names together are refused" grep -q "not both" <<< "$out"
 
 step "Set up the leader by answering the questions"
 TAB=$'\t'
@@ -151,9 +170,9 @@ put "$LEADER" /root/answers.txt <<EOF
 leader or the follower?${TAB}
 Network card name [${TAB}$LEADER_IP
 Network card name [${TAB}
-This server's IP [${TAB}
-The other Furnace server's IP:${TAB}999.1.1.1
-The other Furnace server's IP:${TAB}$FOLLOWER_IP
+This server's IP (the leader) [${TAB}
+The follower server's IP:${TAB}999.1.1.1
+The follower server's IP:${TAB}$FOLLOWER_IP
 Shared IP:${TAB}$SHARED_IP
 Network prefix${TAB}
 Who may call the API [any]:${TAB}$XSOAR_IP
@@ -194,7 +213,7 @@ out_wl="$(on "$LEADER" "furnace token add wl-admin --allow whitelist:write --exp
 WL_TOKEN="$(grep -o 'fur_[A-Za-z0-9_-]*' <<< "$out_wl")"
 check "a whitelist token from the command line (write brings read)" \
     grep -q "Permissions: blocklist -, whitelist read+write. Expires: never." <<< "$out_wl"
-check "the network card and IP were found automatically" on "$LEADER" "grep -qx 'INTERFACE=eth0' /etc/furnace/setup.conf && grep -qx 'THIS_IP=$LEADER_IP' /etc/furnace/setup.conf"
+check "the network card and IP were found automatically" on "$LEADER" "grep -qx 'INTERFACE=eth0' /etc/furnace/setup.conf && grep -qx 'LEADER_IP=$LEADER_IP' /etc/furnace/setup.conf && ! grep -q '^THIS_IP=' /etc/furnace/setup.conf"
 check "the certificate is valid for itself and has no extension twice" on "$LEADER" \
     "openssl verify -CAfile /etc/furnace/tls/furnace.crt /etc/furnace/tls/furnace.crt >/dev/null && ! openssl x509 -in /etc/furnace/tls/furnace.crt -noout -text | grep -oE '^ +X509v3 [A-Za-z ]+:' | sort | uniq -d | grep -q ."
 check "a keepalived password was created" on "$LEADER" "grep -Eqx 'KEEPALIVED_PASSWORD=[A-Za-z0-9]{8}' /etc/furnace/setup.conf"
@@ -219,7 +238,7 @@ out="$(on "$FOLLOWER" "$FPY /root/answer.py /root/answers.txt -- furnace setup" 
 printf '%s\n' "$out"
 check "follower setup finished with the self-test passed" [ "$rc" = 0 ]
 check "the follower asked before it turned on its host firewall" grep -q "Turn on and set up this server's own firewall ($FWTOOL)?" <<< "$out"
-check "follower took its settings from the bundle" on "$FOLLOWER" "grep -qx 'THIS_IP=$FOLLOWER_IP' /etc/furnace/setup.conf && grep -qx 'PEER_IP=$LEADER_IP' /etc/furnace/setup.conf && grep -qx 'API_ALLOW_FROM=$XSOAR_IP' /etc/furnace/setup.conf"
+check "follower took its settings from the bundle" on "$FOLLOWER" "grep -qx 'ROLE=follower' /etc/furnace/setup.conf && grep -qx 'FOLLOWER_IP=$FOLLOWER_IP' /etc/furnace/setup.conf && grep -qx 'LEADER_IP=$LEADER_IP' /etc/furnace/setup.conf && grep -qx 'API_ALLOW_FROM=$XSOAR_IP' /etc/furnace/setup.conf"
 check "same keepalived password on both" [ "$(on "$LEADER" 'grep ^KEEPALIVED_PASSWORD= /etc/furnace/setup.conf')" = "$(on "$FOLLOWER" 'grep ^KEEPALIVED_PASSWORD= /etc/furnace/setup.conf')" ]
 check "follower does not own the shared IP" on "$FOLLOWER" "! ip -4 addr show eth0 | grep -q 'inet $SHARED_IP/'"
 check "bundle deleted on the follower" on "$FOLLOWER" "! test -e /root/furnace-peer-bundle.tar.gz"
@@ -430,10 +449,14 @@ check "the imported IP is served" grep -qx "198.51.100.90" <<< "$(edl blocklist.
 
 step "Package upgrade (apt install --reinstall) keeps data and tokens"
 before_tokens="$(on "$LEADER" 'furnace token list; furnace edl-user list')"
+# Make the saved settings look like 0.9.0 (THIS_IP/PEER_IP): the upgrade must keep them and save the new names.
+on "$LEADER" "sed -i -e 's/^LEADER_IP=/THIS_IP=/' -e 's/^FOLLOWER_IP=/PEER_IP=/' /etc/furnace/setup.conf"
 out="$(pkg_reinstall "$LEADER")"
 printf '%s\n' "$out" | tail -n 5
 lab_allow_test_ranges
 check "the upgrade ran setup with the saved settings" grep -q "self-test passed" <<< "$out"
+check "settings from 0.9.0 (THIS_IP/PEER_IP) are saved with the new names" on "$LEADER" \
+    "grep -qx 'LEADER_IP=$LEADER_IP' /etc/furnace/setup.conf && grep -qx 'FOLLOWER_IP=$FOLLOWER_IP' /etc/furnace/setup.conf && ! grep -q '^THIS_IP=' /etc/furnace/setup.conf"
 check "the upgrade made no new secrets" bash -c '! grep -q "NEW SECRETS" <<< "$1"' _ "$out"
 check "no secrets file after the upgrade" on "$LEADER" "! test -e /root/furnace-new-secrets.txt"
 check "tokens and EDL login unchanged" [ "$before_tokens" = "$(on "$LEADER" 'furnace token list; furnace edl-user list')" ]

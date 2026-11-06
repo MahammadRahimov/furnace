@@ -142,8 +142,8 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    ```
    Is this server the leader or the follower? [leader]:
    Network card name [eth0]:
-   This server's IP [192.0.2.11]:
-   The other Furnace server's IP: 192.0.2.12
+   This server's IP (the leader) [192.0.2.11]:
+   The follower server's IP: 192.0.2.12
    Shared IP: 192.0.2.10
    Network prefix of the shared IP (24 = 255.255.255.0) [24]:
    Who may call the API [any]:
@@ -208,7 +208,10 @@ nano config.env
 sudo furnace setup --config config.env
 ```
 
-For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is not in one of the usual places.
+The same file works on both servers: `LEADER_IP` and `FOLLOWER_IP` name the two servers, and each server finds its
+role from its own IP. On the follower, the other settings come from the leader's bundle. Add `--bundle FILE` if
+the bundle is not in one of the usual places. (The names before 0.10.0, `THIS_IP` and `PEER_IP` with `ROLE`, still
+work; setup then suggests the new names.)
 
 `sudo furnace setup --check` shows what setup would do and changes nothing.
 
@@ -261,7 +264,7 @@ file, `.env`.
                                      │
       host A 192.0.2.11              │              host B 192.0.2.12
       container "furnace"   ─── HTTPS every 20 s ──► container "furnace"
-      FURNACE_ROLE=leader   ◄── VRRP (keepalived) ─► FURNACE_ROLE=follower
+      (the leader)          ◄── VRRP (keepalived) ─► (the follower)
       ./config  ./data                               ./config  ./data
 ```
 
@@ -310,12 +313,12 @@ cd ~/furnace
 nano .env
 ```
 
-Change the four lines at the top:
+Change the three IPs at the top. **The file is the same on both hosts**: each host finds its role from its own
+IP (the host that has `FURNACE_LEADER_IP` is the leader).
 
 ```
-FURNACE_ROLE=leader
-FURNACE_THIS_IP=192.0.2.11       # host A
-FURNACE_PEER_IP=192.0.2.12       # host B
+FURNACE_LEADER_IP=192.0.2.11     # host A
+FURNACE_FOLLOWER_IP=192.0.2.12   # host B
 FURNACE_SHARED_IP=192.0.2.10     # the shared IP
 ```
 
@@ -331,15 +334,8 @@ At the first start the leader makes the certificate (for the three IPs), the kee
 secret and the **follower bundle** `./config/furnace-peer-bundle.tar.gz`. All of it stays in `./config`
 (keep it private: never share or copy this folder, except the bundle once to the follower).
 
-**3. Follower (host B).** The same folder and the same `docker-compose.yml`. In `.env`, the role is `follower` and
-the two host IPs are swapped:
-
-```
-FURNACE_ROLE=follower
-FURNACE_THIS_IP=192.0.2.12       # host B
-FURNACE_PEER_IP=192.0.2.11       # host A
-FURNACE_SHARED_IP=192.0.2.10
-```
+**3. Follower (host B).** The same folder, the same `docker-compose.yml` and **the same `.env`** (copy it as it
+is: nothing is swapped).
 
 Copy the bundle from the leader first, then start. The folder `./config` belongs to root and is closed to normal
 users (on purpose), so take the bundle out of the container with `docker cp`. It needs no sudo:
@@ -381,12 +377,12 @@ shared IP). Test a failover (below) before you go live.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `FURNACE_ROLE` | (required) | `leader` on one host, `follower` on the other |
-| `FURNACE_THIS_IP` | (required) | this host's IP |
-| `FURNACE_PEER_IP` | (required) | the other host's IP |
+| `FURNACE_LEADER_IP` | (required) | the leader host's IP (the same on both hosts) |
+| `FURNACE_FOLLOWER_IP` | (required) | the follower host's IP (the same on both hosts) |
+| `FURNACE_ROLE` | found from the IP | only when one host has both IPs: `leader` or `follower` |
 | `FURNACE_SHARED_IP` | (required) | the shared IP (VIP) everyone uses |
 | `FURNACE_SHARED_IP_PREFIX` | `24` | network prefix of the shared IP |
-| `FURNACE_INTERFACE` | the card that has `FURNACE_THIS_IP` | the host's network card |
+| `FURNACE_INTERFACE` | the card that has this host's IP | the host's network card |
 | `FURNACE_API_ALLOW_FROM` | `any` | who may call the API (every call still needs a token) |
 | `FURNACE_LISTS_ALLOW_FROM` | `any` | who may download the lists (always with the login) |
 | `FURNACE_VRRP_ROUTER_ID` | `51` | the same on both hosts, unique on the network |
@@ -468,10 +464,10 @@ Each question saves one setting in `/etc/furnace/setup.conf`. The same names are
 
 | Question | Setting | Default | Meaning |
 |---|---|---|---|
-| Leader or follower? | `ROLE` | `leader` | `leader` (preferred leader, keepalived priority 150) or `follower` (priority 100). |
+| Leader or follower? | `ROLE` | `leader` | `leader` (preferred leader, keepalived priority 150) or `follower` (priority 100). In a settings file it is found from the IPs. |
 | Network card name | `INTERFACE` | card of the default route | Name (not IP) of the card that carries this server's IP and the shared IP, for example `ens192`. See `ip -br addr`. |
-| This server's IP | `THIS_IP` | first IP of the card | It must be set on that card. |
-| The other server's IP | `PEER_IP` | | The other Furnace server. |
+| This server's IP (the leader) | `LEADER_IP` | first IP of the card | The leader's own IP. It must be set on that card. |
+| The follower server's IP | `FOLLOWER_IP` | | The follower's own IP. Both are the same on both servers. (Before 0.10.0: `THIS_IP` and `PEER_IP`; they still work.) |
 | Shared IP | `SHARED_IP` | | The shared IP (VIP, virtual IP). Callers and list readers always use this address. |
 | Network prefix | `SHARED_IP_PREFIX` | prefix of this server's IP | For example 24 for 255.255.255.0. |
 | Who may call the API | `API_ALLOW_FROM` | `any` | `any` = every address (a token is always needed). Or IPs and ranges, comma-separated, for example a SOAR server and its engines. |
@@ -1201,7 +1197,7 @@ The nightly cleanup:
 - When a server takes the shared IP, the notify script marks it as leader and starts the cleanup timer.
   When it loses the IP, it marks it as follower and stops the timer.
 - **Replication:** every 20 seconds the leader makes a SQLite backup snapshot and sends it over HTTPS to
-  `https://PEER_IP/replica/snapshot`, with the replication secret both servers share. nginx lets only the other
+  `https://OTHER_SERVER_IP/replica/snapshot`, with the replication secret both servers share. nginx lets only the other
   server reach this address. The follower checks the secret, loads the snapshot, rebuilds its EDL files and
   answers at once, so the leader knows that it worked. `sudo furnace status` on the leader shows the last result.
 - **SSH fallback (0.8 and 0.9 only):** if HTTPS does not work, for example while the follower still runs an older

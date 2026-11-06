@@ -78,7 +78,16 @@ shared = os.environ.get("FURNACE_SHARED_IP", "")
 role = status.get("role", "unknown")
 where = "this host owns" if role == "leader" else "the other host owns"
 print(f"Role:     {role} ({where} the shared IP {shared})")
-print(f"Host:     {os.environ.get('FURNACE_THIS_IP', '')}, other host {os.environ.get('FURNACE_PEER_IP', '')}")
+install = {}
+try:  # written at every start, from FURNACE_LEADER_IP/FURNACE_FOLLOWER_IP (or the old names)
+    for line in open("/etc/furnace/install.env", encoding="utf-8"):
+        key, sep, value = line.strip().partition("=")
+        if sep and not key.startswith("#"):
+            install[key] = value
+except OSError:
+    pass
+print(f"Host:     {install.get('THIS_IP', '')} (the {install.get('ROLE', '?')} by setting), "
+      f"other host {install.get('PEER_IP', '')}")
 print()
 print("Processes:")
 bad = 0

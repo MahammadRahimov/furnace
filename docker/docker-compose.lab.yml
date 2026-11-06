@@ -23,7 +23,9 @@ x-furnace: &furnace
   cap_add: [NET_ADMIN, NET_RAW]   # only for keepalived (the shared IP and VRRP); not privileged
   stop_grace_period: 20s
 
-x-settings: &settings
+x-settings: &settings            # the same for both: each finds its role from its own IP
+  FURNACE_LEADER_IP: 203.0.113.11
+  FURNACE_FOLLOWER_IP: 203.0.113.12
   FURNACE_SHARED_IP: 203.0.113.10
   FURNACE_SHARED_IP_PREFIX: "24"
   # LAB ONLY: allow blocking the documentation ranges, so the README examples work here.
@@ -37,9 +39,6 @@ services:
     hostname: furnace-leader
     environment:
       <<: *settings
-      FURNACE_ROLE: leader
-      FURNACE_THIS_IP: 203.0.113.11
-      FURNACE_PEER_IP: 203.0.113.12
     networks:
       furnace-lab: {ipv4_address: 203.0.113.11}
     volumes: [leader-config:/etc/furnace, leader-data:/var/lib/furnace]
@@ -50,9 +49,6 @@ services:
     hostname: furnace-follower
     environment:
       <<: *settings
-      FURNACE_ROLE: follower
-      FURNACE_THIS_IP: 203.0.113.12
-      FURNACE_PEER_IP: 203.0.113.11
     networks:
       furnace-lab: {ipv4_address: 203.0.113.12}
     volumes: [follower-config:/etc/furnace, follower-data:/var/lib/furnace]

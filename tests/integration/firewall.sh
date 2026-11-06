@@ -90,8 +90,8 @@ setup_ask() {  # setup_ask FIREWALL_PROMPT ANSWER: the leader questions; sets OU
     put /root/answers.txt <<EOF
 leader or the follower?${TAB}
 Network card name [${TAB}
-This server's IP [${TAB}
-The other Furnace server's IP:${TAB}$PEER_IP
+This server's IP (the leader) [${TAB}
+The follower server's IP:${TAB}$PEER_IP
 Shared IP:${TAB}$SHARED_IP
 Network prefix${TAB}
 Who may call the API [any]:${TAB}

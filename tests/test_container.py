@@ -178,3 +178,40 @@ def test_replication_log_only_changes_and_a_reminder_while_down():
     assert note(True, "sent (3 IPs)", 680) == "replication works again after 31 failed tries: sent (3 IPs)"
     assert note(True, "sent (3 IPs)", 700) == ""
     assert sup.replica_state == "ok sent (3 IPs)"
+
+
+# --------------------------------------------------------------------------- the IP names of 0.10.0
+
+BOTH = {"FURNACE_LEADER_IP": "192.0.2.11", "FURNACE_FOLLOWER_IP": "192.0.2.12", "FURNACE_SHARED_IP": "192.0.2.10"}
+
+
+def test_the_same_settings_on_both_hosts_find_the_role():
+    s = load_settings(BOTH, CARDS)
+    assert (s.role, s.this_ip, s.peer_ip, s.interface, s.priority) == ("leader", "192.0.2.11", "192.0.2.12", "eth0", 150)
+    assert s.notes == []
+    f = load_settings(BOTH, FOLLOWER_CARDS)
+    assert (f.role, f.this_ip, f.peer_ip, f.priority) == ("follower", "192.0.2.12", "192.0.2.11", 100)
+
+
+def test_new_names_problems():
+    assert "has neither 192.0.2.11 (FURNACE_LEADER_IP) nor 192.0.2.12" in problems(BOTH, {"eth0": [("198.51.100.5", 24)]})
+    both_here = {"eth0": [("192.0.2.11", 24), ("192.0.2.12", 24)]}
+    assert "Add FURNACE_ROLE=leader or FURNACE_ROLE=follower" in problems(BOTH, both_here)
+    assert load_settings({**BOTH, "FURNACE_ROLE": "follower"}, both_here).this_ip == "192.0.2.12"
+    assert "FURNACE_ROLE is follower, but this host has the leader's IP (192.0.2.11)" in problems(
+        {**BOTH, "FURNACE_ROLE": "follower"})
+    assert "must be the two different hosts" in problems({**BOTH, "FURNACE_FOLLOWER_IP": "192.0.2.11"})
+    assert "SHARED_IP must be a third address" in problems({**BOTH, "FURNACE_SHARED_IP": "192.0.2.12"})
+    assert "FURNACE_FOLLOWER_IP '192.0.2.300'" in problems({**BOTH, "FURNACE_FOLLOWER_IP": "192.0.2.300"})
+    text = problems({})
+    for part in ("FURNACE_LEADER_IP is not set", "FURNACE_FOLLOWER_IP is not set", "FURNACE_SHARED_IP is not set"):
+        assert part in text
+    assert "not both" in problems({**BOTH, "FURNACE_THIS_IP": "192.0.2.11"})
+    assert "FURNACE_LEADER_IP 192.0.2.11 is not set on the network card eth1" in problems(
+        {**BOTH, "FURNACE_ROLE": "leader", "FURNACE_INTERFACE": "eth1"})
+
+
+def test_the_old_names_still_work_with_a_note():
+    s = load_settings(LEADER, CARDS)
+    assert (s.role, s.this_ip, s.peer_ip) == ("leader", "192.0.2.11", "192.0.2.12")
+    assert any("old names" in n for n in s.notes)

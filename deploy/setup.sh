@@ -158,7 +158,7 @@ fi
 
 # --------------------------------------------------------------------------- settings
 
-KEYS="ROLE THIS_IP PEER_IP SHARED_IP SHARED_IP_PREFIX INTERFACE API_ALLOW_FROM LISTS_ALLOW_FROM ARCHIVE_AFTER_DAYS
+KEYS="ROLE LEADER_IP FOLLOWER_IP THIS_IP PEER_IP SHARED_IP SHARED_IP_PREFIX INTERFACE API_ALLOW_FROM LISTS_ALLOW_FROM ARCHIVE_AFTER_DAYS
 KEEPALIVED_PASSWORD VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS SSH_ALLOW_FROM HOST_FIREWALL"
 # The order the checks run in: later checks use the earlier values.
 CHECK_ORDER="ROLE INTERFACE THIS_IP PEER_IP SHARED_IP SHARED_IP_PREFIX API_ALLOW_FROM LISTS_ALLOW_FROM ARCHIVE_AFTER_DAYS
@@ -200,6 +200,47 @@ load_file() {
             *) die "Unknown setting '$key' in $file." ;;
         esac
     done < "$file"
+}
+
+# map_ips PREFIX LOCAL: turn LEADER_IP and FOLLOWER_IP (the same on both servers) into this server's
+# THIS_IP and PEER_IP, which setup uses inside. LOCAL=1 (this server's own settings): the role is the
+# one whose IP is on this server, so ROLE is only needed when one server has both. The old names
+# THIS_IP and PEER_IP (before 0.10.0) still work; OLD_IP_NAMES=1 then, for a note at the end.
+OLD_IP_NAMES=0
+map_ips() {
+    local p="$1" here="$2" l f r t pe mine=""
+    l="${p}_LEADER_IP"; f="${p}_FOLLOWER_IP"; r="${p}_ROLE"; t="${p}_THIS_IP"; pe="${p}_PEER_IP"
+    if [ -z "${!l}${!f}" ]; then
+        [ "$p" = CFG ] && [ -n "${!t}${!pe}" ] && OLD_IP_NAMES=1
+        return 0
+    fi
+    [ -z "${!t}${!pe}" ] || die "Use LEADER_IP and FOLLOWER_IP, or the old THIS_IP and PEER_IP, not both."
+    [ -n "${!l}" ] && [ -n "${!f}" ] || die "Set both LEADER_IP and FOLLOWER_IP (the same on both servers)."
+    [ "${!l}" != "${!f}" ] || die "LEADER_IP and FOLLOWER_IP must be the two different servers."
+    if [ "$here" = 1 ]; then
+        [ -n "$(card_of_ip "${!l}")" ] && mine="leader"
+        [ -n "$(card_of_ip "${!f}")" ] && mine="${mine:+$mine }follower"
+        if [ -z "${!r}" ]; then
+            case "$mine" in
+                leader|follower) printf -v "$r" '%s' "$mine" ;;
+                "leader follower") die "This server has both LEADER_IP and FOLLOWER_IP. Add ROLE=leader or ROLE=follower." ;;
+                *) die "This server has neither ${!l} (LEADER_IP) nor ${!f} (FOLLOWER_IP). Check the IPs. See: ip -br addr" ;;
+            esac
+        elif [ -z "$mine" ]; then
+            msg="$(check_ROLE "${!r}")" || die "$msg"
+            if [ "${!r}" = leader ]; then
+                die "ROLE is leader, but LEADER_IP ${!l} is not on this server. See: ip -br addr"
+            fi
+            die "ROLE is follower, but FOLLOWER_IP ${!f} is not on this server. See: ip -br addr"
+        elif [[ " $mine " != *" ${!r} "* ]]; then
+            die "ROLE is ${!r}, but this server has the $mine's IP."
+        fi
+    fi
+    case "${!r}" in
+        leader) printf -v "$t" '%s' "${!l}"; printf -v "$pe" '%s' "${!f}" ;;
+        follower) printf -v "$t" '%s' "${!f}"; printf -v "$pe" '%s' "${!l}" ;;
+    esac
+    printf -v "$l" '%s' ""; printf -v "$f" '%s' ""   # from here on only THIS_IP and PEER_IP are used
 }
 
 is_ipv4() {
@@ -417,6 +458,7 @@ open_bundle() {
     for k in $KEYS; do printf -v "B_$k" '%s' ""; done
     load_file "$UNPACK/setup.conf" B
     [ "$B_ROLE" = "leader" ] || { BUNDLE_ERR="The bundle $1 was not made by a leader."; return 1; }
+    map_ips B 0
     BUNDLE="$1"
 }
 
@@ -529,8 +571,8 @@ ask_all() {
     note "The network card that carries this server's IP and the shared IP: its name, not its IP. See: ip -br addr"
     ask INTERFACE "Network card name" "$card"
     ip="${CFG_THIS_IP:-$(primary_ip "$CFG_INTERFACE")}"
-    ask THIS_IP "This server's IP" "$ip"
-    ask PEER_IP "The other Furnace server's IP" "$CFG_PEER_IP"
+    ask THIS_IP "This server's IP (the leader)" "$ip"
+    ask PEER_IP "The follower server's IP" "$CFG_PEER_IP"
     note "The shared IP (VIP) is a free third address. Everything that uses Furnace connects to it."
     ask SHARED_IP "Shared IP" "$CFG_SHARED_IP"
     ask SHARED_IP_PREFIX "Network prefix of the shared IP (24 = 255.255.255.0)" \
@@ -658,7 +700,16 @@ write_setup_conf() {
         {
             echo "# Furnace settings, saved by 'furnace setup'. Secret (keepalived password)."
             echo "# Change them with: sudo furnace setup"
-            for k in $KEYS; do var="CFG_$k"; printf '%s=%s\n' "$k" "${!var}"; done
+            echo "# LEADER_IP and FOLLOWER_IP are the same on both servers; ROLE says which one this is."
+            for k in $KEYS; do
+                var="CFG_$k"
+                case "$k" in
+                    THIS_IP|PEER_IP) continue ;;
+                    LEADER_IP) if [ "$CFG_ROLE" = leader ]; then var=CFG_THIS_IP; else var=CFG_PEER_IP; fi ;;
+                    FOLLOWER_IP) if [ "$CFG_ROLE" = leader ]; then var=CFG_PEER_IP; else var=CFG_THIS_IP; fi ;;
+                esac
+                printf '%s=%s\n' "$k" "${!var}"
+            done
         } > "$SETUP_CONF.tmp"
     )
     mv -f "$SETUP_CONF.tmp" "$SETUP_CONF"
@@ -670,9 +721,12 @@ case "$MODE" in
     upgrade)
         [ -f "$SETUP_CONF" ] || die "Furnace is not set up yet. Run: sudo furnace setup"
         load_file "$SETUP_CONF" CFG
+        map_ips CFG 1
+        OLD_IP_NAMES=0
         ;;
     config)
         load_file "$CONFIG" CFG
+        map_ips CFG 1
         [ -n "$CFG_HOST_FIREWALL" ] || FW_DEFAULTED=1
         msg="$(check_ROLE "$CFG_ROLE")" || die "$msg"
         if [ "$CFG_ROLE" = "follower" ] && ! have_secrets; then
@@ -689,6 +743,8 @@ case "$MODE" in
         printf '\nFurnace setup. Press Enter to take the answer in [brackets].\n'
         if [ -f "$SETUP_CONF" ]; then
             load_file "$SETUP_CONF" CFG
+            map_ips CFG 1
+            OLD_IP_NAMES=0
             printf 'Furnace is already set up here. The brackets show the current answers.\n'
         fi
         ask_all
@@ -709,6 +765,7 @@ if [ "$CFG_USE_HTTPS" = "yes" ]; then WEB_PORT=443; SCHEME=https; else WEB_PORT=
 SSH_PORT="$( (sshd -T 2>/dev/null || true) | awk '$1=="port"{print $2; exit}')"
 SSH_PORT="${SSH_PORT:-22}"
 decide_host_firewall
+if [ "$OLD_IP_NAMES" = 1 ]; then TODO+=("Settings file: THIS_IP and PEER_IP are the old names. Better: LEADER_IP and FOLLOWER_IP, the same file on both servers (see config.env.example)."); fi
 
 # --------------------------------------------------------------------------- check mode
 
