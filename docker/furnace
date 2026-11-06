@@ -19,6 +19,8 @@ Usage: docker exec -it CONTAINER furnace COMMAND [options]
 Health:
   status                 Show the role, the processes, replication and the list counts.
   check                  Check the FURNACE_ settings of this container.
+  join-code              Leader: make a one-time code for the follower (FURNACE_JOIN_CODE, 1 hour).
+  host-keepalived        FURNACE_KEEPALIVED=external: what the host's own keepalived needs.
   version                Show the version.
 
 Data (details: furnace COMMAND --help):
@@ -78,10 +80,25 @@ shared = os.environ.get("FURNACE_SHARED_IP", "")
 role = status.get("role", "unknown")
 where = "this host owns" if role == "leader" else "the other host owns"
 print(f"Role:     {role} ({where} the shared IP {shared})")
-print(f"Host:     {os.environ.get('FURNACE_THIS_IP', '')}, other host {os.environ.get('FURNACE_PEER_IP', '')}")
+bad = 0
+if status.get("keepalived") == "external":
+    print("keepalived: the host's own (FURNACE_KEEPALIVED=external)")
+    if status.get("host_role_missing"):
+        print("          <-- no role from the host's keepalived yet (/run/furnace/role on the host).")
+        print("              This host works as the follower. Set it up: docker exec furnace furnace host-keepalived")
+        bad = 1
+install = {}
+try:  # written at every start, from FURNACE_LEADER_IP/FURNACE_FOLLOWER_IP (or the old names)
+    for line in open("/etc/furnace/install.env", encoding="utf-8"):
+        key, sep, value = line.strip().partition("=")
+        if sep and not key.startswith("#"):
+            install[key] = value
+except OSError:
+    pass
+print(f"Host:     {install.get('THIS_IP', '')} (the {install.get('ROLE', '?')} by setting), "
+      f"other host {install.get('PEER_IP', '')}")
 print()
 print("Processes:")
-bad = 0
 for name, (state, restarts) in status.get("processes", {}).items():
     note = f"   (restarted {restarts} times)" if restarts else ""
     mark = "" if state == "running" else "   <-- expected running"
@@ -107,6 +124,8 @@ case "${1:-help}" in
     version|--version) version ;;
     status) status ;;
     check) py -m furnace.container check ;;
+    join-code) py -m furnace.container join-code ;;
+    host-keepalived) shift; py -m furnace.container host-keepalived "$@" ;;
     setup|failover-test)
         echo "In Docker, the settings come from the container's environment (FURNACE_...), see docker-compose.yml." >&2
         [ "$1" = failover-test ] && echo "Test a failover with: docker stop furnace (on the leader host), then docker start furnace." >&2

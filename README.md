@@ -142,8 +142,8 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    ```
    Is this server the leader or the follower? [leader]:
    Network card name [eth0]:
-   This server's IP [192.0.2.11]:
-   The other Furnace server's IP: 192.0.2.12
+   This server's IP (the leader) [192.0.2.11]:
+   The follower server's IP: 192.0.2.12
    Shared IP: 192.0.2.10
    Network prefix of the shared IP (24 = 255.255.255.0) [24]:
    Who may call the API [any]:
@@ -179,23 +179,44 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
    the log, and Furnace keeps only hashes, so it cannot show them again. Lost one? Make a new one
    ([section 7.1](#71-api-tokens-list-logins-and-the-lockout)).
 5. It writes `/root/furnace-peer-bundle.tar.gz` for the follower. It holds the certificate, the
-   replication key and the leader's settings. It is secret.
+   replication key and the leader's settings. It is secret. You only need it if you do not use a join code
+   (next section).
 
 ### 3.3 Follower
 
-1. Copy the bundle from the leader to the follower:
+The follower needs the leader's certificate and secrets. The easy way is a **join code**: nothing to copy.
+
+1. On the leader, make the code:
    ```bash
-   # on the leader
-   sudo scp /root/furnace-peer-bundle.tar.gz you@FOLLOWER_IP:~/
+   sudo furnace join-code
    ```
+   It shows a code like `FJ1-ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567`. It works **once**, for **1 hour**, and
+   only from the follower's IP. A new code replaces the old one.
 2. On the follower, install the package and run setup:
    ```bash
    sudo apt install ./furnace_0.9.0_all.deb
    sudo furnace setup
    ```
-3. Answer `follower`. Setup finds the bundle in your home folder, in `/root` or in `/tmp`, or asks where it is.
-   It takes all shared settings from the leader, so it asks only for the network card. Then it deletes the bundle.
-4. Delete the bundle copy wherever else you put it. Keep the one in `/root` on the leader only if you want to set
+3. Answer `follower`, then type the join code. The follower fetches the certificate and the secrets from the
+   leader over HTTPS (port 443). It takes all shared settings from the leader, so it asks only for the network
+   card.
+
+How the code is safe: the follower checks the leader's certificate against the code before it sends anything,
+so a fake server gets nothing. The secrets wait on the leader encrypted with a key made from the code, and the
+code itself never goes over the network. After 5 wrong codes the code is gone. In a settings file the code is
+`JOIN_CODE=...` (used once, never saved).
+
+**Or copy the bundle file** (for example when the leader's port 443 is not reachable from the follower yet):
+
+1. Copy `/root/furnace-peer-bundle.tar.gz` from the leader to the follower:
+   ```bash
+   # on the leader
+   sudo scp /root/furnace-peer-bundle.tar.gz you@FOLLOWER_IP:~/
+   ```
+2. On the follower, run `sudo furnace setup` and answer `follower`. Setup finds the bundle in your home folder,
+   in `/root` or in `/tmp` (or press Enter at the join code question and give the path). Then it deletes the
+   bundle.
+3. Delete the bundle copy wherever else you put it. Keep the one in `/root` on the leader only if you want to set
    up the follower again later.
 
 ### 3.4 Setup without questions
@@ -208,7 +229,10 @@ nano config.env
 sudo furnace setup --config config.env
 ```
 
-For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is not in one of the usual places.
+The same file works on both servers: `LEADER_IP` and `FOLLOWER_IP` name the two servers, and each server finds its
+role from its own IP. On the follower, the other settings come from the leader's bundle. Add `--bundle FILE` if
+the bundle is not in one of the usual places. (The names before 0.10.0, `THIS_IP` and `PEER_IP` with `ROLE`, still
+work; setup then suggests the new names.)
 
 `sudo furnace setup --check` shows what setup would do and changes nothing.
 
@@ -261,7 +285,7 @@ file, `.env`.
                                      │
       host A 192.0.2.11              │              host B 192.0.2.12
       container "furnace"   ─── HTTPS every 20 s ──► container "furnace"
-      FURNACE_ROLE=leader   ◄── VRRP (keepalived) ─► FURNACE_ROLE=follower
+      (the leader)          ◄── VRRP (keepalived) ─► (the follower)
       ./config  ./data                               ./config  ./data
 ```
 
@@ -310,12 +334,12 @@ cd ~/furnace
 nano .env
 ```
 
-Change the four lines at the top:
+Change the three IPs at the top. **The file is the same on both hosts**: each host finds its role from its own
+IP (the host that has `FURNACE_LEADER_IP` is the leader).
 
 ```
-FURNACE_ROLE=leader
-FURNACE_THIS_IP=192.0.2.11       # host A
-FURNACE_PEER_IP=192.0.2.12       # host B
+FURNACE_LEADER_IP=192.0.2.11     # host A
+FURNACE_FOLLOWER_IP=192.0.2.12   # host B
 FURNACE_SHARED_IP=192.0.2.10     # the shared IP
 ```
 
@@ -331,18 +355,28 @@ At the first start the leader makes the certificate (for the three IPs), the kee
 secret and the **follower bundle** `./config/furnace-peer-bundle.tar.gz`. All of it stays in `./config`
 (keep it private: never share or copy this folder, except the bundle once to the follower).
 
-**3. Follower (host B).** The same folder and the same `docker-compose.yml`. In `.env`, the role is `follower` and
-the two host IPs are swapped:
+**3. Follower (host B).** The same folder, the same `docker-compose.yml` and **the same `.env`** (copy it as it
+is: nothing is swapped).
 
-```
-FURNACE_ROLE=follower
-FURNACE_THIS_IP=192.0.2.12       # host B
-FURNACE_PEER_IP=192.0.2.11       # host A
-FURNACE_SHARED_IP=192.0.2.10
+The follower needs the leader's certificate and secrets. The easy way is a **join code**:
+
+```bash
+# on the leader (host A)
+docker exec furnace furnace join-code       # shows FJ1-....-....  (works once, for 1 hour, only from host B)
+
+# on the follower (host B): add the code to .env, then start
+echo 'FURNACE_JOIN_CODE=FJ1-ABCD-EFGH-IJKL-MNOP-QRST-UVWX-YZ23-4567' >> .env
+docker compose up -d
+docker logs furnace                     # "fetched from the leader 192.0.2.11 with the join code" and "Ready."
 ```
 
-Copy the bundle from the leader first, then start. The folder `./config` belongs to root and is closed to normal
-users (on purpose), so take the bundle out of the container with `docker cp`. It needs no sudo:
+The follower checks the leader's certificate against the code before it sends anything, and fetches the
+secrets over HTTPS. The code is then used up: you can remove the line from `.env`. A wrong or old code stops the
+follower with a clear message; make a new code on the leader.
+
+**Or copy the bundle file** (for example when host B cannot reach port 443 on host A yet). The folder `./config`
+belongs to root and is closed to normal users (on purpose), so take the bundle out of the container with
+`docker cp`. It needs no sudo:
 
 ```bash
 # on the leader (host A): a copy in your home folder, readable only by you
@@ -358,8 +392,8 @@ docker logs furnace                     # "taken from the leader's bundle" and "
 rm ~/furnace-peer-bundle.tar.gz
 ```
 
-The follower takes the certificate and the secrets from the bundle and deletes it. Without the bundle it stops,
-says what to do, and tries again by itself (so it starts as soon as the file is there).
+The follower takes the certificate and the secrets from the bundle and deletes it. Without a code or the bundle
+it stops, says what to do, and tries again by itself (so it starts as soon as the file is there).
 
 On the host, `ls -l ~/furnace` shows other owner names for `config` and `data` (for example `systemd-journal`).
 That is normal: the container's own users have numbers that mean other names on the host.
@@ -381,12 +415,14 @@ shared IP). Test a failover (below) before you go live.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `FURNACE_ROLE` | (required) | `leader` on one host, `follower` on the other |
-| `FURNACE_THIS_IP` | (required) | this host's IP |
-| `FURNACE_PEER_IP` | (required) | the other host's IP |
+| `FURNACE_LEADER_IP` | (required) | the leader host's IP (the same on both hosts) |
+| `FURNACE_FOLLOWER_IP` | (required) | the follower host's IP (the same on both hosts) |
+| `FURNACE_ROLE` | found from the IP | only when one host has both IPs: `leader` or `follower` |
+| `FURNACE_JOIN_CODE` | (none) | follower only: the one-time code from `furnace join-code` on the leader |
+| `FURNACE_KEEPALIVED` | `builtin` | `external` = the host's own keepalived moves the shared IP (below) |
 | `FURNACE_SHARED_IP` | (required) | the shared IP (VIP) everyone uses |
 | `FURNACE_SHARED_IP_PREFIX` | `24` | network prefix of the shared IP |
-| `FURNACE_INTERFACE` | the card that has `FURNACE_THIS_IP` | the host's network card |
+| `FURNACE_INTERFACE` | the card that has this host's IP | the host's network card |
 | `FURNACE_API_ALLOW_FROM` | `any` | who may call the API (every call still needs a token) |
 | `FURNACE_LISTS_ALLOW_FROM` | `any` | who may download the lists (always with the login) |
 | `FURNACE_VRRP_ROUTER_ID` | `51` | the same on both hosts, unique on the network |
@@ -409,6 +445,27 @@ docker logs --since 1h furnace              # what happened (no secrets in it)
 **Failover test:** `docker stop furnace` on the leader. Within a few seconds the follower owns the shared IP and
 becomes the leader. `docker start furnace` brings the old host back as the standby (it does not take the shared
 IP back). It gets the new data with the next replication, within 20 seconds.
+
+**The host's own keepalived (`FURNACE_KEEPALIVED=external`).** Use this when the hosts already run keepalived
+for other services, and you want one keepalived per host that you look after yourself. The container then runs
+no keepalived and needs no `NET_ADMIN`/`NET_RAW` (you may remove `cap_add` from `docker-compose.yml`). The
+host's keepalived moves the shared IP, and a small notify script on the host writes the role into
+`/run/furnace/role`, which the container reads (`docker-compose.yml` mounts `/run/furnace`).
+
+Furnace gets **its own** `vrrp_instance` with its own shared IP and router ID, next to your other blocks: a
+Furnace problem moves only Furnace's shared IP, never your other services. Furnace never changes the host:
+it prints what to add, and you add it.
+
+1. In `.env` on both hosts: `FURNACE_KEEPALIVED=external`, then `docker compose up -d`.
+2. On each host: `docker exec furnace furnace host-keepalived`. It shows the commands for the two small
+   scripts (`/usr/local/sbin/furnace-notify` and `furnace-health-check`), and the block for
+   `/etc/keepalived/keepalived.conf`, already filled in for this host (card, IPs, router ID, priority,
+   password). Its `virtual_router_id` must not be used by your other blocks.
+3. `sudo systemctl restart keepalived`, then `docker exec furnace furnace status`.
+
+Until the host's keepalived writes the role, the container works as the follower and `furnace status` warns.
+If the Furnace container stops, the host's health check fails and the shared IP moves after about 15 seconds
+(the built-in keepalived moves it at once, because it stops first).
 
 **Backup:** the leader makes a daily backup in `./data/backups`. To be safe from a lost host, copy `./config` and
 `./data` somewhere else from time to time.
@@ -468,10 +525,10 @@ Each question saves one setting in `/etc/furnace/setup.conf`. The same names are
 
 | Question | Setting | Default | Meaning |
 |---|---|---|---|
-| Leader or follower? | `ROLE` | `leader` | `leader` (preferred leader, keepalived priority 150) or `follower` (priority 100). |
+| Leader or follower? | `ROLE` | `leader` | `leader` (preferred leader, keepalived priority 150) or `follower` (priority 100). In a settings file it is found from the IPs. |
 | Network card name | `INTERFACE` | card of the default route | Name (not IP) of the card that carries this server's IP and the shared IP, for example `ens192`. See `ip -br addr`. |
-| This server's IP | `THIS_IP` | first IP of the card | It must be set on that card. |
-| The other server's IP | `PEER_IP` | | The other Furnace server. |
+| This server's IP (the leader) | `LEADER_IP` | first IP of the card | The leader's own IP. It must be set on that card. |
+| The follower server's IP | `FOLLOWER_IP` | | The follower's own IP. Both are the same on both servers. (Before 0.10.0: `THIS_IP` and `PEER_IP`; they still work.) |
 | Shared IP | `SHARED_IP` | | The shared IP (VIP, virtual IP). Callers and list readers always use this address. |
 | Network prefix | `SHARED_IP_PREFIX` | prefix of this server's IP | For example 24 for 255.255.255.0. |
 | Who may call the API | `API_ALLOW_FROM` | `any` | `any` = every address (a token is always needed). Or IPs and ranges, comma-separated, for example a SOAR server and its engines. |
@@ -1201,7 +1258,7 @@ The nightly cleanup:
 - When a server takes the shared IP, the notify script marks it as leader and starts the cleanup timer.
   When it loses the IP, it marks it as follower and stops the timer.
 - **Replication:** every 20 seconds the leader makes a SQLite backup snapshot and sends it over HTTPS to
-  `https://PEER_IP/replica/snapshot`, with the replication secret both servers share. nginx lets only the other
+  `https://OTHER_SERVER_IP/replica/snapshot`, with the replication secret both servers share. nginx lets only the other
   server reach this address. The follower checks the secret, loads the snapshot, rebuilds its EDL files and
   answers at once, so the leader knows that it worked. `sudo furnace status` on the leader shows the last result.
 - **SSH fallback (0.8 and 0.9 only):** if HTTPS does not work, for example while the follower still runs an older

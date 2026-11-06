@@ -158,7 +158,7 @@ fi
 
 # --------------------------------------------------------------------------- settings
 
-KEYS="ROLE THIS_IP PEER_IP SHARED_IP SHARED_IP_PREFIX INTERFACE API_ALLOW_FROM LISTS_ALLOW_FROM ARCHIVE_AFTER_DAYS
+KEYS="ROLE LEADER_IP FOLLOWER_IP THIS_IP PEER_IP SHARED_IP SHARED_IP_PREFIX INTERFACE API_ALLOW_FROM LISTS_ALLOW_FROM ARCHIVE_AFTER_DAYS
 KEEPALIVED_PASSWORD VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS SSH_ALLOW_FROM HOST_FIREWALL"
 # The order the checks run in: later checks use the earlier values.
 CHECK_ORDER="ROLE INTERFACE THIS_IP PEER_IP SHARED_IP SHARED_IP_PREFIX API_ALLOW_FROM LISTS_ALLOW_FROM ARCHIVE_AFTER_DAYS
@@ -168,8 +168,10 @@ SHARED_KEYS="SHARED_IP SHARED_IP_PREFIX API_ALLOW_FROM LISTS_ALLOW_FROM ARCHIVE_
 VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS"
 # The first API token. Used only while the leader has no token yet, so they are not saved in setup.conf.
 TOKEN_KEYS="TOKEN_NAME TOKEN_ALLOW TOKEN_EXPIRES_DAYS"
+# Used once, never saved: the follower's join code (made on the leader with: sudo furnace join-code).
+ONCE_KEYS="JOIN_CODE"
 
-for k in $KEYS $TOKEN_KEYS; do printf -v "CFG_$k" '%s' ""; done
+for k in $KEYS $TOKEN_KEYS $ONCE_KEYS; do printf -v "CFG_$k" '%s' ""; done
 
 trim() {
     local s="${1%$'\r'}"
@@ -195,11 +197,52 @@ load_file() {
             XSOAR_IP) key=API_ALLOW_FROM ;;
             FIREWALL_IP) key=LISTS_ALLOW_FROM ;;
         esac
-        case " $(echo $KEYS $TOKEN_KEYS) " in
+        case " $(echo $KEYS $TOKEN_KEYS $ONCE_KEYS) " in
             *" $key "*) printf -v "${prefix}_$key" '%s' "$value" ;;
             *) die "Unknown setting '$key' in $file." ;;
         esac
     done < "$file"
+}
+
+# map_ips PREFIX LOCAL: turn LEADER_IP and FOLLOWER_IP (the same on both servers) into this server's
+# THIS_IP and PEER_IP, which setup uses inside. LOCAL=1 (this server's own settings): the role is the
+# one whose IP is on this server, so ROLE is only needed when one server has both. The old names
+# THIS_IP and PEER_IP (before 0.10.0) still work; OLD_IP_NAMES=1 then, for a note at the end.
+OLD_IP_NAMES=0
+map_ips() {
+    local p="$1" here="$2" l f r t pe mine=""
+    l="${p}_LEADER_IP"; f="${p}_FOLLOWER_IP"; r="${p}_ROLE"; t="${p}_THIS_IP"; pe="${p}_PEER_IP"
+    if [ -z "${!l}${!f}" ]; then
+        [ "$p" = CFG ] && [ -n "${!t}${!pe}" ] && OLD_IP_NAMES=1
+        return 0
+    fi
+    [ -z "${!t}${!pe}" ] || die "Use LEADER_IP and FOLLOWER_IP, or the old THIS_IP and PEER_IP, not both."
+    [ -n "${!l}" ] && [ -n "${!f}" ] || die "Set both LEADER_IP and FOLLOWER_IP (the same on both servers)."
+    [ "${!l}" != "${!f}" ] || die "LEADER_IP and FOLLOWER_IP must be the two different servers."
+    if [ "$here" = 1 ]; then
+        [ -n "$(card_of_ip "${!l}")" ] && mine="leader"
+        [ -n "$(card_of_ip "${!f}")" ] && mine="${mine:+$mine }follower"
+        if [ -z "${!r}" ]; then
+            case "$mine" in
+                leader|follower) printf -v "$r" '%s' "$mine" ;;
+                "leader follower") die "This server has both LEADER_IP and FOLLOWER_IP. Add ROLE=leader or ROLE=follower." ;;
+                *) die "This server has neither ${!l} (LEADER_IP) nor ${!f} (FOLLOWER_IP). Check the IPs. See: ip -br addr" ;;
+            esac
+        elif [ -z "$mine" ]; then
+            msg="$(check_ROLE "${!r}")" || die "$msg"
+            if [ "${!r}" = leader ]; then
+                die "ROLE is leader, but LEADER_IP ${!l} is not on this server. See: ip -br addr"
+            fi
+            die "ROLE is follower, but FOLLOWER_IP ${!f} is not on this server. See: ip -br addr"
+        elif [[ " $mine " != *" ${!r} "* ]]; then
+            die "ROLE is ${!r}, but this server has the $mine's IP."
+        fi
+    fi
+    case "${!r}" in
+        leader) printf -v "$t" '%s' "${!l}"; printf -v "$pe" '%s' "${!f}" ;;
+        follower) printf -v "$t" '%s' "${!f}"; printf -v "$pe" '%s' "${!l}" ;;
+    esac
+    printf -v "$l" '%s' ""; printf -v "$f" '%s' ""   # from here on only THIS_IP and PEER_IP are used
 }
 
 is_ipv4() {
@@ -417,7 +460,29 @@ open_bundle() {
     for k in $KEYS; do printf -v "B_$k" '%s' ""; done
     load_file "$UNPACK/setup.conf" B
     [ "$B_ROLE" = "leader" ] || { BUNDLE_ERR="The bundle $1 was not made by a leader."; return 1; }
+    map_ips B 0
     BUNDLE="$1"
+}
+
+# fetch_join CODE [LEADER_IP]: fetch the leader's bundle over HTTPS with a join code and open it.
+# Returns 1 with the problem in BUNDLE_ERR. The code works only once, so check mode does not use it.
+JOINED=0
+fetch_join() {
+    local file
+    if [ "$CHECK" -eq 1 ]; then
+        BUNDLE_ERR="Check mode does not use the join code (it works only once). Run setup without --check."
+        return 1
+    fi
+    file="$(mktemp)"
+    if ! BUNDLE_ERR="$("$PY" -m furnace.join fetch --code "$1" --out "$file" ${2:+--leader "$2"} 2>&1)"; then
+        rm -f "$file"
+        return 1
+    fi
+    if ! open_bundle "$file"; then
+        rm -f "$file"
+        return 1
+    fi
+    JOINED=1
 }
 
 # Take the shared settings from the leader. STRICT=1: a different value in the
@@ -494,20 +559,35 @@ ask_yes_no() {
 note() { printf '\n  %s\n' "$*"; }
 
 ask_follower_from_bundle() {
-    local place msg
+    local place msg code
     if ! { place="$(find_bundle)" && open_bundle "$place"; }; then
         [ -n "$BUNDLE_ERR" ] && printf '    %s\n' "$BUNDLE_ERR"
-        note "The follower needs the file $BUNDLE_NAME from the leader."
-        note "On the leader it is /root/$BUNDLE_NAME. Copy it to this server first."
+        note "The follower needs the leader's certificate and secrets. Easiest: run this on the leader:"
+        info "    sudo furnace join-code"
+        info "  and type the code here. Or press Enter to give the file $BUNDLE_NAME instead."
         while true; do
-            read -r -p "  Where is $BUNDLE_NAME? (full path): " place < /dev/tty || die "No answer (the input was closed)."
-            place="$(trim "$place")"
-            if [ ! -f "$place" ]; then echo "    There is no file $place."; continue; fi
-            if open_bundle "$place"; then break; fi
+            read -r -p "  Join code from the leader (Enter = use the file): " code < /dev/tty || die "No answer (the input was closed)."
+            code="$(trim "$code")"
+            [ -z "$code" ] && break
+            if fetch_join "$code"; then break; fi
             printf '    %s\n' "$BUNDLE_ERR"
         done
+        if [ "$JOINED" -ne 1 ]; then
+            note "On the leader the file is /root/$BUNDLE_NAME. Copy it to this server first."
+            while true; do
+                read -r -p "  Where is $BUNDLE_NAME? (full path): " place < /dev/tty || die "No answer (the input was closed)."
+                place="$(trim "$place")"
+                if [ ! -f "$place" ]; then echo "    There is no file $place."; continue; fi
+                if open_bundle "$place"; then break; fi
+                printf '    %s\n' "$BUNDLE_ERR"
+            done
+        fi
     fi
-    note "Found the leader's bundle: $BUNDLE"
+    if [ "$JOINED" -eq 1 ]; then
+        note "Got the leader's certificate and secrets with the join code."
+    else
+        note "Found the leader's bundle: $BUNDLE"
+    fi
     info "  The leader is $B_THIS_IP. This server must be $B_PEER_IP. The other settings come from the leader."
     apply_bundle 0
     note "Network card for $CFG_THIS_IP and the shared IP ($CFG_SHARED_IP): its name, not its IP."
@@ -529,8 +609,8 @@ ask_all() {
     note "The network card that carries this server's IP and the shared IP: its name, not its IP. See: ip -br addr"
     ask INTERFACE "Network card name" "$card"
     ip="${CFG_THIS_IP:-$(primary_ip "$CFG_INTERFACE")}"
-    ask THIS_IP "This server's IP" "$ip"
-    ask PEER_IP "The other Furnace server's IP" "$CFG_PEER_IP"
+    ask THIS_IP "This server's IP (the leader)" "$ip"
+    ask PEER_IP "The follower server's IP" "$CFG_PEER_IP"
     note "The shared IP (VIP) is a free third address. Everything that uses Furnace connects to it."
     ask SHARED_IP "Shared IP" "$CFG_SHARED_IP"
     ask SHARED_IP_PREFIX "Network prefix of the shared IP (24 = 255.255.255.0)" \
@@ -658,7 +738,16 @@ write_setup_conf() {
         {
             echo "# Furnace settings, saved by 'furnace setup'. Secret (keepalived password)."
             echo "# Change them with: sudo furnace setup"
-            for k in $KEYS; do var="CFG_$k"; printf '%s=%s\n' "$k" "${!var}"; done
+            echo "# LEADER_IP and FOLLOWER_IP are the same on both servers; ROLE says which one this is."
+            for k in $KEYS; do
+                var="CFG_$k"
+                case "$k" in
+                    THIS_IP|PEER_IP) continue ;;
+                    LEADER_IP) if [ "$CFG_ROLE" = leader ]; then var=CFG_THIS_IP; else var=CFG_PEER_IP; fi ;;
+                    FOLLOWER_IP) if [ "$CFG_ROLE" = leader ]; then var=CFG_PEER_IP; else var=CFG_THIS_IP; fi ;;
+                esac
+                printf '%s=%s\n' "$k" "${!var}"
+            done
         } > "$SETUP_CONF.tmp"
     )
     mv -f "$SETUP_CONF.tmp" "$SETUP_CONF"
@@ -670,17 +759,24 @@ case "$MODE" in
     upgrade)
         [ -f "$SETUP_CONF" ] || die "Furnace is not set up yet. Run: sudo furnace setup"
         load_file "$SETUP_CONF" CFG
+        map_ips CFG 1
+        OLD_IP_NAMES=0
         ;;
     config)
         load_file "$CONFIG" CFG
+        map_ips CFG 1
         [ -n "$CFG_HOST_FIREWALL" ] || FW_DEFAULTED=1
         msg="$(check_ROLE "$CFG_ROLE")" || die "$msg"
         if [ "$CFG_ROLE" = "follower" ] && ! have_secrets; then
-            place="$(find_bundle)" || die "The follower needs $BUNDLE_NAME from the leader.
-  1. Set up the leader first. It writes /root/$BUNDLE_NAME.
-  2. Copy that file to this server, for example to /root or your home folder.
-  3. Run setup again, or give the path: sudo furnace setup --config $CONFIG --bundle FILE"
-            open_bundle "$place" || die "$BUNDLE_ERR"
+            if [ -n "$CFG_JOIN_CODE" ]; then
+                fetch_join "$CFG_JOIN_CODE" "$CFG_PEER_IP" || die "The join code did not work: $BUNDLE_ERR"
+            else
+                place="$(find_bundle)" || die "The follower needs the leader's certificate and secrets. Either:
+  - On the leader: sudo furnace join-code. Add the code to $CONFIG as JOIN_CODE=... and run setup again.
+  - Or copy /root/$BUNDLE_NAME from the leader to this server (for example to /root), then run setup
+    again, or give the path: sudo furnace setup --config $CONFIG --bundle FILE"
+                open_bundle "$place" || die "$BUNDLE_ERR"
+            fi
             apply_bundle 1
         fi
         ;;
@@ -689,6 +785,8 @@ case "$MODE" in
         printf '\nFurnace setup. Press Enter to take the answer in [brackets].\n'
         if [ -f "$SETUP_CONF" ]; then
             load_file "$SETUP_CONF" CFG
+            map_ips CFG 1
+            OLD_IP_NAMES=0
             printf 'Furnace is already set up here. The brackets show the current answers.\n'
         fi
         ask_all
@@ -709,6 +807,7 @@ if [ "$CFG_USE_HTTPS" = "yes" ]; then WEB_PORT=443; SCHEME=https; else WEB_PORT=
 SSH_PORT="$( (sshd -T 2>/dev/null || true) | awk '$1=="port"{print $2; exit}')"
 SSH_PORT="${SSH_PORT:-22}"
 decide_host_firewall
+if [ "$OLD_IP_NAMES" = 1 ]; then TODO+=("Settings file: THIS_IP and PEER_IP are the old names. Better: LEADER_IP and FOLLOWER_IP, the same file on both servers (see config.env.example)."); fi
 
 # --------------------------------------------------------------------------- check mode
 
@@ -877,7 +976,11 @@ else
         cp "$UNPACK/ssh/replica_key" "$UNPACK/ssh/replica_key.pub" "$ETC/ssh/"
         fix_secret_modes
         rm -f "$BUNDLE"
-        ok "Certificate and replication key copied from the leader bundle (bundle file deleted)"
+        if [ "$JOINED" -eq 1 ]; then
+            ok "Certificate and replication key fetched from the leader with the join code (the code is used up)"
+        else
+            ok "Certificate and replication key copied from the leader bundle (bundle file deleted)"
+        fi
     fi
 fi
 if [ "$CFG_USE_HTTPS" = "yes" ] && ! cert_names_ok "$ETC/tls/furnace.crt"; then
@@ -934,6 +1037,14 @@ if [ "$CFG_USE_HTTPS" = "yes" ]; then
         proxy_pass http://127.0.0.1:8081/replica/snapshot;
         proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_read_timeout 120s;
+    }
+    # Join code: only the follower may fetch the (encrypted) secrets, once (sudo furnace join-code).
+    location = /join {
+        allow ${CFG_PEER_IP};
+        deny all;
+        client_max_body_size 4k;
+        proxy_pass http://127.0.0.1:8081/join;
+        proxy_set_header X-Forwarded-For \$remote_addr;
     }
 "
 else

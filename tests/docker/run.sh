@@ -50,13 +50,14 @@ teardown() {
 }
 trap teardown EXIT
 
-# One Furnace host: NAME IP ROLE PEER_IP [extra docker options]. Created, not started.
+# One Furnace host: NAME IP [extra docker options]. Created, not started.
+# Both hosts get the SAME settings: each finds its role from its own IP.
 create_host() {
-    local name="$1" ip="$2" role="$3" peer="$4"
-    shift 4
+    local name="$1" ip="$2"
+    shift 2
     docker create --name "$name" --hostname "$name" --network "$NET" --ip "$ip" \
         --cap-add NET_ADMIN --cap-add NET_RAW --stop-timeout 20 \
-        -e FURNACE_ROLE="$role" -e FURNACE_THIS_IP="$ip" -e FURNACE_PEER_IP="$peer" \
+        -e FURNACE_LEADER_IP="$LEADER_IP" -e FURNACE_FOLLOWER_IP="$FOLLOWER_IP" \
         -e FURNACE_SHARED_IP="$SHARED_IP" -e FURNACE_LISTS_ALLOW_FROM="$CLIENT_IP" \
         -v "$name-etc:/etc/furnace" -v "$name-data:/var/lib/furnace" "$@" "$IMAGE" >/dev/null
 }
@@ -99,7 +100,7 @@ cp "$ROOT/docker/docker-compose.yml" "$CTMP/" && cp "$ROOT/docker/.env.example" 
 CTMP_D="$(cd "$CTMP" && (pwd -W 2>/dev/null || pwd))"  # the path docker sees (Windows path in Git Bash)
 check "docker-compose.yml with .env.example is valid" docker compose --project-directory "$CTMP_D" -f "$CTMP_D/docker-compose.yml" config -q
 out="$(docker compose --project-directory "$CTMP_D" -f "$CTMP_D/docker-compose.yml" config 2>&1)"
-check "the settings in .env reach the container" bash -c 'grep -q "FURNACE_ROLE: leader" <<< "$1" && grep -q "FURNACE_SHARED_IP: 192.0.2.10" <<< "$1"' _ "$out"
+check "the settings in .env reach the container" bash -c 'grep -q "FURNACE_LEADER_IP: 192.0.2.11" <<< "$1" && grep -q "FURNACE_SHARED_IP: 192.0.2.10" <<< "$1"' _ "$out"
 rm -f "$CTMP/.env"
 check "without .env docker compose refuses to start" bash -c '! docker compose --project-directory "$1" -f "$1/docker-compose.yml" config -q 2>/dev/null' _ "$CTMP_D"
 rm -rf "$CTMP"
@@ -113,24 +114,25 @@ check "Flask and gunicorn come from the bundle" on "$CLIENT" "test -d /usr/lib/f
 
 step "Wrong settings stop the container with a clear message"
 docker run --name furnace-d-bad --network "$NET" --cap-add NET_ADMIN -e FURNACE_ROLE=boss \
-    -e FURNACE_THIS_IP=192.0.2.99 -e FURNACE_PEER_IP=192.0.2.99 "$IMAGE" > /tmp/furnace-d-bad.log 2>&1 && rc=0 || rc=$?
+    -e FURNACE_LEADER_IP=192.0.2.98 -e FURNACE_FOLLOWER_IP=192.0.2.99 "$IMAGE" > /tmp/furnace-d-bad.log 2>&1 && rc=0 || rc=$?
 docker rm -f furnace-d-bad >/dev/null 2>&1 || true
 out="$(cat /tmp/furnace-d-bad.log)"
 rm -f /tmp/furnace-d-bad.log
 check "it stops (exit 2)" [ "$rc" = 2 ]
 check "it names every wrong setting" bash -c 'grep -q "FURNACE_ROLE must be .leader. or .follower." <<< "$1" &&
-    grep -q "FURNACE_SHARED_IP is not set" <<< "$1" && grep -q "FURNACE_PEER_IP must be the other host" <<< "$1"' _ "$out"
+    grep -q "FURNACE_SHARED_IP is not set" <<< "$1" && grep -q "has neither 192.0.2.98 (FURNACE_LEADER_IP)" <<< "$1"' _ "$out"
 check "it explains the host network" grep -q "network_mode: host" <<< "$out"
 out="$(docker run --rm --entrypoint furnace "$IMAGE" check 2>&1 || true)"
-check "furnace check shows the problems too" grep -q "FURNACE_ROLE is not set" <<< "$out"
+check "furnace check shows the problems too" grep -q "FURNACE_LEADER_IP is not set" <<< "$out"
 
-step "Start the leader"
-create_host "$LEADER" "$LEADER_IP" leader "$FOLLOWER_IP"
+step "Start the leader (the same IP settings on both hosts)"
+create_host "$LEADER" "$LEADER_IP"
 docker start "$LEADER" >/dev/null
 check "the leader is ready" wait_ready "$LEADER"
 logs="$(docker logs "$LEADER" 2>&1)"
 check "it made the certificate and the secrets" bash -c 'grep -q "Self-signed certificate made" <<< "$1" &&
     grep -q "Replication secret made" <<< "$1" && grep -q "Follower bundle:" <<< "$1"' _ "$logs"
+check "it found its role from its own IP" grep -q "This host is the leader (198.51.100.11)" <<< "$logs"
 check "the leader owns the shared IP" wait_for 20 owns_shared_ip "$LEADER"
 check "the leader says leader" [ "$(role_of "$LEADER")" = "leader" ]
 check "the key is readable by root only" on "$LEADER" "[ \"\$(stat -c '%U %a' /etc/furnace/tls/furnace.key)\" = 'root 600' ]"
@@ -140,17 +142,38 @@ check "the API runs as the furnace user, not root" \
     on "$LEADER" "[ \"\$(ps -o user= -C gunicorn -C python3 | grep -c furnace)\" -ge 1 ] || pgrep -u furnace -f gunicorn >/dev/null"
 docker cp "$LEADER:/etc/furnace/tls/furnace.crt" - | docker cp - "$CLIENT:/root/"
 
-step "The follower needs the leader's bundle"
-create_host "$FOLLOWER" "$FOLLOWER_IP" follower "$LEADER_IP"
+step "The follower gets the leader's secrets with a join code"
+create_host "$FOLLOWER" "$FOLLOWER_IP"
 docker start "$FOLLOWER" >/dev/null
 wait_for 30 bash -c "[ \"\$(docker inspect -f '{{.State.Running}}' $FOLLOWER)\" = false ]" || true
-check "without the bundle it stops and says what to do" \
-    bash -c 'docker logs "$1" 2>&1 | grep -q "Copy furnace-peer-bundle.tar.gz from the leader"' _ "$FOLLOWER"
-docker cp "$LEADER:/etc/furnace/furnace-peer-bundle.tar.gz" - | docker cp - "$FOLLOWER:/etc/furnace/"
+check "without a code or the bundle it stops and says what to do" \
+    bash -c 'docker logs "$1" 2>&1 | grep -q "furnace join-code" && docker logs "$1" 2>&1 | grep -q "furnace-peer-bundle.tar.gz"' _ "$FOLLOWER"
+out="$(docker exec "$LEADER" furnace join-code)"
+CODE="$(grep -oE 'FJ1(-[A-Z2-7]{4}){8}' <<< "$out" | head -n1)"
+check "the leader makes a join code" [ -n "$CODE" ]
+check "only the follower may use it (nginx refuses the client box)" \
+    [ "$(code "-X" POST "https://$LEADER_IP/join")" = 403 ]
+# One letter of the secret changed: a wrong code, refused by the leader, the follower stops and says why.
+c="${CODE:4:1}"; [ "$c" = A ] && n=B || n=A
+BAD="${CODE:0:4}$n${CODE:5}"
+docker rm -f "$FOLLOWER" >/dev/null
+create_host "$FOLLOWER" "$FOLLOWER_IP" -e FURNACE_JOIN_CODE="$BAD"
 docker start "$FOLLOWER" >/dev/null
-check "with the bundle the follower is ready" wait_ready "$FOLLOWER"
-check "it took the secrets from the bundle and deleted it" bash -c 'docker logs "$1" 2>&1 | grep -q "taken from the leader.s bundle" &&
+wait_for 30 bash -c "[ \"\$(docker inspect -f '{{.State.Running}}' $FOLLOWER)\" = false ]" || true
+check "a wrong join code is refused and explained" \
+    bash -c 'docker logs "$1" 2>&1 | grep -q "The join code did not work: The leader said: The join code is wrong"' _ "$FOLLOWER"
+docker rm -f "$FOLLOWER" >/dev/null
+create_host "$FOLLOWER" "$FOLLOWER_IP" -e FURNACE_JOIN_CODE="$CODE"
+docker start "$FOLLOWER" >/dev/null
+check "with the right code the follower is ready" wait_ready "$FOLLOWER"
+check "the follower found its role from its own IP" \
+    bash -c 'docker logs "$1" 2>&1 | grep -q "This host is the follower (198.51.100.12)"' _ "$FOLLOWER"
+check "it fetched the secrets with the join code (no bundle file left)" \
+    bash -c 'docker logs "$1" 2>&1 | grep -q "fetched from the leader 198.51.100.11 with the join code" &&
     docker exec "$1" test ! -e /etc/furnace/furnace-peer-bundle.tar.gz' _ "$FOLLOWER"
+out="$(on "$FOLLOWER" "/usr/lib/furnace/bin/furnace-python -m furnace.join fetch --code '$CODE' --out /tmp/again 2>&1" || true)"
+check "the code works only once" grep -q "No join code is waiting" <<< "$out"
+check "the leader keeps nothing of the code" on "$LEADER" "! ls /var/lib/furnace/join/code.json /var/lib/furnace/join/bundle.enc 2>/dev/null"
 check "same certificate on both" [ "$(on "$LEADER" 'sha256sum < /etc/furnace/tls/furnace.crt')" = "$(on "$FOLLOWER" 'sha256sum < /etc/furnace/tls/furnace.crt')" ]
 check "the follower does not own the shared IP" bash -c '! docker exec "$1" ip -4 addr show eth0 | grep -q "inet $2/"' _ "$FOLLOWER" "$SHARED_IP"
 check "the follower says follower" [ "$(role_of "$FOLLOWER")" = "follower" ]

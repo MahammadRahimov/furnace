@@ -19,7 +19,7 @@ from flask import Flask, Response, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import __version__, auth, db, exchange, importer, replica
+from . import __version__, auth, db, exchange, importer, join, replica
 from .config import Settings
 from .locking import LockTimeout
 from .service import Furnace, Result
@@ -154,6 +154,22 @@ def create_app(settings: Settings | None = None) -> Flask:
                 log.warning("Refused a snapshot from %s: %s", caller, exc)
                 return _error("rejected", str(exc), 409 if settings.is_leader() else 422)
             return jsonify({"status": "ok", "applied": counts})
+
+    # -------------------------------------------------------------- join code
+
+    @app.post("/join")
+    def join_claim():
+        """The follower fetches the leader's (encrypted) bundle with a join code. nginx lets only the follower in."""
+        caller = request.remote_addr or "unknown"
+        body = request.get_json(silent=True)
+        proof = body.get("proof", "") if isinstance(body, dict) else ""
+        try:
+            blob = join.claim(settings.join_dir, proof)
+        except join.JoinError as exc:
+            log.warning("Refused a join from %s: %s", caller, exc)
+            return _error("refused", str(exc), exc.http)
+        log.info("Gave the bundle to %s (the join code is used up).", caller)
+        return Response(blob, mimetype="application/octet-stream")
 
     # -------------------------------------------------------------- IPs
 

@@ -39,6 +39,8 @@ LIB = Path("/usr/lib/furnace")
 ETC = Path("/etc/furnace")
 DATA = Path("/var/lib/furnace")
 STATE = Path("/run/furnace-state")
+HOST_STATE = Path("/run/furnace-host")  # external keepalived: the host's /run/furnace (a volume)
+HOST_STATE_ON_HOST = "/run/furnace"
 PY = str(LIB / "bin" / "furnace-python")
 NGINX_CONF = Path("/etc/nginx/conf.d/furnace.conf")
 KEEPALIVED_CONF = Path("/etc/keepalived/keepalived.conf")
@@ -73,7 +75,10 @@ class ContainerSettings:
     api_allow_from: str = "any"
     lists_allow_from: str = "any"
     vrrp_router_id: int = 51
+    join_code: str = ""  # follower: FURNACE_JOIN_CODE, to fetch the secrets from the leader
+    keepalived: str = "builtin"  # builtin: in this container; external: the host's own keepalived
     problems: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)  # shown at the start, for example "use the new names"
 
     @property
     def priority(self) -> int:
@@ -126,29 +131,89 @@ def addresses() -> dict[str, list[tuple[str, int]]]:
 
 def load_settings(env: dict[str, str] | None = None,
                   cards: dict[str, list[tuple[str, int]]] | None = None) -> ContainerSettings:
-    """Read and check the FURNACE_ settings. Every problem is collected, then reported at once."""
+    """Read and check the FURNACE_ settings. Every problem is collected, then reported at once.
+
+    The IPs: FURNACE_LEADER_IP and FURNACE_FOLLOWER_IP, the same on both hosts. The role is the one
+    whose IP is on this host (FURNACE_ROLE is only needed when one host has both IPs). The names before
+    0.10.0, FURNACE_THIS_IP and FURNACE_PEER_IP (with FURNACE_ROLE), still work.
+    """
     env = dict(os.environ if env is None else env)
     get = lambda name: env.get(f"FURNACE_{name}", "").strip()  # noqa: E731
     problems: list[str] = []
+    notes: list[str] = []
+    cards = addresses() if cards is None else cards
+    on_host = lambda ip: any(found == ip for card in cards.values() for found, _ in card)  # noqa: E731
+
+    def address(name: str) -> str:
+        value = get(name)
+        if not value:
+            problems.append(f"FURNACE_{name} is not set.")
+        elif not _ipv4(value):
+            problems.append(f"FURNACE_{name} '{value}' is not a valid IPv4 address.")
+            return ""
+        return value
 
     role = get("ROLE")
-    if role not in ("leader", "follower"):
-        problems.append(f"FURNACE_ROLE must be 'leader' or 'follower', not '{role}'." if role
-                        else "FURNACE_ROLE is not set. Use 'leader' on one host and 'follower' on the other.")
-    ips = {}
-    for name in ("THIS_IP", "PEER_IP", "SHARED_IP"):
-        ips[name] = get(name)
-        if not ips[name]:
-            problems.append(f"FURNACE_{name} is not set.")
-        elif not _ipv4(ips[name]):
-            problems.append(f"FURNACE_{name} '{ips[name]}' is not a valid IPv4 address.")
-    if ips["THIS_IP"] and ips["THIS_IP"] == ips["PEER_IP"]:
-        problems.append("FURNACE_PEER_IP must be the other host, not this host.")
-    if ips["SHARED_IP"] and ips["SHARED_IP"] in (ips["THIS_IP"], ips["PEER_IP"]):
+    if role and role not in ("leader", "follower"):
+        problems.append(f"FURNACE_ROLE must be 'leader' or 'follower', not '{role}'.")
+        role = ""
+    old_names = bool(get("THIS_IP") or get("PEER_IP"))
+    if old_names and (get("LEADER_IP") or get("FOLLOWER_IP")):
+        problems.append("Use FURNACE_LEADER_IP and FURNACE_FOLLOWER_IP, or the old FURNACE_THIS_IP and "
+                        "FURNACE_PEER_IP, not both.")
+        this_ip = peer_ip = ""
+        this_name = "FURNACE_THIS_IP"
+    elif old_names:
+        if not role and not get("ROLE"):
+            problems.append("FURNACE_ROLE is not set. Use 'leader' on one host and 'follower' on the other.")
+        this_ip, peer_ip = address("THIS_IP"), address("PEER_IP")
+        this_name = "FURNACE_THIS_IP"
+        if this_ip and this_ip == peer_ip:
+            problems.append("FURNACE_PEER_IP must be the other host, not this host.")
+        notes.append("FURNACE_THIS_IP and FURNACE_PEER_IP are the old names. Better: FURNACE_LEADER_IP and "
+                     "FURNACE_FOLLOWER_IP, the same on both hosts (see .env.example).")
+    else:
+        leader_ip, follower_ip = address("LEADER_IP"), address("FOLLOWER_IP")
+        if leader_ip and leader_ip == follower_ip:
+            problems.append("FURNACE_LEADER_IP and FURNACE_FOLLOWER_IP must be the two different hosts.")
+        mine = [r for r, ip in (("leader", leader_ip), ("follower", follower_ip)) if ip and on_host(ip)]
+        if leader_ip and follower_ip and leader_ip != follower_ip and not role:
+            if len(mine) == 1:
+                role = mine[0]
+            elif mine:
+                problems.append("This host has both FURNACE_LEADER_IP and FURNACE_FOLLOWER_IP. "
+                                "Add FURNACE_ROLE=leader or FURNACE_ROLE=follower.")
+            else:
+                problems.append(f"This host has neither {leader_ip} (FURNACE_LEADER_IP) nor {follower_ip} "
+                                "(FURNACE_FOLLOWER_IP). Check the IPs with 'ip -br addr' on both hosts. "
+                                "The container needs network_mode: host.")
+        elif role and mine and role not in mine:
+            problems.append(f"FURNACE_ROLE is {role}, but this host has the {mine[0]}'s IP "
+                            f"({leader_ip if mine[0] == 'leader' else follower_ip}).")
+        this_ip, peer_ip = (leader_ip, follower_ip) if role == "leader" else (follower_ip, leader_ip)
+        if not role:
+            this_ip = peer_ip = ""
+        this_name = f"FURNACE_{role.upper()}_IP" if role else "FURNACE_LEADER_IP"
+    shared_ip = address("SHARED_IP")
+    keepalived = get("KEEPALIVED") or "builtin"
+    if keepalived not in ("builtin", "external"):
+        problems.append(f"FURNACE_KEEPALIVED must be 'builtin' (the default) or 'external', not '{keepalived}'.")
+    join_code = get("JOIN_CODE")
+    if join_code:
+        from .join import JoinError, parse_code
+        try:
+            code_ip = parse_code(join_code)[2]
+            if role == "follower" and peer_ip and code_ip != peer_ip:
+                problems.append(f"FURNACE_JOIN_CODE was made by {code_ip}, but the leader is {peer_ip}. "
+                                "Make the code on the leader: docker exec furnace furnace join-code")
+        except JoinError as exc:
+            problems.append(f"FURNACE_JOIN_CODE: {exc}")
+    if shared_ip and shared_ip in (this_ip, peer_ip, get("LEADER_IP"), get("FOLLOWER_IP")):
         problems.append("FURNACE_SHARED_IP must be a third address, not the IP of one of the hosts.")
 
     s = ContainerSettings(
-        role=role, this_ip=ips["THIS_IP"], peer_ip=ips["PEER_IP"], shared_ip=ips["SHARED_IP"],
+        role=role, this_ip=this_ip, peer_ip=peer_ip, shared_ip=shared_ip, notes=notes, join_code=join_code,
+        keepalived=keepalived,
         shared_ip_prefix=_number("SHARED_IP_PREFIX", get("SHARED_IP_PREFIX"), 24, 8, 32, problems),
         interface=get("INTERFACE"),
         api_allow_from=_ip_list("API_ALLOW_FROM", get("API_ALLOW_FROM"), problems),
@@ -157,7 +222,6 @@ def load_settings(env: dict[str, str] | None = None,
         problems=problems,
     )
 
-    cards = addresses() if cards is None else cards
     if s.interface:
         if re.fullmatch(r"[0-9.]+(/[0-9]+)?", s.interface) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", s.interface):
             problems.append(f"FURNACE_INTERFACE '{s.interface}' is not a network card name (see: ip -br addr).")
@@ -167,9 +231,9 @@ def load_settings(env: dict[str, str] | None = None,
     elif _ipv4(s.this_ip):
         s.interface = next((card for card, found in cards.items() if any(ip == s.this_ip for ip, _ in found)), "")
     if _ipv4(s.this_ip) and s.interface in cards and not any(ip == s.this_ip for ip, _ in cards[s.interface]):
-        problems.append(f"FURNACE_THIS_IP {s.this_ip} is not set on the network card {s.interface}.")
+        problems.append(f"{this_name} {s.this_ip} is not set on the network card {s.interface}.")
     elif _ipv4(s.this_ip) and not s.interface:
-        problems.append(f"FURNACE_THIS_IP {s.this_ip} is not on any network card of this host. "
+        problems.append(f"{this_name} {s.this_ip} is not on any network card of this host. "
                         "The container needs network_mode: host.")
     if problems:
         raise SettingsError("\n".join(f"  - {p}" for p in problems))
@@ -267,15 +331,37 @@ def prepare_secrets(s: ContainerSettings, etc: Path = ETC, group: str | None = U
             _write_secret(etc / "secrets" / "replica-secret", secrets.token_urlsafe(32), 0o640, group)
             notes.append("Replication secret made.")
         write_bundle(etc)
-        notes.append(f"Follower bundle: {bundle} (secret: copy it into the follower's /etc/furnace volume).")
+        notes.append(f"Follower bundle: {bundle} (secret: copy it into the follower's /etc/furnace volume). "
+                     "Easier: docker exec furnace furnace join-code, and give the follower the code.")
+        if s.join_code:
+            notes.append("FURNACE_JOIN_CODE is only for the follower. The leader ignores it.")
     elif not have_secrets(etc):
-        if not bundle.is_file():
+        if bundle.is_file():
+            open_bundle(bundle, etc)
+            bundle.unlink()
+            notes.append("Certificate and secrets taken from the leader's bundle (bundle file deleted).")
+        elif s.join_code:
+            from .join import JoinError, fetch
+            try:
+                data = fetch(s.join_code, s.peer_ip)
+            except JoinError as exc:
+                raise SettingsError(f"  - The join code did not work: {exc}") from None
+            etc.mkdir(parents=True, exist_ok=True)
+            old = os.umask(0o077)
+            try:
+                bundle.write_bytes(data)
+            finally:
+                os.umask(old)
+            open_bundle(bundle, etc)
+            bundle.unlink()
+            notes.append(f"Certificate and secrets fetched from the leader {s.peer_ip} with the join code. "
+                         "You can remove FURNACE_JOIN_CODE from .env now (it is used up).")
+        else:
             raise SettingsError(
-                f"  - This follower has no secrets yet. Copy {BUNDLE_NAME} from the leader's /etc/furnace "
-                f"volume into this host's /etc/furnace volume, then start the container again.")
-        open_bundle(bundle, etc)
-        bundle.unlink()
-        notes.append("Certificate and secrets taken from the leader's bundle (bundle file deleted).")
+                "  - This follower has no secrets yet. Either: make a join code on the leader "
+                "(docker exec furnace furnace join-code), put it in .env as FURNACE_JOIN_CODE=... and start "
+                f"again. Or: copy {BUNDLE_NAME} from the leader's /etc/furnace volume into this host's "
+                "/etc/furnace volume, then start the container again.")
     # The furnace user (replication) reads the certificate and the replication secret, never the key.
     os.chmod(etc / "tls", 0o750)
     os.chmod(etc / "tls" / "furnace.key", 0o600)
@@ -333,6 +419,14 @@ def template_values(s: ContainerSettings, etc: Path = ETC) -> dict[str, str]:
                     "        proxy_pass http://127.0.0.1:8081/replica/snapshot;\n"
                     "        proxy_set_header X-Forwarded-For $remote_addr;\n"
                     "        proxy_read_timeout 120s;\n"
+                    "    }\n"
+                    "    # Join code: only the follower may fetch the (encrypted) secrets, once (furnace join-code).\n"
+                    "    location = /join {\n"
+                    f"        allow {s.peer_ip};\n"
+                    "        deny all;\n"
+                    "        client_max_body_size 4k;\n"
+                    "        proxy_pass http://127.0.0.1:8081/join;\n"
+                    "        proxy_set_header X-Forwarded-For $remote_addr;\n"
                     "    }\n"),
     }
 
@@ -340,11 +434,12 @@ def template_values(s: ContainerSettings, etc: Path = ETC) -> dict[str, str]:
 def write_configs(s: ContainerSettings, etc: Path = ETC, lib: Path = LIB) -> None:
     values = template_values(s, etc)
     NGINX_CONF.write_text(render(lib / "templates" / "nginx-furnace.conf.tmpl", values), encoding="utf-8")
-    old = os.umask(0o077)
-    try:
-        KEEPALIVED_CONF.write_text(render(lib / "templates" / "keepalived.conf.tmpl", values), encoding="utf-8")
-    finally:
-        os.umask(old)
+    if s.keepalived == "builtin":
+        old = os.umask(0o077)
+        try:
+            KEEPALIVED_CONF.write_text(render(lib / "templates" / "keepalived.conf.tmpl", values), encoding="utf-8")
+        finally:
+            os.umask(old)
     (etc / "install.env").write_text(
         "# Non-secret settings for the Furnace helper scripts. Written at every container start.\n"
         f"ROLE={s.role}\nTHIS_IP={s.this_ip}\nPEER_IP={s.peer_ip}\nSHARED_IP={s.shared_ip}\n"
@@ -386,9 +481,10 @@ class Supervisor:
                             "--forwarded-allow-ips", "127.0.0.1",  # nginx logs the requests
                             "--timeout", "120", "--graceful-timeout", "5", "furnace.wsgi:app"], as_user=True),
             Process("nginx", ["nginx", "-g", "daemon off;"]),
-            Process("keepalived", ["keepalived", "--dont-fork", "--log-console", "--log-detail",
-                                   "--use-file", str(KEEPALIVED_CONF)]),
         ]
+        if s.keepalived == "builtin":
+            self.processes.append(Process("keepalived", ["keepalived", "--dont-fork", "--log-console", "--log-detail",
+                                                         "--use-file", str(KEEPALIVED_CONF)]))
         self.job: tuple[str, subprocess.Popen] | None = None
         self.next_replica = time.monotonic() + 10
         self.replica_state = ""
@@ -453,7 +549,7 @@ class Supervisor:
     def role(self) -> str:
         try:
             return (STATE / "role").read_text(encoding="utf-8").strip()
-        except OSError:
+        except OSError:  # external keepalived that has not written the role yet
             return "follower"
 
     def due_daily(self, name: str, hour: int, minute: int) -> bool:
@@ -485,6 +581,8 @@ class Supervisor:
         rows = {p.name: ("running" if p.proc and p.proc.poll() is None else "stopped", p.restarts)
                 for p in self.processes}
         status = {"processes": rows, "replication": self.replica_state, "role": self.role(),
+                  "keepalived": self.s.keepalived,
+                  "host_role_missing": self.s.keepalived == "external" and not (STATE / "role").exists(),
                   "updated": datetime.now().isoformat(timespec="seconds")}
         tmp = STATE / ".status.tmp"
         tmp.write_text(json.dumps(status), encoding="utf-8")
@@ -494,11 +592,14 @@ class Supervisor:
         self.stopping = True
 
     def shutdown(self) -> None:
-        log("Stopping (keepalived first, so the other server takes the shared IP).")
+        if self.s.keepalived == "builtin":
+            log("Stopping (keepalived first, so the other server takes the shared IP).")
+        else:
+            log("Stopping. The host's keepalived moves the shared IP when its health check fails.")
         order = {"keepalived": signal.SIGTERM, "nginx": signal.SIGQUIT, "api": signal.SIGTERM}
         for name in ("keepalived", "nginx", "api"):
-            p = next(x for x in self.processes if x.name == name)
-            if p.proc and p.proc.poll() is None:
+            p = next((x for x in self.processes if x.name == name), None)
+            if p and p.proc and p.proc.poll() is None:
                 p.proc.send_signal(order[name])
                 try:
                     p.proc.wait(timeout=8)
@@ -521,12 +622,20 @@ class Supervisor:
     def run(self) -> int:
         signal.signal(signal.SIGTERM, self.stop)
         signal.signal(signal.SIGINT, self.stop)
-        api, nginx, keepalived = self.processes
+        api, nginx, *keepalived = self.processes
         self.spawn(api)
         self.wait_api()
         self.spawn(nginx)
-        self.spawn(keepalived)
-        log(f"Ready. This host is the {self.s.role} by setting; keepalived decides who owns {self.s.shared_ip}.")
+        for p in keepalived:
+            self.spawn(p)
+        if keepalived:
+            log(f"Ready. This host is the {self.s.role} by setting; keepalived decides who owns {self.s.shared_ip}.")
+        else:
+            log(f"Ready. This host is the {self.s.role} by setting; the HOST's keepalived decides who owns "
+                f"{self.s.shared_ip} (FURNACE_KEEPALIVED=external).")
+            if not (STATE / "role").exists():
+                log("No role from the host's keepalived yet: this host works as the follower until it writes "
+                    f"{HOST_STATE_ON_HOST}/role. Set it up with: docker exec furnace furnace host-keepalived")
         while not self.stopping:
             for p in self.processes:
                 if p.proc is not None and p.proc.poll() is not None and not self.stopping:
@@ -544,12 +653,8 @@ class Supervisor:
 # --------------------------------------------------------------------------- start
 
 
-def prepare_folders() -> None:
-    STATE.mkdir(parents=True, exist_ok=True)
-    os.chmod(STATE, 0o755)
-    role = STATE / "role"
-    role.write_text("follower\n", encoding="utf-8")  # keepalived writes leader when it takes the shared IP
-    os.chmod(role, 0o644)
+def prepare_folders(keepalived: str = "builtin") -> None:
+    prepare_role(keepalived)
     ETC.mkdir(parents=True, exist_ok=True)
     os.chmod(ETC, 0o750)
     shutil.chown(ETC, group=USER)
@@ -563,6 +668,26 @@ def prepare_folders() -> None:
     shutil.chown(Path(os.environ.get("FURNACE_EDL_DIR", "/var/lib/furnace-edl")), USER, USER)
     shutil.chown(auth, USER, WEB_GROUP)
     os.chmod(auth, 0o2750)  # nginx reads the list users file
+
+
+def prepare_role(keepalived: str = "builtin") -> None:
+    """The role file: written by the keepalived in this container, or a link to the host's (external)."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    os.chmod(STATE, 0o755)
+    role = STATE / "role"
+    if role.is_symlink() or role.exists():
+        role.unlink()
+    if keepalived == "external":
+        # The host's keepalived writes the role (its notify script) into /run/furnace on the host,
+        # which docker-compose.yml mounts here as /run/furnace-host.
+        if not HOST_STATE.is_dir():
+            raise SettingsError(f"  - FURNACE_KEEPALIVED=external needs the host folder {HOST_STATE_ON_HOST} in the "
+                                f"container as {HOST_STATE}. docker-compose.yml has it as a volume: "
+                                f"- {HOST_STATE_ON_HOST}:{HOST_STATE}")
+        role.symlink_to(HOST_STATE / "role")
+    else:
+        role.write_text("follower\n", encoding="utf-8")  # keepalived writes leader when it takes the shared IP
+        os.chmod(role, 0o644)
 
 
 REFUSE_TEXT = """\
@@ -590,7 +715,10 @@ def start() -> int:
     log("Starting Furnace " + _version() + " (Docker).")
     try:
         s = load_settings()
-        prepare_folders()
+        log(f"This host is the {s.role} ({s.this_ip}); the other host is {s.peer_ip}.")
+        for note in s.notes:
+            log(note)
+        prepare_folders(s.keepalived)
         for note in prepare_secrets(s):
             log(note)
         note = write_refuse_file()
@@ -616,6 +744,149 @@ def start() -> int:
         return 2
 
 
+def join_code(etc: Path = ETC, data: Path = DATA, owner: str | None = USER) -> int:
+    """Leader: make a one-time code the follower uses to fetch the secrets (FURNACE_JOIN_CODE)."""
+    from .join import LIFETIME, cert_der, make
+    try:
+        s = load_settings()
+    except SettingsError as exc:
+        print(f"Settings are not right:\n{exc}")
+        return 2
+    if s.role != "leader":
+        print("Make the join code on the leader (the host that has FURNACE_LEADER_IP).")
+        return 2
+    if not have_secrets(etc):
+        print("The leader has no secrets yet. Start it first (docker compose up -d), then make the code.")
+        return 2
+    bundle = write_bundle(etc).read_bytes()
+    code = make(bundle, cert_der(etc / "tls" / "furnace.crt"), s.this_ip, data / "join", owner)
+    print(f"""Join code for the follower (works once, for {LIFETIME // 60} minutes, only from {s.peer_ip}):
+
+    {code}
+
+On the follower host, add this line to .env, then start the follower:
+    FURNACE_JOIN_CODE={code}
+The follower fetches the certificate and the secrets from this leader over HTTPS. A new code replaces this one.""")
+    return 0
+
+
+HOST_NOTIFY = """#!/bin/sh
+# Furnace (Docker, FURNACE_KEEPALIVED=external): the host's keepalived calls this when its state changes.
+# It writes the role file that the Furnace container reads (/run/furnace on the host).
+# Arguments: TYPE NAME STATE (STATE is MASTER, BACKUP, FAULT or STOP).
+set -eu
+case "${3:-}" in
+    MASTER) role=leader ;;
+    BACKUP|FAULT|STOP) role=follower ;;
+    *) exit 0 ;;
+esac
+mkdir -p /run/furnace
+printf '%s\\n' "$role" > /run/furnace/role.tmp
+chmod 0644 /run/furnace/role.tmp
+mv -f /run/furnace/role.tmp /run/furnace/role
+"""
+
+HOST_HEALTH = """#!/bin/sh
+# Furnace health check for the host's keepalived: the container's nginx and API answer /health.
+# -k: it asks this same host over 127.0.0.1, so it does not check the certificate (the expiry is
+# reported by Furnace itself; both hosts must never give up the shared IP at the same moment).
+exec curl -fsSk --max-time 3 -o /dev/null https://127.0.0.1/health
+"""
+
+HOST_SCRIPTS = "/usr/local/sbin"
+
+
+def host_keepalived_config(s: ContainerSettings, etc: Path = ETC) -> str:
+    """The Furnace block for the host's keepalived.conf: its own vrrp_instance next to the host's others."""
+    password = (etc / "secrets" / "keepalived-password").read_text(encoding="utf-8").strip()
+    return f"""# Furnace: its own shared IP {s.shared_ip}. Paste this into /etc/keepalived/keepalived.conf on this host.
+# Both hosts start as BACKUP with nopreempt: a host that comes back does not take the shared IP back.
+vrrp_script chk_furnace {{
+    script "{HOST_SCRIPTS}/furnace-health-check"
+    interval 5
+    timeout 4
+    fall 3
+    rise 2
+}}
+
+vrrp_instance FURNACE {{
+    state BACKUP
+    nopreempt
+    interface {s.interface}
+    virtual_router_id {s.vrrp_router_id}
+    priority {s.priority}
+    advert_int 1
+
+    unicast_src_ip {s.this_ip}
+    unicast_peer {{
+        {s.peer_ip}
+    }}
+
+    authentication {{
+        auth_type PASS
+        auth_pass {password}
+    }}
+
+    virtual_ipaddress {{
+        {s.shared_ip}/{s.shared_ip_prefix} dev {s.interface}
+    }}
+
+    track_script {{
+        chk_furnace
+    }}
+
+    notify {HOST_SCRIPTS}/furnace-notify
+}}
+"""
+
+
+def host_keepalived(part: str = "") -> int:
+    """Print what the host's own keepalived needs (FURNACE_KEEPALIVED=external). Furnace never edits the host."""
+    try:
+        s = load_settings()
+    except SettingsError as exc:
+        print(f"Settings are not right:\n{exc}")
+        return 2
+    if part in ("notify", "health-check"):
+        print(HOST_NOTIFY if part == "notify" else HOST_HEALTH, end="")
+        return 0
+    if not have_secrets(ETC):
+        print("This host has no secrets yet (the keepalived password). Start the container first.")
+        return 2
+    if part == "config":
+        print(host_keepalived_config(s), end="")
+        return 0
+    if part:
+        print("usage: furnace host-keepalived [notify|health-check|config]")
+        return 2
+    mode = "" if s.keepalived == "external" else (
+        "NOTE: this container still runs its own keepalived (FURNACE_KEEPALIVED is not 'external').\n"
+        "Set FURNACE_KEEPALIVED=external in .env first, then docker compose up -d.\n\n")
+    print(f"""{mode}The host's own keepalived for Furnace (this host is the {s.role}, {s.this_ip}). Do this on BOTH hosts.
+Furnace never changes the host: run these commands yourself.
+
+1. The two small scripts (the role file and the health check):
+
+    docker exec furnace furnace host-keepalived notify | sudo tee {HOST_SCRIPTS}/furnace-notify >/dev/null
+    docker exec furnace furnace host-keepalived health-check | sudo tee {HOST_SCRIPTS}/furnace-health-check >/dev/null
+    sudo chmod 755 {HOST_SCRIPTS}/furnace-notify {HOST_SCRIPTS}/furnace-health-check
+
+   With SELinux on (RHEL family), let keepalived run them:
+    sudo semanage fcontext -a -t keepalived_unconfined_script_exec_t '{HOST_SCRIPTS}/furnace-(notify|health-check)'
+    sudo restorecon -v {HOST_SCRIPTS}/furnace-notify {HOST_SCRIPTS}/furnace-health-check
+
+2. Add this block to /etc/keepalived/keepalived.conf (next to your other vrrp_instance blocks; the
+   virtual_router_id {s.vrrp_router_id} must not be used by them). Your global_defs should have
+   "script_user root" and "enable_script_security".
+   Show only the block:  docker exec furnace furnace host-keepalived config
+
+{host_keepalived_config(s)}
+3. Restart keepalived:  sudo systemctl restart keepalived
+   Then: docker exec furnace furnace status   (the role comes from the host's keepalived)
+""")
+    return 0
+
+
 def _version() -> str:
     from . import __version__
     return __version__
@@ -631,9 +902,15 @@ def main(argv: list[str]) -> int:
         except SettingsError as exc:
             print(f"Settings are not right:\n{exc}")
             return 2
-        print(f"Settings are fine: {s.role} {s.this_ip} on {s.interface}, other host {s.peer_ip}, "
-              f"shared IP {s.shared_ip}/{s.shared_ip_prefix}.")
+        print(f"Settings are fine: this host is the {s.role} ({s.this_ip} on {s.interface}), "
+              f"the other host is {s.peer_ip}, shared IP {s.shared_ip}/{s.shared_ip_prefix}.")
+        for note in s.notes:
+            print(f"Note: {note}")
         return 0
+    if command == "join-code":
+        return join_code()
+    if command == "host-keepalived":
+        return host_keepalived(argv[2] if len(argv) > 2 else "")
     if command == "replicate":
         try:
             print(replicate(load_settings().peer_ip))

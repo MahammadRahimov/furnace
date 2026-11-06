@@ -81,7 +81,7 @@ def test_leader_makes_secrets_and_the_follower_takes_them(tmp_path):
     assert before == {n: (leader_etc / n).read_bytes() for n in container.BUNDLE_FILES}
 
     follower = load_settings(FOLLOWER, FOLLOWER_CARDS)
-    with pytest.raises(SettingsError, match="Copy furnace-peer-bundle.tar.gz"):
+    with pytest.raises(SettingsError, match="copy furnace-peer-bundle.tar.gz"):
         container.prepare_secrets(follower, follower_etc, group=None)
     follower_etc.mkdir()
     shutil.copy(leader_etc / container.BUNDLE_NAME, follower_etc)
@@ -178,3 +178,138 @@ def test_replication_log_only_changes_and_a_reminder_while_down():
     assert note(True, "sent (3 IPs)", 680) == "replication works again after 31 failed tries: sent (3 IPs)"
     assert note(True, "sent (3 IPs)", 700) == ""
     assert sup.replica_state == "ok sent (3 IPs)"
+
+
+# --------------------------------------------------------------------------- the IP names of 0.10.0
+
+BOTH = {"FURNACE_LEADER_IP": "192.0.2.11", "FURNACE_FOLLOWER_IP": "192.0.2.12", "FURNACE_SHARED_IP": "192.0.2.10"}
+
+
+def test_the_same_settings_on_both_hosts_find_the_role():
+    s = load_settings(BOTH, CARDS)
+    assert (s.role, s.this_ip, s.peer_ip, s.interface, s.priority) == ("leader", "192.0.2.11", "192.0.2.12", "eth0", 150)
+    assert s.notes == []
+    f = load_settings(BOTH, FOLLOWER_CARDS)
+    assert (f.role, f.this_ip, f.peer_ip, f.priority) == ("follower", "192.0.2.12", "192.0.2.11", 100)
+
+
+def test_new_names_problems():
+    assert "has neither 192.0.2.11 (FURNACE_LEADER_IP) nor 192.0.2.12" in problems(BOTH, {"eth0": [("198.51.100.5", 24)]})
+    both_here = {"eth0": [("192.0.2.11", 24), ("192.0.2.12", 24)]}
+    assert "Add FURNACE_ROLE=leader or FURNACE_ROLE=follower" in problems(BOTH, both_here)
+    assert load_settings({**BOTH, "FURNACE_ROLE": "follower"}, both_here).this_ip == "192.0.2.12"
+    assert "FURNACE_ROLE is follower, but this host has the leader's IP (192.0.2.11)" in problems(
+        {**BOTH, "FURNACE_ROLE": "follower"})
+    assert "must be the two different hosts" in problems({**BOTH, "FURNACE_FOLLOWER_IP": "192.0.2.11"})
+    assert "SHARED_IP must be a third address" in problems({**BOTH, "FURNACE_SHARED_IP": "192.0.2.12"})
+    assert "FURNACE_FOLLOWER_IP '192.0.2.300'" in problems({**BOTH, "FURNACE_FOLLOWER_IP": "192.0.2.300"})
+    text = problems({})
+    for part in ("FURNACE_LEADER_IP is not set", "FURNACE_FOLLOWER_IP is not set", "FURNACE_SHARED_IP is not set"):
+        assert part in text
+    assert "not both" in problems({**BOTH, "FURNACE_THIS_IP": "192.0.2.11"})
+    assert "FURNACE_LEADER_IP 192.0.2.11 is not set on the network card eth1" in problems(
+        {**BOTH, "FURNACE_ROLE": "leader", "FURNACE_INTERFACE": "eth1"})
+
+
+def test_the_old_names_still_work_with_a_note():
+    s = load_settings(LEADER, CARDS)
+    assert (s.role, s.this_ip, s.peer_ip) == ("leader", "192.0.2.11", "192.0.2.12")
+    assert any("old names" in n for n in s.notes)
+
+
+# --------------------------------------------------------------------------- the join code (Docker)
+
+
+def test_a_bad_join_code_is_reported():
+    assert "FURNACE_JOIN_CODE: This is not a Furnace join code" in problems({**BOTH, "FURNACE_JOIN_CODE": "hello"},
+                                                                            FOLLOWER_CARDS)
+    from furnace.join import format_code
+    other = format_code(b"\x01" * 8, b"\x02" * 8, "192.0.2.99")
+    assert "was made by 192.0.2.99, but the leader is 192.0.2.11" in problems(
+        {**BOTH, "FURNACE_JOIN_CODE": other}, FOLLOWER_CARDS)
+
+
+@needs_openssl
+def test_the_follower_fetches_the_secrets_with_a_join_code(tmp_path, monkeypatch):
+    from furnace import join
+    leader_etc, follower_etc = tmp_path / "leader", tmp_path / "follower"
+    container.prepare_secrets(load_settings(BOTH, CARDS), leader_etc, group=None)
+    bundle = (leader_etc / container.BUNDLE_NAME).read_bytes()
+    code = join.make(bundle, join.cert_der(leader_etc / "tls/furnace.crt"), "192.0.2.11", tmp_path / "join")
+    asked = []
+
+    def fake_fetch(given, leader_ip):  # the network part is tested in test_join.py
+        asked.append((given, leader_ip))
+        return bundle
+    monkeypatch.setattr(join, "fetch", fake_fetch)
+    s = load_settings({**BOTH, "FURNACE_JOIN_CODE": code}, FOLLOWER_CARDS)
+    notes = container.prepare_secrets(s, follower_etc, group=None)
+    assert asked == [(code, "192.0.2.11")]
+    assert any("fetched from the leader 192.0.2.11 with the join code" in n for n in notes)
+    for name in container.BUNDLE_FILES:
+        assert (follower_etc / name).read_bytes() == (leader_etc / name).read_bytes()
+    assert not (follower_etc / container.BUNDLE_NAME).exists()
+
+    def failing(given, leader_ip):
+        raise join.JoinError("The leader said: The join code is wrong.")
+    monkeypatch.setattr(join, "fetch", failing)
+    with pytest.raises(SettingsError, match="The join code did not work: The leader said"):
+        container.prepare_secrets(s, tmp_path / "other", group=None)
+
+
+def test_a_follower_without_anything_says_both_ways():
+    with pytest.raises(SettingsError) as info:
+        container.prepare_secrets(load_settings(BOTH, FOLLOWER_CARDS), Path("/nonexistent-furnace-test"), group=None)
+    assert "furnace join-code" in str(info.value) and "furnace-peer-bundle.tar.gz" in str(info.value)
+
+
+# --------------------------------------------------------------------------- external keepalived (the host's own)
+
+
+def test_the_keepalived_setting():
+    assert load_settings(BOTH, CARDS).keepalived == "builtin"
+    assert load_settings({**BOTH, "FURNACE_KEEPALIVED": "external"}, CARDS).keepalived == "external"
+    assert "FURNACE_KEEPALIVED must be 'builtin' (the default) or 'external', not 'host'" in problems(
+        {**BOTH, "FURNACE_KEEPALIVED": "host"})
+
+
+def test_external_mode_runs_no_keepalived_in_the_container():
+    builtin = container.Supervisor(load_settings(BOTH, CARDS))
+    external = container.Supervisor(load_settings({**BOTH, "FURNACE_KEEPALIVED": "external"}, CARDS))
+    assert [p.name for p in builtin.processes] == ["api", "nginx", "keepalived"]
+    assert [p.name for p in external.processes] == ["api", "nginx"]
+
+
+def test_external_mode_reads_the_role_from_the_host(tmp_path, monkeypatch):
+    state, host = tmp_path / "state", tmp_path / "host"
+    monkeypatch.setattr(container, "STATE", state)
+    monkeypatch.setattr(container, "HOST_STATE", host)
+    with pytest.raises(SettingsError, match="needs the host folder /run/furnace"):
+        container.prepare_role("external")
+    host.mkdir()
+    container.prepare_role("external")
+    sup = container.Supervisor(load_settings({**BOTH, "FURNACE_KEEPALIVED": "external"}, CARDS))
+    assert sup.role() == "follower"  # nothing from the host yet
+    (host / "role").write_text("leader\n")
+    assert sup.role() == "leader"
+    (host / "role").write_text("follower\n")
+    assert sup.role() == "follower"
+    # Back to the built-in keepalived: a plain role file again.
+    container.prepare_role("builtin")
+    assert not (state / "role").is_symlink() and (state / "role").read_text() == "follower\n"
+
+
+def test_the_block_for_the_host_keepalived(tmp_path):
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "keepalived-password").write_text("Ab3dE6gH\n")
+    s = load_settings({**BOTH, "FURNACE_KEEPALIVED": "external", "FURNACE_VRRP_ROUTER_ID": "77"}, FOLLOWER_CARDS)
+    text = container.host_keepalived_config(s, tmp_path)
+    for part in ("vrrp_instance FURNACE {", "interface eth0", "virtual_router_id 77", "priority 100",
+                 "unicast_src_ip 192.0.2.12", "        192.0.2.11", "auth_pass Ab3dE6gH",
+                 "192.0.2.10/24 dev eth0", "notify /usr/local/sbin/furnace-notify",
+                 'script "/usr/local/sbin/furnace-health-check"', "nopreempt"):
+        assert part in text
+    assert "global_defs" not in text  # only Furnace's own block, the host keeps its global part
+    assert "MASTER) role=leader" in container.HOST_NOTIFY and "/run/furnace/role" in container.HOST_NOTIFY
+    assert "printf '%s\\n'" in container.HOST_NOTIFY  # the script writes a newline, not a broken line
+    assert "https://127.0.0.1/health" in container.HOST_HEALTH

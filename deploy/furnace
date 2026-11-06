@@ -30,6 +30,7 @@ Setup and health:
   setup --check          Show what setup would do. Change nothing.
   status                 Show the role, the services and the list counts.
   failover-test [--web]  Check that the other server takes over (run it on the leader).
+  join-code              Leader: make a one-time code for the follower's setup (1 hour, used once).
   version                Show the version.
 
 Data (details: sudo furnace COMMAND --help):
@@ -141,8 +142,36 @@ status() {
     fi
 }
 
+# The leader makes a one-time code. The follower's setup uses it to fetch the certificate and the
+# secrets over HTTPS (instead of a copied bundle file). See furnace/join.py.
+join_code() {
+    need_root join-code
+    need_setup
+    local ROLE="" THIS_IP="" PEER_IP="" USE_HTTPS="" code
+    # shellcheck source=/dev/null
+    . "$ETC/install.env"
+    [ "$ROLE" = leader ] || { echo "Make the join code on the leader." >&2; exit 1; }
+    if [ "$USE_HTTPS" != yes ]; then
+        echo "The join code needs HTTPS (USE_HTTPS=yes). Copy /root/furnace-peer-bundle.tar.gz to the follower instead." >&2
+        exit 1
+    fi
+    code="$(tar -czf - -C "$ETC" tls/furnace.crt tls/furnace.key ssh/replica_key ssh/replica_key.pub setup.conf |
+        py -m furnace.join make --bundle - --cert "$ETC/tls/furnace.crt" --leader-ip "$THIS_IP" \
+            --dir /var/lib/furnace/join --owner furnace)"
+    cat <<EOF
+Join code for the follower (works once, for 60 minutes, only from $PEER_IP):
+
+    $code
+
+On the follower, run:  sudo furnace setup
+and answer "follower". Setup asks for this code. (In a settings file: JOIN_CODE=$code)
+The follower fetches the certificate and the secrets from this leader over HTTPS. A new code replaces this one.
+EOF
+}
+
 case "${1:-help}" in
     help|-h|--help) usage ;;
+    join-code) join_code ;;
     version|--version) version ;;
     setup) shift; need_root setup; exec "$LIB/setup.sh" "$@" ;;
     status) status ;;
