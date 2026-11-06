@@ -112,8 +112,17 @@ fi
 # FW_ACTIVE: ufw, firewalld, both or none. HOST_FW_TOOL: the tool setup offers (ufw, firewalld or none).
 ufw_installed() { command -v ufw >/dev/null 2>&1; }
 firewalld_installed() { command -v firewall-cmd >/dev/null 2>&1; }
-ufw_active() { ufw_installed && grep -q '^Status: active' <<< "$(ufw status 2>/dev/null || true)"; }
-firewalld_active() { firewalld_installed && systemctl is-active --quiet firewalld; }
+# Active = running now OR switched on for the next boot. Starting firewalld wipes ufw's rules from the kernel,
+# so "ufw status" says inactive although ufw is still on (ENABLED=yes) and loads again at the next boot.
+ufw_active() {
+    ufw_installed || return 1
+    grep -q '^Status: active' <<< "$(ufw status 2>/dev/null || true)" && return 0
+    grep -qE '^ENABLED=["]?yes' /etc/ufw/ufw.conf 2>/dev/null
+}
+firewalld_active() {
+    firewalld_installed || return 1
+    systemctl is-active --quiet firewalld || systemctl is-enabled --quiet firewalld 2>/dev/null
+}
 if ufw_active && firewalld_active; then FW_ACTIVE=both
 elif firewalld_active; then FW_ACTIVE=firewalld
 elif ufw_active; then FW_ACTIVE=ufw

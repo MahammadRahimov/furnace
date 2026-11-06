@@ -225,7 +225,8 @@ For a follower, `ROLE=follower` is enough. Add `--bundle FILE` if the bundle is 
   They are in the database, so the follower gets them with the replication.
 - Writes the nginx and keepalived files from the templates in `/usr/lib/furnace/templates`.
 - Opens only the needed ports on the host firewall: HTTPS, SSH, and VRRP (protocol 112) between the servers.
-  It uses the host firewall that is **active**, not the one that is only installed:
+  It uses the host firewall that is **active** (running now, or switched on for the next boot), not the one that
+  is only installed:
   - firewalld running: firewalld (also on Ubuntu, where ufw is installed too). ufw active: ufw.
   - Both active: setup stops and explains. Every packet must pass both, so opening ports in one is not enough.
     Turn one off (`sudo ufw disable` or `sudo systemctl disable --now firewalld`) and run setup again, or answer

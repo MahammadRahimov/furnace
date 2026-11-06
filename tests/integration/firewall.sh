@@ -74,9 +74,9 @@ EOF
 }
 ufw_on() { on "ufw --force enable >/dev/null"; }
 firewalld_on() { on "systemctl start firewalld && firewall-cmd --state >/dev/null"; }
-ufw_is_active() { on "ufw status | grep -q '^Status: active'"; }
-firewalld_is_active() { on "systemctl is-active --quiet firewalld"; }
-ufw_has_furnace() { on "ufw status | grep -q furnace"; }
+ufw_is_active() { on "ufw status | grep -q '^Status: active' || grep -q '^ENABLED=yes' /etc/ufw/ufw.conf"; }  # on now or at the next boot
+firewalld_is_active() { on "systemctl is-active --quiet firewalld || systemctl is-enabled --quiet firewalld"; }
+ufw_has_furnace() { on "grep -q furnace /etc/ufw/user.rules"; }  # the saved rules (ufw status shows none while firewalld wiped them)
 firewalld_has_furnace() { on "firewall-cmd --list-rich-rules | grep -q 'port=\"443\"' && firewall-cmd --list-rich-rules | grep -q vrrp"; }
 not_set_up() { on "! test -e /etc/furnace/setup.conf"; }
 saved_fw() { on "grep -qx 'HOST_FIREWALL=$1' /etc/furnace/setup.conf"; }
@@ -159,7 +159,7 @@ on "apt-get remove -y -qq furnace >/dev/null 2>&1"
 check "no Furnace rules in firewalld" on "! firewall-cmd --list-rich-rules | grep -qE 'vrrp|port=\"443\"'"
 check "firewalld is still running" firewalld_is_active
 
-step "2. Both ufw and firewalld active: setup stops and explains"
+step "2. Both ufw and firewalld on (ufw first: starting firewalld may wipe its rules, it is still on): setup stops"
 fresh_box
 ufw_on
 firewalld_on
