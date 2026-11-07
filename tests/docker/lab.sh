@@ -3,7 +3,7 @@
 # would (one host, leader + follower + client), then checks replication and a failover.
 # Only documentation addresses are used (203.0.113.0/24). Nothing real is touched.
 #
-#   tests/docker/lab.sh            build furnace:0.9.0 from this repository and run the lab test
+#   tests/docker/lab.sh            build furnace:0.10.0 from this repository and run the lab test
 #   KEEP=1 tests/docker/lab.sh     leave the lab running afterwards
 #
 # Needs: docker with the compose plugin.
@@ -12,7 +12,7 @@ export MSYS_NO_PATHCONV=1   # Git Bash on Windows: do not rewrite /paths
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROOT_D="$(cd "$ROOT" && (pwd -W 2>/dev/null || pwd))"   # the path docker sees (Windows path in Git Bash)
-IMAGE=furnace:0.9.0
+IMAGE=furnace:0.10.0
 LAB=(docker compose -f "$ROOT_D/docker/docker-compose.lab.yml")
 SHARED_IP=203.0.113.10
 WORK="$(mktemp -d)"
@@ -48,8 +48,8 @@ teardown() {
 }
 trap teardown EXIT
 
-step "Build the image furnace:0.9.0"
-docker build -q -f "$ROOT_D/docker/Dockerfile" --build-arg VERSION=0.9.0 -t "$IMAGE" "$ROOT_D" >/dev/null
+step "Build the image furnace:0.10.0"
+docker build -q -f "$ROOT_D/docker/Dockerfile" --build-arg VERSION=0.10.0 -t "$IMAGE" "$ROOT_D" >/dev/null
 check "the image was built" bash -c 'docker image inspect "$1" >/dev/null' _ "$IMAGE"
 "${LAB[@]}" down -v >/dev/null 2>&1 || true
 

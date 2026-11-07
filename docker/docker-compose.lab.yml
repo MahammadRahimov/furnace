@@ -18,7 +18,7 @@
 name: furnace-docker-lab       # the project name (volumes and network start with it)
 
 x-furnace: &furnace
-  image: furnace:0.9.0
+  image: furnace:0.10.0
   restart: unless-stopped
   cap_add: [NET_ADMIN, NET_RAW]   # only for keepalived (the shared IP and VRRP); not privileged
   stop_grace_period: 20s
@@ -55,7 +55,7 @@ services:
 
   # Plays the firewall and the API caller (it has curl). Uses the same image, runs nothing else.
   client:
-    image: furnace:0.9.0
+    image: furnace:0.10.0
     container_name: furnace-client
     entrypoint: ["sleep", "infinity"]
     init: true                    # stops at once on docker stop
