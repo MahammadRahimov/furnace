@@ -113,7 +113,7 @@ You need one file:
 - **Ubuntu and Debian:** `furnace_<version>_all.deb`, installed with `sudo apt install ./FILE`.
 - **Red Hat family, Fedora, Amazon Linux:** `furnace-<version>-1.noarch.rpm`, installed with `sudo dnf install ./FILE`.
 
-The examples below use version 0.9.0 and the `.deb`. With the `.rpm`, use `dnf` where they say `apt`.
+The examples below use version 0.10.0 and the `.deb`. With the `.rpm`, use `dnf` where they say `apt`.
 Everything else (setup, questions, the `furnace` command) is the same on every system.
 
 ### 3.1 Get the package
@@ -121,19 +121,19 @@ Everything else (setup, questions, the `furnace` command) is the same on every s
 - **Download it** from the GitHub releases page: <https://github.com/MahammadRahimov/furnace/releases>.
   The repository is private, so log in to GitHub first. Or, with the GitHub command line tool:
   ```bash
-  gh release download v0.9.0 -R MahammadRahimov/furnace -p '*.deb'    # or -p '*.rpm'
+  gh release download v0.10.0 -R MahammadRahimov/furnace -p '*.deb'    # or -p '*.rpm'
   ```
 - **Or build it yourself:** `packaging/build-deb.sh` on Ubuntu, Debian or WSL, or `packaging/build-rpm.sh` on a
   Red Hat family system (needs `rpm-build`). The file lands in `dist/`.
   The build needs `curl` and `python3`. The first build downloads the bundled libraries once (into
   `build/vendor-cache/`) and stops if one does not match its SHA-256 hash.
-- Copy it to both servers, for example: `scp furnace_0.9.0_all.deb you@SERVER_IP:~/`
+- Copy it to both servers, for example: `scp furnace_0.10.0_all.deb you@SERVER_IP:~/`
 
 ### 3.2 Leader
 
 1. Install the package:
    ```bash
-   sudo apt install ./furnace_0.9.0_all.deb
+   sudo apt install ./furnace_0.10.0_all.deb
    ```
    apt also installs what Furnace needs from the system: nginx, keepalived, Python and a few tools.
    Nothing starts yet.
@@ -200,7 +200,7 @@ The follower needs the leader's certificate and secrets. The easy way is a **joi
    only from the follower's IP. A new code replaces the old one.
 2. On the follower, install the package and run setup:
    ```bash
-   sudo apt install ./furnace_0.9.0_all.deb
+   sudo apt install ./furnace_0.10.0_all.deb
    sudo furnace setup
    ```
 3. Answer `follower`, then type the join code. The follower fetches the certificate and the secrets from the
@@ -323,15 +323,15 @@ The container uses the host network (`network_mode: host`) and gets only two ext
 
 ```bash
 mkdir ~/furnace && cd ~/furnace
-gh release download v0.9.0 -R MahammadRahimov/furnace -p 'furnace-image-*.tar.gz' -p docker-compose.yml -p env.example
+gh release download v0.10.0 -R MahammadRahimov/furnace -p 'furnace-image-*.tar.gz' -p docker-compose.yml -p env.example
 # without gh (only when the repository is public):
-#   R=https://github.com/MahammadRahimov/furnace/releases/download/v0.9.0
-#   curl -fLO $R/furnace-image-0.9.0.tar.gz -fLO $R/docker-compose.yml -fLO $R/env.example
-docker load -i furnace-image-0.9.0.tar.gz        # "Loaded image: furnace:0.9.0"
+#   R=https://github.com/MahammadRahimov/furnace/releases/download/v0.10.0
+#   curl -fLO $R/furnace-image-0.10.0.tar.gz -fLO $R/docker-compose.yml -fLO $R/env.example
+docker load -i furnace-image-0.10.0.tar.gz        # "Loaded image: furnace:0.10.0"
 mv env.example .env                              # GitHub drops the leading dot of .env.example
 ```
 
-Or take them from the repository: `docker build -f docker/Dockerfile --build-arg VERSION=0.9.0 -t furnace:0.9.0 .`,
+Or take them from the repository: `docker build -f docker/Dockerfile --build-arg VERSION=0.10.0 -t furnace:0.10.0 .`,
 then copy `docker/docker-compose.yml` and `docker/.env.example` (as `.env`) into the folder.
 
 **2. Leader (host A).** In the folder, write your settings:
@@ -495,7 +495,7 @@ failover and the API, in a few minutes. It also runs on Docker Desktop (Windows,
 `docker/docker-compose.lab.yml` has everything filled in: a leader (`203.0.113.11`), a follower (`.12`), the
 shared IP `203.0.113.10` and a small **client** box (`.50`) that plays the firewall and the caller. These addresses
 are a documentation range and exist only inside Docker. Nothing to change. Load the image first (step 1 of
-3.6: `furnace-image-0.9.0.tar.gz`; `docker-compose.lab.yml` is on the release too). From the folder with
+3.6: `furnace-image-0.10.0.tar.gz`; `docker-compose.lab.yml` is on the release too). From the folder with
 `docker-compose.lab.yml` (in the repository: `docker/`):
 
 ```bash
@@ -968,7 +968,7 @@ The new key also gives a new replication secret. Both servers get it from the sa
 IPs). Callers and list readers cannot reach it. It is for keepalived and the admins.
 
 ```json
-{"status": "ok", "version": "0.9.0", "role": "leader", "ips": 1234, "domains": 56}
+{"status": "ok", "version": "0.10.0", "role": "leader", "ips": 1234, "domains": 56}
 ```
 
 ---
@@ -1109,7 +1109,7 @@ Export on the server (`sudo furnace export ips -o ips.csv`) or through the API
 
 ```
 # furnace-export ips v1
-# Furnace 0.9.0, exported 2026-11-03T10:00:00Z. Upload it again with /api/v1/ips/bulk or furnace import-ips.
+# Furnace 0.10.0, exported 2026-11-03T10:00:00Z. Upload it again with /api/v1/ips/bulk or furnace import-ips.
 ip,added_at,added_by,reason,permanent,counted_from
 203.0.113.5,2026-10-01T10:00:00Z,soar,phishing,no,2026-10-01T10:00:00Z
 ```
@@ -1338,7 +1338,7 @@ Logs: `journalctl -u furnace-api`, `/var/log/nginx/furnace-access.log`.
 **Upgrade:** install the new package. Do the follower first, then the leader.
 
 ```bash
-sudo apt install ./furnace_0.9.0_all.deb
+sudo apt install ./furnace_0.10.0_all.deb
 ```
 
 The package runs `furnace setup --upgrade` by itself. It uses the saved answers and asks no questions.
@@ -1485,12 +1485,12 @@ a failover.
 All tests use only 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, the IPv6 documentation range 2001:db8::/32
 (for volume tests only) and names under `example.com`, `example.net` and `example.org`.
 
-Results for v0.9.0 (every system with the same final package):
+Results for v0.10.0 (every system with the same final code):
 
 | System | Checks |
 |---|---|
-| Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13 (`.deb`) | 159 of 159 each (one more: `apt purge`) |
-| AlmaLinux 8, 9, 10, Rocky Linux 9, Oracle Linux 9, Fedora 42, Amazon Linux 2023 (`.rpm`) | 158 of 158 each |
+| Ubuntu 22.04, Ubuntu 24.04, Debian 12, Debian 13 (`.deb`) | 199 of 199 each (one more: `apt purge`) |
+| AlmaLinux 8, 9, 10, Rocky Linux 9, Oracle Linux 9, Fedora 42, Amazon Linux 2023 (`.rpm`) | 198 of 198 each |
 
 It covers:
 building the package, `apt install` with its dependencies, Flask and gunicorn from the bundle (not the system), nothing running before setup, `setup --check`, refusing
@@ -1512,12 +1512,18 @@ expired certificate (the shared IP stays).
 On the Red Hat family the same test installs the `.rpm` with dnf, uses firewalld, and checks that `dnf remove`
 keeps the data and removes the firewall rules.
 
-The unit tests (338) also pass with the bundled libraries on Python 3.9 (the oldest supported) and Python 3.13
+The unit tests (359) also pass with the bundled libraries on Python 3.9 (the oldest supported) and Python 3.13
 (Debian 13).
 
-Docker results for v0.9.0 (the final code): `tests/docker/run.sh` 56 of 56, `tests/docker/lab.sh` 18 of 18,
-and on the two Hyper-V VMs (section 14) every API route and every `furnace` command through the shared IP, 120
-of 120.
+New in 0.10: the host firewall that is active (`tests/integration/firewall.sh`, 46 of 46 on Ubuntu 22.04, 24.04,
+Debian 12 and 13), `LEADER_IP`/`FOLLOWER_IP`, the join code, the SSH backup copy off by default (HTTPS broken
+with the backup off and on, an upgrade from 0.7 and from 0.9, turning it off), and `USE_HTTPS=no` refused.
+
+Docker results for v0.10.0 (the final code): `tests/docker/run.sh` 63 of 63, `tests/docker/lab.sh` 18 of 18,
+`tests/docker/external.sh` (keepalived on the host) 31 of 31, and on the two Hyper-V VMs (section 14) an upgrade
+from 0.9.0 with the same `.env` on both hosts, a follower that joins with a join code over the real network, and
+keepalived on the hosts next to another service's shared IP. In v0.9.0 the same VMs passed every API route and
+every `furnace` command through the shared IP (120 of 120).
 
 **SELinux test** on a real AlmaLinux 9.8 VM with SELinux enforcing (26 of 26 checks, v0.5.0): install with dnf,
 setup without questions (secrets written to the root-only file), the SELinux labels, keepalived making the server

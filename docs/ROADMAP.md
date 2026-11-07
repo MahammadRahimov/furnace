@@ -1,6 +1,6 @@
 # Furnace roadmap
 
-State on 2026-11-04: **v0.9.0 is released** (`.deb`, `.rpm` and the Docker image with its compose files). The list for the next version is in `docs/NEXT-RELEASE.md`. Next: the SSH removal. This file holds the plan for the next steps,
+State on 2026-11-07: **v0.10.0 is released** (`.deb`, `.rpm` and the Docker image with its compose files). The list for the next version is in `docs/NEXT-RELEASE.md`. Next: the user's choice. This file holds the plan for the next steps,
 so the work can continue later exactly where it stopped.
 
 ## Decisions so far
@@ -44,6 +44,7 @@ so the work can continue later exactly where it stopped.
 | 4 | v0.7.0 | Permanent IPs (`permanent: true` never expires; the same IP again changes nothing). The archive is a record of every different IP and domain ever blocked (first and last blocked, times blocked). Domains never expire. Schema 4 with a migration from 0.6. Unit tests 175. Integration 116/116 (`.deb`) and 115/115 (`.rpm`) on all 11 systems. |
 | 5 | v0.8.0 | Blocklist files through the API, the URL blocklist, replication over HTTPS every 20 seconds (SSH fallback), the domain whitelist protects subdomains and refuses shared platforms (Public Suffix List), the whitelist check, export and upload again, `incident_id` removed, 90 days by default, keepalived crash and expired-certificate fixes, the RHEL 8 certificate fix. Unit tests 323. Integration 159/159 (`.deb`) and 158/158 (`.rpm`) on all 11 systems. |
 | 6 | v0.9.0 | Docker: one image for the leader and the follower on two hosts (`docker-compose.yml` + `.env`, keepalived on the host network, HTTPS replication every 20 seconds, a built-in process manager), a one-host test lab, the image and the compose files on the release. Unit tests 338 (Python 3.9, 3.10, 3.13). Integration 159/159 (`.deb`) and 158/158 (`.rpm`) on all 11 systems. Docker 56/56 and lab 18/18; two Hyper-V VMs: failover, host down, API 120/120. |
+| 7 | v0.10.0 | Setup uses the active host firewall; `LEADER_IP`/`FOLLOWER_IP` (the same settings file on both hosts); a one-time join code instead of copying the bundle; Docker with the host's own keepalived (`FURNACE_KEEPALIVED=external`); deployment guides (`docs/deploy/`); the copy between the servers always over HTTPS, SSH only as an optional backup (off by default), plain HTTP removed. Unit tests 359 (Python 3.9, 3.10, 3.13). Integration 199/199 (`.deb`) and 198/198 (`.rpm`) on all 11 systems, firewall 46/46 on 4. Docker 63/63, lab 18/18, host keepalived 31/31; two Hyper-V VMs with the release image 44/44. |
 
 ## Next
 
