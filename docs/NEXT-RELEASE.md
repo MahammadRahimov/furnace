@@ -88,11 +88,30 @@ New `docs/deploy/`: one step-by-step guide for each way to deploy: packages (`.d
 keepalived in the container, and Docker with the host's own keepalived. Each guide has the order of the steps, the
 ports to open and the failover test. Linked from the README.
 
-### Decided, not started
+### 6. SSH replication becomes an optional backup, off by default (done 2026-11-07, tests passed)
 
-Decided 2026-11-07 (user), being built now (replaces the 2026-11-01 decision to remove SSH replication):
-**SSH replication stays, but as an optional backup, off by default.** HTTPS is always on; with
-`REPLICATION_SSH_FALLBACK=yes` the leader copies over SSH only when HTTPS does not work, and `furnace status` warns.
-(1) Plain HTTP (`USE_HTTPS=no`, a test setting) is removed. (2) The admin's own SSH rule (`SSH allowed from`)
-stays. (3) An upgrade from 0.9 turns SSH off and removes `furnace-sync` and its login; a server from 0.7 or older
-keeps SSH on during the upgrade, with a note to turn it off. Your own certificate: not wanted (user, 2026-11-07).
+Decided by the user 2026-11-07 (replaces the 2026-11-01 decision to remove SSH replication). Packages only;
+Docker never used SSH.
+
+- **The copy to the other server always goes over HTTPS** (port 443, every 20 seconds), as before.
+- **SSH is an optional backup:** setup asks "Use SSH as a backup for the copy to the other server?" (default no);
+  in a settings file `REPLICATION_SSH_FALLBACK=yes`. With it on, the leader copies over SSH only when HTTPS does
+  not work, and `furnace status` warns: "HTTPS does not work: the copy went over the SSH backup".
+- **With the backup off** (the default) there is no `furnace-sync` user, no SSH login for it, and no SSH rule
+  between the servers in the host firewall. Turning it off later removes them. When the copy fails,
+  `furnace status` says what to check and that the SSH backup is off.
+- **Plain HTTP is removed.** `USE_HTTPS=no` (a test setting) is refused with a clear message; an upgrade switches
+  it to HTTPS with a note.
+- The admin's own SSH rule (`SSH allowed from`) stays as it is.
+- **Upgrade from 0.9:** SSH is turned off and `furnace-sync`, its login and its firewall rule are removed.
+  **Upgrade from 0.7 or older** (no HTTPS secret yet): the SSH backup stays on, with a note to turn it off once
+  HTTPS works.
+
+**Tests:** 359 unit tests; the integration round 199/199 on Ubuntu 22.04/24.04 and Debian 12/13 and 198/198 on
+AlmaLinux 8/9/10, Rocky 9, Oracle 9, Fedora 42 and Amazon Linux 2023 (backup off by default, HTTPS broken with
+the backup off and on, a simulated 0.7 upgrade, turning it off, the 0.9 upgrade clean-up, `USE_HTTPS=no`
+refused); the firewall test 46/46 on 4 systems; Docker test 63/63; Docker with keepalived on the host 31/31.
+
+### Decided, not wanted
+
+- Your own certificate (bring your own TLS certificate): not wanted (user, 2026-11-07).
