@@ -159,13 +159,14 @@ fi
 # --------------------------------------------------------------------------- settings
 
 KEYS="ROLE LEADER_IP FOLLOWER_IP THIS_IP PEER_IP SHARED_IP SHARED_IP_PREFIX INTERFACE API_ALLOW_FROM LISTS_ALLOW_FROM ARCHIVE_AFTER_DAYS
-KEEPALIVED_PASSWORD VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS SSH_ALLOW_FROM HOST_FIREWALL"
+KEEPALIVED_PASSWORD VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS SSH_ALLOW_FROM HOST_FIREWALL REPLICATION_SSH_FALLBACK"
+# USE_HTTPS is only read (old files): since 0.10.0 Furnace always uses HTTPS.
 # The order the checks run in: later checks use the earlier values.
 CHECK_ORDER="ROLE INTERFACE THIS_IP PEER_IP SHARED_IP SHARED_IP_PREFIX API_ALLOW_FROM LISTS_ALLOW_FROM ARCHIVE_AFTER_DAYS
-KEEPALIVED_PASSWORD VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS SSH_ALLOW_FROM HOST_FIREWALL"
+KEEPALIVED_PASSWORD VRRP_ROUTER_ID MAX_IPS MAX_DOMAINS SSH_ALLOW_FROM HOST_FIREWALL REPLICATION_SSH_FALLBACK"
 # Settings the follower takes from the leader. They must be the same on both servers.
 SHARED_KEYS="SHARED_IP SHARED_IP_PREFIX API_ALLOW_FROM LISTS_ALLOW_FROM ARCHIVE_AFTER_DAYS KEEPALIVED_PASSWORD
-VRRP_ROUTER_ID USE_HTTPS MAX_IPS MAX_DOMAINS"
+VRRP_ROUTER_ID MAX_IPS MAX_DOMAINS REPLICATION_SSH_FALLBACK"
 # The first API token. Used only while the leader has no token yet, so they are not saved in setup.conf.
 TOKEN_KEYS="TOKEN_NAME TOKEN_ALLOW TOKEN_EXPIRES_DAYS"
 # Used once, never saved: the follower's join code (made on the leader with: sudo furnace join-code).
@@ -262,6 +263,9 @@ PY
 
 selinux_on() { command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; }
 
+# ssh_peer_text TEXT: TEXT when the SSH backup copy is on (it needs SSH between the servers), else nothing.
+ssh_peer_text() { if [ "$CFG_REPLICATION_SSH_FALLBACK" = "yes" ]; then printf '%s' "$1"; fi; }
+
 web_sources_text() {
     if [ "$CFG_LISTS_ALLOW_FROM" = "any" ] || [ "$CFG_API_ALLOW_FROM" = "any" ]; then
         echo "any address"
@@ -320,7 +324,9 @@ check_KEEPALIVED_PASSWORD() {
     [ "$1" != "Chg3Me!x" ] || { echo "KEEPALIVED_PASSWORD is still the example value. Choose your own or leave it empty."; return 1; }
 }
 check_VRRP_ROUTER_ID() { is_int_between "$1" 1 255 || { echo "VRRP_ROUTER_ID must be a number from 1 to 255."; return 1; }; }
-check_USE_HTTPS() { [[ "$1" =~ ^(yes|no)$ ]] || { echo "USE_HTTPS must be 'yes' or 'no'."; return 1; }; }
+check_REPLICATION_SSH_FALLBACK() {
+    [[ "$1" =~ ^(yes|no)$ ]] || { echo "REPLICATION_SSH_FALLBACK must be 'yes' or 'no'."; return 1; }
+}
 check_MAX_IPS() { is_int_between "$1" 0 10000000 || { echo "MAX_IPS must be a number (0 means no limit)."; return 1; }; }
 check_MAX_DOMAINS() { is_int_between "$1" 0 10000000 || { echo "MAX_DOMAINS must be a number (0 means no limit)."; return 1; }; }
 check_SSH_ALLOW_FROM() {
@@ -410,7 +416,7 @@ new_password() {
 
 # Fill in what is still empty. Cards and IPs are found on this server.
 fill_defaults() {
-    : "${CFG_SHARED_IP_PREFIX:=24}" "${CFG_VRRP_ROUTER_ID:=51}" "${CFG_USE_HTTPS:=yes}"
+    : "${CFG_SHARED_IP_PREFIX:=24}" "${CFG_VRRP_ROUTER_ID:=51}" "${CFG_REPLICATION_SSH_FALLBACK:=$SSH_FALLBACK_DEFAULT}"
     : "${CFG_MAX_IPS:=50000}" "${CFG_MAX_DOMAINS:=50000}" "${CFG_SSH_ALLOW_FROM:=any}"
     : "${CFG_HOST_FIREWALL:=$HOST_FW_TOOL}" "${CFG_ARCHIVE_AFTER_DAYS:=90}" "${CFG_API_ALLOW_FROM:=any}" "${CFG_LISTS_ALLOW_FROM:=any}"
     : "${CFG_TOKEN_NAME:=api}" "${CFG_TOKEN_ALLOW:=all}" "${CFG_TOKEN_EXPIRES_DAYS:=0}"
@@ -491,6 +497,7 @@ apply_bundle() {
     local strict="$1" k b c
     for k in $SHARED_KEYS; do
         b="B_$k"; c="CFG_$k"
+        [ -n "${!b}" ] || continue   # a setting the leader's (older) Furnace does not have yet
         if [ "$strict" -eq 1 ] && [ -n "${!c}" ] && [ "${!c}" != "${!b}" ]; then
             die "$k is '${!c}' in your settings file, but '${!b}' on the leader. Both servers need the same value. Remove it from the file or use the leader's value."
         fi
@@ -625,8 +632,15 @@ ask_all() {
     ask ARCHIVE_AFTER_DAYS "Days an IP stays blocked (permanent IPs never expire)" "${CFG_ARCHIVE_AFTER_DAYS:-90}"
     note "VRRP router ID: the same on both servers, unique in this network. Keep 51 if you are not sure."
     ask VRRP_ROUTER_ID "VRRP router ID (1-255)" "${CFG_VRRP_ROUTER_ID:-51}"
-    note "Who may log in with SSH: 'any', or IPs separated by commas. The other server is always allowed."
+    note "Who may log in with SSH (people, for example admins): 'any', or IPs separated by commas."
     ask SSH_ALLOW_FROM "SSH allowed from" "${CFG_SSH_ALLOW_FROM:-any}"
+    note "The leader copies the data to the follower over HTTPS. SSH can be a backup for when HTTPS does not work."
+    info "  Most servers do not need it. It adds a user (furnace-sync) and SSH between the two servers."
+    if ask_yes_no "Use SSH as a backup for the copy to the other server?" "${CFG_REPLICATION_SSH_FALLBACK:-$SSH_FALLBACK_DEFAULT}"; then
+        CFG_REPLICATION_SSH_FALLBACK=yes
+    else
+        CFG_REPLICATION_SSH_FALLBACK=no
+    fi
     ask_host_firewall leader
 }
 
@@ -723,7 +737,8 @@ show_settings() {
         "Other server" "$CFG_PEER_IP" "Shared IP" "$CFG_SHARED_IP/$CFG_SHARED_IP_PREFIX" "API from" "$CFG_API_ALLOW_FROM" \
         "Lists from" "$CFG_LISTS_ALLOW_FROM" "Most entries per list" "$CFG_MAX_IPS" \
         "IPs expire after" "$CFG_ARCHIVE_AFTER_DAYS days" "VRRP router ID" "$CFG_VRRP_ROUTER_ID" \
-        "SSH allowed from" "$CFG_SSH_ALLOW_FROM" "Host firewall" "$CFG_HOST_FIREWALL" "HTTPS" "$CFG_USE_HTTPS"
+        "SSH allowed from" "$CFG_SSH_ALLOW_FROM" "SSH backup copy" "$CFG_REPLICATION_SSH_FALLBACK" \
+        "Host firewall" "$CFG_HOST_FIREWALL"
     if needs_first_token; then
         local expiry="never"
         [ "$CFG_TOKEN_EXPIRES_DAYS" = 0 ] || expiry="after $CFG_TOKEN_EXPIRES_DAYS days"
@@ -742,7 +757,7 @@ write_setup_conf() {
             for k in $KEYS; do
                 var="CFG_$k"
                 case "$k" in
-                    THIS_IP|PEER_IP) continue ;;
+                    THIS_IP|PEER_IP|USE_HTTPS) continue ;;
                     LEADER_IP) if [ "$CFG_ROLE" = leader ]; then var=CFG_THIS_IP; else var=CFG_PEER_IP; fi ;;
                     FOLLOWER_IP) if [ "$CFG_ROLE" = leader ]; then var=CFG_PEER_IP; else var=CFG_THIS_IP; fi ;;
                 esac
@@ -754,6 +769,15 @@ write_setup_conf() {
 }
 
 # --------------------------------------------------------------------------- collect the settings
+
+# The SSH backup copy is off unless asked for. A server set up before 0.8 has no replication secret yet: the
+# other server may still run that old version, which can only copy over SSH. Then SSH stays on for now.
+SSH_FALLBACK_DEFAULT=no
+OLD_SSH_ONLY=0
+if [ -f "$SETUP_CONF" ] && [ ! -f "$ETC/secrets/replica-secret" ]; then
+    SSH_FALLBACK_DEFAULT=yes
+    OLD_SSH_ONLY=1
+fi
 
 case "$MODE" in
     upgrade)
@@ -795,6 +819,15 @@ case "$MODE" in
 esac
 fill_defaults
 validate_all
+if [ "$CFG_USE_HTTPS" = "no" ]; then
+    # Plain HTTP (a test-lab setting) was removed in 0.10.0.
+    [ "$MODE" = "upgrade" ] || die "USE_HTTPS=no (plain HTTP) was removed in 0.10.0: Furnace always uses HTTPS. Remove the line."
+    TODO+=("Plain HTTP (USE_HTTPS=no) was removed in 0.10.0. This server now uses HTTPS on port 443: change the list and API URLs to https:// and trust $ETC/tls/furnace.crt.")
+fi
+CFG_USE_HTTPS=yes
+if [ "$OLD_SSH_ONLY" = 1 ] && [ "$CFG_REPLICATION_SSH_FALLBACK" = "yes" ]; then
+    TODO+=("The SSH backup copy is on, because this server came from Furnace 0.7 or older (the other server may still need it). When both servers run this version, turn it off: sudo furnace setup on both, answer no to the SSH backup question.")
+fi
 
 if [ "$MODE" = "ask" ]; then
     show_settings
@@ -803,7 +836,8 @@ if [ "$MODE" = "ask" ]; then
 fi
 
 if [ "$CFG_ROLE" = "leader" ]; then PRIORITY=150; else PRIORITY=100; fi
-if [ "$CFG_USE_HTTPS" = "yes" ]; then WEB_PORT=443; SCHEME=https; else WEB_PORT=80; SCHEME=http; fi
+WEB_PORT=443
+SCHEME=https
 SSH_PORT="$( (sshd -T 2>/dev/null || true) | awk '$1=="port"{print $2; exit}')"
 SSH_PORT="${SSH_PORT:-22}"
 decide_host_firewall
@@ -819,12 +853,14 @@ if [ "$CHECK" -eq 1 ]; then
                          || info "Furnace is not set up yet. This run would SET IT UP."
     info "Settings: role $CFG_ROLE, this server $CFG_THIS_IP on $CFG_INTERFACE, other server $CFG_PEER_IP,"
     info "  shared IP $CFG_SHARED_IP/$CFG_SHARED_IP_PREFIX, API from $CFG_API_ALLOW_FROM, lists from $CFG_LISTS_ALLOW_FROM"
-    info "Users: furnace (no login), furnace-sync (replication only, forced command)"
+    if [ "$CFG_REPLICATION_SSH_FALLBACK" = "yes" ]; then
+        info "Users: furnace (no login), furnace-sync (the SSH backup copy only, forced command)"
+    else
+        info "Users: furnace (no login). SSH backup copy: off (no furnace-sync user)."
+    fi
     info "Database $DATA/furnace.db: $(exists "$DATA/furnace.db")"
     info "API tokens and list login: in the database. Made on the leader if there are none, then shown once."
-    if [ "$CFG_USE_HTTPS" = "yes" ]; then
-        info "Certificate $ETC/tls/furnace.crt: $(exists "$ETC/tls/furnace.crt")"
-    fi
+    info "Certificate $ETC/tls/furnace.crt: $(exists "$ETC/tls/furnace.crt")"
     info "Replication key $ETC/ssh/replica_key: $(exists "$ETC/ssh/replica_key")"
     if [ "$CFG_ROLE" = "follower" ] && ! have_secrets; then
         info "Follower: secrets come from the leader bundle $BUNDLE"
@@ -835,7 +871,7 @@ if [ "$CHECK" -eq 1 ]; then
     info "Host firewall active now: $FW_ACTIVE."
     if [ "$FW_APPLY" != "none" ]; then
         [ "$FW_TURN_ON" -eq 1 ] && info "Host firewall $FW_APPLY is off now: setup turns it on."
-        info "Host firewall ($FW_APPLY): allow SSH port $SSH_PORT from $CFG_SSH_ALLOW_FROM and $CFG_PEER_IP,"
+        info "Host firewall ($FW_APPLY): allow SSH port $SSH_PORT from $CFG_SSH_ALLOW_FROM$(ssh_peer_text " and $CFG_PEER_IP"),"
         info "  port $WEB_PORT from $(web_sources_text),"
         info "  VRRP (protocol 112) from $CFG_PEER_IP. Deny everything else coming in."
     else
@@ -855,36 +891,45 @@ exec > >(tee -a "$LOG") 2>&1
 LOGGING=1
 printf '\n----- Furnace setup started %s (%s) -----\n' "$(date -u +%FT%TZ)" "$MODE"
 
-# Replication needs the SSH server. Ubuntu 24.04 starts it through ssh.socket, the others through
+# The SSH backup copy needs the SSH server. Ubuntu 24.04 starts it through ssh.socket, the others through
 # ssh.service (Debian family) or sshd.service (Red Hat family).
-if ! systemctl is-active --quiet "$SSH_UNIT.service" && ! systemctl is-active --quiet "$SSH_UNIT.socket"; then
+if [ "$CFG_REPLICATION_SSH_FALLBACK" = "yes" ] && ! systemctl is-active --quiet "$SSH_UNIT.service" \
+        && ! systemctl is-active --quiet "$SSH_UNIT.socket"; then
     if systemctl cat "$SSH_UNIT.socket" >/dev/null 2>&1 && [ "${ID}:${VERSION_ID}" = "ubuntu:24.04" ]; then
         systemctl enable --quiet --now "$SSH_UNIT.socket"
     else
         systemctl enable --quiet --now "$SSH_UNIT.service"
     fi
-    ok "SSH server started (needed for replication)"
+    ok "SSH server started (needed for the SSH backup copy)"
 fi
 
 say "Creating users and folders"
 if ! id furnace >/dev/null 2>&1; then
     useradd --system --user-group --home-dir "$DATA" --no-create-home --shell /usr/sbin/nologin furnace
 fi
-if ! id furnace-sync >/dev/null 2>&1; then
-    useradd --system --user-group --home-dir "$SYNC_HOME" --create-home --shell /bin/sh furnace-sync
+if [ "$CFG_REPLICATION_SSH_FALLBACK" = "yes" ]; then
+    if ! id furnace-sync >/dev/null 2>&1; then
+        useradd --system --user-group --home-dir "$SYNC_HOME" --create-home --shell /bin/sh furnace-sync
+    fi
+    usermod -p '*' furnace-sync   # no password; only the replication key can log in
 fi
-usermod -p '*' furnace-sync   # no password; only the replication key can log in
 install -d -m 0750 -o root -g furnace "$ETC"
 install -d -m 0750 -o root -g furnace "$ETC/tls"     # the furnace user reads the certificate (not the key)
 install -d -m 0750 -o root -g furnace "$ETC/secrets" "$ETC/ssh"
 install -d -m 0750 -o furnace -g furnace "$DATA" "$DATA/archive" "$DATA/backups" "$DATA/reports" "$DATA/replica"
 install -d -m 0755 -o furnace -g furnace "$EDL"
 install -d -m 2750 -o furnace -g "$NGINX_GROUP" "$AUTH"   # the list users file: nginx reads it
-install -d -m 2750 -o furnace-sync -g furnace "$INCOMING"
-install -d -m 0700 -o furnace-sync -g furnace-sync "$SYNC_HOME" "$SYNC_HOME/.ssh"
+if [ "$CFG_REPLICATION_SSH_FALLBACK" = "yes" ]; then
+    install -d -m 2750 -o furnace-sync -g furnace "$INCOMING"
+    install -d -m 0700 -o furnace-sync -g furnace-sync "$SYNC_HOME" "$SYNC_HOME/.ssh"
+fi
 install -d -m 0755 "$STATE_DIR"
 [ -f "$STATE_DIR/role" ] || echo follower > "$STATE_DIR/role"
-ok "Users furnace and furnace-sync, and folders are ready"
+if [ "$CFG_REPLICATION_SSH_FALLBACK" = "yes" ]; then
+    ok "Users furnace and furnace-sync (SSH backup copy), and folders are ready"
+else
+    ok "User furnace and folders are ready (SSH backup copy off)"
+fi
 
 write_setup_conf
 ok "Settings saved in $SETUP_CONF"
@@ -983,11 +1028,11 @@ else
         fi
     fi
 fi
-if [ "$CFG_USE_HTTPS" = "yes" ] && ! cert_names_ok "$ETC/tls/furnace.crt"; then
+if ! cert_names_ok "$ETC/tls/furnace.crt"; then
     warn "The certificate does not name all of ${CFG_SHARED_IP}, ${CFG_THIS_IP}, ${CFG_PEER_IP}."
     warn "If the IPs changed: delete $ETC/tls on the leader, run setup there, then on the follower."
     TODO+=("Fix the certificate: it does not name all server IPs.")
-elif [ "$CFG_USE_HTTPS" = "yes" ] && cert_repeated "$ETC/tls/furnace.crt"; then
+elif cert_repeated "$ETC/tls/furnace.crt"; then
     warn "The certificate has an extension twice (made by an older setup on RHEL 8). Some programs reject it."
     warn "Make a new one: delete $ETC/tls on the leader, run setup there, then on the follower. Then load the new furnace.crt on the firewall."
     TODO+=("Make a new certificate: the current one has an extension twice.")
@@ -1017,18 +1062,12 @@ allow_lines() {
 }
 R_LISTS_ALLOW="$(allow_lines "$CFG_LISTS_ALLOW_FROM")"
 R_API_ALLOW="$(allow_lines "$CFG_API_ALLOW_FROM")"
-if [ "$CFG_USE_HTTPS" = "yes" ]; then
-    R_LISTEN="    listen 443 ssl;"
-    R_TLS="    ssl_certificate $ETC/tls/furnace.crt;
+R_LISTEN="    listen 443 ssl;"
+R_TLS="    ssl_certificate $ETC/tls/furnace.crt;
     ssl_certificate_key $ETC/tls/furnace.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_session_cache shared:furnace_tls:5m;"
-else
-    R_LISTEN="    listen 80;"
-    R_TLS="    # Plain HTTP (USE_HTTPS=no). Test lab only."
-fi
-if [ "$CFG_USE_HTTPS" = "yes" ]; then
-    R_REPLICA="    # Replication: only the other server may send a snapshot (with the replication secret).
+R_REPLICA="    # Replication: only the other server may send a snapshot (with the replication secret).
     location = /replica/snapshot {
         allow ${CFG_PEER_IP};
         deny all;
@@ -1047,9 +1086,6 @@ if [ "$CFG_USE_HTTPS" = "yes" ]; then
         proxy_set_header X-Forwarded-For \$remote_addr;
     }
 "
-else
-    R_REPLICA="    # Plain HTTP (USE_HTTPS=no): replication uses SSH only."
-fi
 export R_LISTS_ALLOW R_API_ALLOW R_LISTEN R_TLS R_REPLICA
 
 render() { "$PY" "$LIB/render.py" "$1" "$2"; }
@@ -1069,7 +1105,7 @@ THIS_IP=$CFG_THIS_IP
 PEER_IP=$CFG_PEER_IP
 SHARED_IP=$CFG_SHARED_IP
 INTERFACE=$CFG_INTERFACE
-USE_HTTPS=$CFG_USE_HTTPS
+REPLICATION_SSH_FALLBACK=$CFG_REPLICATION_SSH_FALLBACK
 EOF
 chmod 0644 "$ETC/install.env"
 ok "Wrote $ETC/furnace.env and $ETC/install.env"
@@ -1089,11 +1125,20 @@ EOF
     ok "Wrote $ETC/whitelist-refuse.txt (your own names that may never be whitelisted; empty)"
 fi
 
-PUBKEY="$(cat "$ETC/ssh/replica_key.pub")"
-printf 'restrict,command="%s/bin/furnace-receive-replica" %s\n' "$LIB" "$PUBKEY" > "$SYNC_HOME/.ssh/authorized_keys"
-chown furnace-sync:furnace-sync "$SYNC_HOME/.ssh/authorized_keys"
-chmod 0600 "$SYNC_HOME/.ssh/authorized_keys"
-ok "Replication login prepared (furnace-sync may only receive snapshots)"
+if [ "$CFG_REPLICATION_SSH_FALLBACK" = "yes" ]; then
+    PUBKEY="$(cat "$ETC/ssh/replica_key.pub")"
+    printf 'restrict,command="%s/bin/furnace-receive-replica" %s\n' "$LIB" "$PUBKEY" > "$SYNC_HOME/.ssh/authorized_keys"
+    chown furnace-sync:furnace-sync "$SYNC_HOME/.ssh/authorized_keys"
+    chmod 0600 "$SYNC_HOME/.ssh/authorized_keys"
+    ok "SSH backup copy prepared (furnace-sync may only receive snapshots)"
+elif id furnace-sync >/dev/null 2>&1 || [ -d "$SYNC_HOME" ] || [ -d "$INCOMING" ]; then
+    # Off (the default since 0.10.0): remove the SSH login of an older version. The key file stays: it
+    # opens nothing without this login, and it lets the backup be turned on again without a new join code.
+    systemctl disable --quiet --now furnace-apply-replica.path 2>/dev/null || true
+    userdel furnace-sync >/dev/null 2>&1 || true
+    rm -rf "$SYNC_HOME" "$INCOMING"
+    ok "SSH backup copy is off: removed the user furnace-sync and its login (copies go over HTTPS)"
+fi
 
 render "$LIB/templates/nginx-furnace.conf.tmpl" "$NGINX_CONF"
 if [ "$FAMILY" = "debian" ]; then
@@ -1162,7 +1207,14 @@ if [ "$FW_APPLY" = "ufw" ]; then
             ufw allow from "$src" to any port "$SSH_PORT" proto tcp comment 'furnace ssh' >/dev/null
         done
     fi
-    ufw allow from "$CFG_PEER_IP" to any port "$SSH_PORT" proto tcp comment 'furnace replication' >/dev/null
+    if [ "$CFG_REPLICATION_SSH_FALLBACK" = "yes" ]; then
+        ufw allow from "$CFG_PEER_IP" to any port "$SSH_PORT" proto tcp comment 'furnace replication' >/dev/null
+    else   # the SSH backup copy is off: the other server's SSH rule (from an older version) goes
+        while num="$( (ufw status numbered 2>/dev/null || true) | grep -E '# furnace replication' | head -n1 \
+                      | sed -E 's/^\[ *([0-9]+)\].*/\1/' || true)" && [ -n "$num" ]; do
+            ufw --force delete "$num" >/dev/null
+        done
+    fi
     # Old web rules go first, so a changed answer (for example a new API caller IP) leaves nothing behind.
     while num="$( (ufw status numbered 2>/dev/null || true) | grep -E '# furnace web' | head -n1 \
                   | sed -E 's/^\[ *([0-9]+)\].*/\1/' || true)" && [ -n "$num" ]; do
@@ -1213,7 +1265,7 @@ elif [ "$FW_APPLY" = "firewalld" ]; then
     else
         for src in $(split_list "$CFG_SSH_ALLOW_FROM"); do allow_port "$SSH_PORT" "$src"; done
     fi
-    allow_port "$SSH_PORT" "$CFG_PEER_IP"
+    if [ "$CFG_REPLICATION_SSH_FALLBACK" = "yes" ]; then allow_port "$SSH_PORT" "$CFG_PEER_IP"; fi
     if [ "$CFG_LISTS_ALLOW_FROM" = "any" ] || [ "$CFG_API_ALLOW_FROM" = "any" ]; then
         allow_port "$WEB_PORT" any
     else
@@ -1250,12 +1302,13 @@ if selinux_on; then
     }
     label httpd_sys_content_t "$EDL(/.*)?"
     label httpd_sys_content_t "$AUTH(/.*)?"
-    label ssh_home_t "$SYNC_HOME/\.ssh(/.*)?"
+    label ssh_home_t "$SYNC_HOME/\.ssh(/.*)?"   # the SSH backup copy (when it is on)
     # The scripts are programs: as bin_t, systemd runs them in the normal service domain
     # (unconfined_service_t). As lib_t they would stay in init_t, which may not run ssh.
     label bin_t "$LIB/bin(/.*)?"
     label keepalived_unconfined_script_exec_t "$LIB/bin/furnace-(health-check|notify)"
-    restorecon -RF "$EDL" "$AUTH" "$SYNC_HOME/.ssh" "$LIB/bin"
+    restorecon -RF "$EDL" "$AUTH" "$LIB/bin"
+    if [ -d "$SYNC_HOME/.ssh" ]; then restorecon -RF "$SYNC_HOME/.ssh"; fi
     if [ "$(getsebool httpd_can_network_connect 2>/dev/null | awk '{print $3}')" != "on" ]; then
         setsebool -P httpd_can_network_connect on   # nginx -> the API on 127.0.0.1:8081
     fi
@@ -1278,7 +1331,10 @@ fi
 echo "$API_UNIT_SUM" > "$ETC/.api-unit.sha256"
 systemctl enable --quiet nginx
 if systemctl is-active --quiet nginx; then systemctl reload nginx; else systemctl start nginx; fi
-systemctl enable --quiet --now furnace-replicate.timer furnace-backup.timer furnace-apply-replica.path
+systemctl enable --quiet --now furnace-replicate.timer furnace-backup.timer
+if [ "$CFG_REPLICATION_SSH_FALLBACK" = "yes" ]; then
+    systemctl enable --quiet --now furnace-apply-replica.path   # loads the snapshots that came over SSH
+fi
 systemctl enable --quiet keepalived
 if [ "$KEEPALIVED_CHANGED" -eq 1 ] || ! systemctl is-active --quiet keepalived; then
     systemctl restart keepalived
@@ -1291,7 +1347,7 @@ ok "Services started: furnace-api, nginx, keepalived, replication, backup"
 # --------------------------------------------------------------------------- self-test
 
 CURL=(curl -sS --max-time 10)
-[ "$CFG_USE_HTTPS" = "yes" ] && CURL+=(--cacert "$ETC/tls/furnace.crt")
+CURL+=(--cacert "$ETC/tls/furnace.crt")
 BASE="${SCHEME}://127.0.0.1"
 TEST_IP=192.0.2.123
 
@@ -1466,7 +1522,7 @@ if [ "$MODE" != "upgrade" ]; then
         fi
         TODO+=("Follower ($CFG_PEER_IP): copy /root/$BUNDLE_NAME and $PKG_HINT && sudo furnace setup")
     fi
-    TODO+=("Allow on the network: list readers and API callers -> $CFG_SHARED_IP:$WEB_PORT, VRRP and SSH between $CFG_THIS_IP and $CFG_PEER_IP.")
+    TODO+=("Allow on the network: list readers and API callers -> $CFG_SHARED_IP:$WEB_PORT, HTTPS and VRRP between $CFG_THIS_IP and $CFG_PEER_IP$(ssh_peer_text ", and SSH (the backup copy is on)").")
     TODO+=("Device that downloads the lists (for example a firewall): trust $ETC/tls/furnace.crt and add the two lists with the list login. See the README.")
     TODO+=("System that calls the API (for example a SOAR): store the API token and trust the certificate. See the API guide in the README.")
     TODO+=("After both servers are set up: run sudo furnace failover-test on the leader.")
